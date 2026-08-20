@@ -2768,11 +2768,10 @@ class MinimapRouteRecorder:
 
     def _match_character(self, frame):
         """在游戏画面中用模板匹配查找人物位置
-        Args:
-            frame: 游戏窗口截图 (BGR numpy)
+        1. 全图搜索（阈值0.70）
+        2. 全图失败时在上次位置附近ROI搜索（阈值0.55），避免战斗中短暂丢人物
         Returns:
             (center_x, center_y, confidence) 或 None
-            坐标为游戏窗口内的像素坐标
         """
         if not self._char_templates or frame is None:
             if not self._char_templates:
@@ -2799,12 +2798,47 @@ class MinimapRouteRecorder:
         if best_score >= CHAR_MATCH_THRESHOLD and best_loc is not None:
             cx = best_loc[0] + best_tpl["width"] // 2
             cy = best_loc[1] + best_tpl["height"] // 2
+            self._last_char_match_pos = (cx, cy)
+            self._last_char_match_time = time.time() * 1000
             return (cx, cy, best_score)
-        # 匹配分数不足：节流日志提示实际分数，方便排查阈值/模板问题
+
+        # === ROI回退：在上次成功位置附近160x160范围搜索，阈值降到0.55 ===
+        last_pos = getattr(self, '_last_char_match_pos', None)
+        if last_pos:
+            lx, ly = last_pos
+            roi_x1 = max(0, lx - 80)
+            roi_y1 = max(0, ly - 80)
+            roi_x2 = min(fw, lx + 80)
+            roi_y2 = min(fh, ly + 80)
+            roi = frame[roi_y1:roi_y2, roi_x1:roi_x2]
+            if roi.shape[0] > 20 and roi.shape[1] > 20:
+                roi_best = 0
+                roi_loc = None
+                roi_tpl = None
+                for tpl in self._char_templates:
+                    timg = tpl["img"]
+                    th, tw = timg.shape[:2]
+                    if th > roi.shape[0] or tw > roi.shape[1]:
+                        continue
+                    result = cv2.matchTemplate(roi, timg, cv2.TM_CCOEFF_NORMED)
+                    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+                    if max_val > roi_best:
+                        roi_best = max_val
+                        roi_loc = max_loc
+                        roi_tpl = tpl
+                if roi_best >= 0.55 and roi_loc is not None:
+                    cx = roi_x1 + roi_loc[0] + roi_tpl["width"] // 2
+                    cy = roi_y1 + roi_loc[1] + roi_tpl["height"] // 2
+                    self._last_char_match_pos = (cx, cy)
+                    self._last_char_match_time = time.time() * 1000
+                    _debug_log("[人物匹配] ROI回退成功 %.2f (全图%.2f) 位置(%d,%d)" % (roi_best, best_score, cx, cy))
+                    return (cx, cy, roi_best)
+
+        # 全图+ROI都失败：节流日志
         _now = time.time()
         if not hasattr(self, '_last_lowscore_log') or _now - self._last_lowscore_log > 5:
             self._last_lowscore_log = _now
-            _debug_log("[人物匹配] 最佳匹配度 %.2f 低于阈值 %.2f" % (best_score, CHAR_MATCH_THRESHOLD))
+            _debug_log("[人物匹配] 全图%.2f ROI失败，低于阈值%.2f" % (best_score, CHAR_MATCH_THRESHOLD))
         return None
 
     def _show_offset_feedback(self):
@@ -3957,7 +3991,11 @@ class MinimapRouteRecorder:
         send_key(vk, scan, ext)  # keydown
         time.sleep(duration / 1000.0)
         send_key(vk, scan, ext | 0x0002)  # keyup (KEYEVENTF_KEYUP)
-        _debug_log("SendInput(扫描码)已发送 fg_ok=%d attached=%d game_thread=%d dur=%d" % (fg_ok, attached, game_thread, duration))
+        # keybd_event双发兜底（DirectInput游戏有时只认keybd_event）
+        user32.keybd_event(vk, scan, ext, 0)
+        time.sleep(duration / 1000.0 * 0.5)
+        user32.keybd_event(vk, scan, ext | 0x0002, 0)
+        _debug_log("SendInput(扫描码)+keybd_event双发已发送 fg_ok=%d attached=%d dur=%d" % (fg_ok, attached, duration))
         time.sleep(0.05)
 
         # 恢复原前台窗口并分离线程
@@ -3989,6 +4027,29 @@ class MinimapRouteRecorder:
                                              y_center=hy, y_tol=6, max_w=120)
         if mp_bar is None:
             mp_bar = self._find_longest_hbar(mp_mask, y_start, max_w=120)
+
+        # === 低血量兜底：红色/蓝色填充<20px时_find_longest_hbar返回None ===
+        # 用上次稳定位置兜底（条的y坐标基本不变）
+        if hp_bar is None and getattr(self, '_hp_bar_stable', None):
+            hp_bar = self._hp_bar_stable
+            _debug_log("HP颜色检测失败(<20px)，使用稳定缓存 y=%d" % hp_bar[1])
+        if mp_bar is None and getattr(self, '_mp_bar_stable', None):
+            mp_bar = self._mp_bar_stable
+            _debug_log("MP颜色检测失败(<20px)，使用稳定缓存 y=%d" % mp_bar[1])
+        # 首次就低血量：扫描底部25px任意红色像素找y坐标
+        if hp_bar is None:
+            for row in range(hp_mask.shape[0]):
+                if hp_mask[row].sum() >= 1:
+                    hp_bar = (0, y_start + row, 0)  # 占位，下面替换为固定位置
+                    _debug_log("HP首次低血量，扫描到红色行 y=%d" % (y_start + row))
+                    break
+        if mp_bar is None and hp_bar:
+            for row in range(mp_mask.shape[0]):
+                if mp_mask[row].sum() >= 1:
+                    mp_bar = (0, y_start + row, 0)
+                    _debug_log("MP首次低血量，扫描到蓝色行 y=%d" % (y_start + row))
+                    break
+
         # 固定血条位置和宽度（窗口大小固定1382x807，坐标不变）
         # HP条：左=510，宽=107；MP条：左=619，宽=107（和HP一样长）
         FIXED_HP_LEFT = 510
@@ -4090,9 +4151,9 @@ class MinimapRouteRecorder:
     COLOR_MATCH_DIST = 50         # 欧氏距离阈值，小于此值算同色
 
     def _is_bar_blank_at(self, frame, bar, pct, color_type):
-        """竖框检测：在pct%位置取竖框，框内100%是灰色背景则判定为低于阈值=加药。
-        灰色背景原色BGR=(190,190,190)，纯色不变色，用颜色距离判定。
-        框内全部是灰色 = 空 = 血/蓝已用完 = 加药"""
+        """竖框检测：在pct%位置取竖框，框内100%是纯灰色才判定为低于阈值=加药。
+        严格灰色判定：距离(190,190,190)<=12，且明确排除红色占优/蓝色占优像素。
+        框内有一点红/蓝就不加药。框内全部灰色=空=血/蓝已用完=加药"""
         if bar is None or frame is None:
             return False
         x, y, bw = bar
@@ -4103,7 +4164,7 @@ class MinimapRouteRecorder:
         if bar_h <= 0:
             return False
         GRAY_B, GRAY_G, GRAY_R = 190, 190, 190
-        GRAY_DIST_SQ = 25 ** 2  # 颜色距离阈值
+        GRAY_DIST_SQ = 12 ** 2  # 收紧灰色距离阈值（原25太松，会把偏红偏蓝边缘算成灰）
         gray_count = 0
         total = 0
         for dx in range(-2, 3):
@@ -4114,7 +4175,15 @@ class MinimapRouteRecorder:
                     b, g, r = frame[yy, xx]
                     total += 1
                     bi, gi, ri = int(b), int(g), int(r)
-                    if (bi - GRAY_B) ** 2 + (gi - GRAY_G) ** 2 + (ri - GRAY_R) ** 2 <= GRAY_DIST_SQ:
+                    # 1. 灰色距离判定
+                    is_gray = (bi - GRAY_B) ** 2 + (gi - GRAY_G) ** 2 + (ri - GRAY_R) ** 2 <= GRAY_DIST_SQ
+                    # 2. 明确排除红色占优像素（血条颜色）
+                    if ri > gi + 12 and ri > bi + 12:
+                        is_gray = False
+                    # 3. 明确排除蓝色占优像素（蓝条颜色）
+                    if bi > ri + 12 and bi > gi + 12:
+                        is_gray = False
+                    if is_gray:
                         gray_count += 1
         result = total > 0 and gray_count == total
         _debug_log("竖框检测 %s: x=%d pct=%d 灰色=%d/%d -> %s" % (
@@ -4304,18 +4373,31 @@ class MinimapRouteRecorder:
         return bars
 
     def _get_player_screen_pos(self, frame):
-        """获取人物在游戏画面中的坐标（复用_match_character内存模板+X/Y偏移，失败返回None）"""
+        """获取人物在游戏画面中的坐标（复用_match_character内存模板+X/Y偏移）
+        匹配失败时：1.5秒宽限期内用上次成功位置，超过才返回None"""
         match = self._match_character(frame)
         if match:
             mx, my, _ = match
             x_off = int(self._field_values.get("char_x_offset", "0") or "0")
             y_off = int(self._field_values.get("char_y_offset", "0") or "0")
             return (mx + x_off, my + y_off)
-        # 匹配失败：节流提示，返回None（不攻击、不显示黄点）
+        # 匹配失败：1.5秒宽限期内用上次成功位置（战斗中短暂丢模板不立即停手）
+        last_pos = getattr(self, '_last_char_match_pos', None)
+        last_time = getattr(self, '_last_char_match_time', 0)
+        now_ms = time.time() * 1000
+        if last_pos and now_ms - last_time < 1500:
+            mx, my = last_pos
+            x_off = int(self._field_values.get("char_x_offset", "0") or "0")
+            y_off = int(self._field_values.get("char_y_offset", "0") or "0")
+            if not hasattr(self, '_last_grace_log') or now_ms - self._last_grace_log > 1000:
+                self._last_grace_log = now_ms
+                _debug_log("[人物定位] 宽限期使用上次位置 (%d,%d) 丢失%.0fms" % (mx + x_off, my + y_off, now_ms - last_time))
+            return (mx + x_off, my + y_off)
+        # 超过宽限期：返回None
         _now = time.time()
         if not hasattr(self, '_last_posfail_log') or _now - self._last_posfail_log > 5:
             self._last_posfail_log = _now
-            _debug_log("[人物定位] 未匹配到角色（模板%d套，阈值%.2f）" % (len(self._char_templates), CHAR_MATCH_THRESHOLD))
+            _debug_log("[人物定位] 未匹配到角色（模板%d套，阈值%.2f），宽限期已过" % (len(self._char_templates), CHAR_MATCH_THRESHOLD))
         return None
 
     def _draw_monster_overlay(self, frame, player_pos):
