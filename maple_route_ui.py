@@ -4799,6 +4799,7 @@ class MinimapRouteRecorder:
             # 选当前平台上最近的怪作为新锁定目标
             target = monster_dists[0]
             self._combat_locked_target = (target[1], target[2])
+            self._combat_target_hp_confirmed = False  # 新目标重置血条确认状态
             _debug_log("[打怪] 锁定新目标: 距离%dpx 位置(%d,%d)" % (
                 target[0], target[1], target[2]))
 
@@ -4807,6 +4808,18 @@ class MinimapRouteRecorder:
         self._combat_locked_target = (t_cx, t_cy)
         # 记录目标位置，用于下一轮血条搜索
         self._combat_last_target_pos = (t_cx, t_cy)
+
+        # === 攻击成功确认：目标附近检测到血条=攻击命中=成功 ===
+        if not getattr(self, '_combat_target_hp_confirmed', False):
+            for (bx, by, bw, bh) in self._monster_hp_bars:
+                bcx = bx + bw // 2
+                bcy = by + bh // 2
+                if abs(bcx - t_cx) < 55 and abs(bcy - t_cy) < 65:
+                    self._combat_target_hp_confirmed = True
+                    _debug_log("[打怪] 攻击成功确认：目标血条已出现 位置(%d,%d) 血条(%d,%d,%dx%d)" % (
+                        t_cx, t_cy, bx, by, bw, bh))
+                    self._rlog("命中目标(血条确认)", (0, 200, 0))
+                    break
 
         # 面向判断：怪在右按右键，怪在左按左键
         needed_facing = 1 if t_cx > px else -1
@@ -4820,6 +4833,11 @@ class MinimapRouteRecorder:
             self._combat_facing = needed_facing
             self._combat_turn_until = now + random.randint(100, 300)
             return
+
+        # === 斜坡检测：目标Y差>25px判定为在斜坡上，需要边走边跳才能打到怪 ===
+        y_diff = abs(t_cy - py)
+        on_slope = y_diff > 25
+        jump_key = fight_cfg.get("jump_key", "")
 
         # === 远处怪朝怪移动靠近 ===
         atk_dist = fight_cfg.get("atk1_distance", 150)
@@ -4839,10 +4857,25 @@ class MinimapRouteRecorder:
                     self._release_combat_move()
                     return
             self._set_combat_move(move_dir)
+            # 斜坡上靠近时边走边跳（避免被台阶卡住）
+            if on_slope and jump_key and now - self._combat_last_jump > 400:
+                self._press_game_key(jump_key, duration=80)
+                self._combat_last_jump = now
             self._combat_last_move = now
             return
-        # 进入攻击范围：松开移动专注攻击
-        self._release_combat_move()
+
+        # 进入攻击范围
+        if on_slope:
+            # 斜坡攻击：保持朝目标X方向移动 + 周期性跳跃 + 攻击（站着打不到斜坡上的怪）
+            move_dir = "right" if t_cx > px else "left"
+            self._set_combat_move(move_dir)
+            if jump_key and now - self._combat_last_jump > 350:
+                self._press_game_key(jump_key, duration=70)
+                self._combat_last_jump = now
+            _debug_log("[打怪] 斜坡攻击 y_diff=%d 方向=%s 跳跃间隔=%dms" % (y_diff, move_dir, now - self._combat_last_jump))
+        else:
+            # 平地：站定攻击
+            self._release_combat_move()
 
         skill_rand = fight_cfg.get("skill_random", 50)
         skill_cast = False
