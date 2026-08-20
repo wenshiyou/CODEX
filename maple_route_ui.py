@@ -759,42 +759,33 @@ class MinimapRouteRecorder:
         self._last_backup_time = 0
         self._auto_backup_thread = threading.Thread(target=self._auto_backup_loop, daemon=True)
         self._auto_backup_thread.start()
-        print("[自动备份] 已启动，每30分钟备份一次源码到 auto_backups/")
+        print("[自动备份] 已启动，每30分钟Git自动提交一次")
 
     def _auto_backup_loop(self):
-        """自动备份循环：每30分钟检查一次，源码有修改则备份"""
-        import shutil
-        backup_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto_backups")
-        src_file = os.path.abspath(__file__)
+        """自动备份循环：每30分钟检查一次，源码有修改则git commit"""
+        import subprocess
+        git_exe = r"C:\Program Files\Git\bin\git.exe"
+        work_dir = os.path.dirname(os.path.abspath(__file__))
         while True:
             try:
                 time.sleep(60)  # 每分钟检查一次
                 now = time.time()
                 if now - self._last_backup_time < self._auto_backup_interval:
                     continue
-                if not os.path.exists(src_file):
+                if not os.path.exists(git_exe):
                     continue
-                # 检查文件是否有修改（对比上次备份时间和文件修改时间）
-                src_mtime = os.path.getmtime(src_file)
-                if src_mtime <= self._last_backup_time and self._last_backup_time > 0:
+                # 检查是否有修改
+                result = subprocess.run([git_exe, "status", "--porcelain"], cwd=work_dir, capture_output=True, text=True)
+                if not result.stdout.strip():
                     self._last_backup_time = now
                     continue
-                # 执行备份
-                if not os.path.exists(backup_dir):
-                    os.makedirs(backup_dir, exist_ok=True)
-                timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-                dst_file = os.path.join(backup_dir, "maple_route_ui_%s.py" % timestamp)
-                shutil.copy2(src_file, dst_file)
+                # 执行git add和commit
+                subprocess.run([git_exe, "add", "-A"], cwd=work_dir, capture_output=True)
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                commit_msg = "自动备份 %s" % timestamp
+                subprocess.run([git_exe, "commit", "-m", commit_msg], cwd=work_dir, capture_output=True)
                 self._last_backup_time = now
-                print("[自动备份] 已备份: %s" % os.path.basename(dst_file))
-                # 只保留最近20个备份
-                backups = sorted([f for f in os.listdir(backup_dir) if f.startswith("maple_route_ui_") and f.endswith(".py")])
-                if len(backups) > 20:
-                    for old_f in backups[:-20]:
-                        try:
-                            os.remove(os.path.join(backup_dir, old_f))
-                        except:
-                            pass
+                print("[自动备份] Git已提交: %s" % commit_msg)
             except Exception as e:
                 print("[自动备份] 异常:", e)
                 time.sleep(60)
@@ -3992,7 +3983,7 @@ class MinimapRouteRecorder:
         MP条内=B>180(亮蓝+暗蓝), HP条内=R>100(亮红+暗红)"""
         if frame is None or y >= frame.shape[0] or x >= frame.shape[1]:
             return None
-        scan_y = y + 3
+        scan_y = y + 2
         if scan_y >= frame.shape[0]:
             scan_y = y
         out_count = 0
@@ -4001,10 +3992,13 @@ class MinimapRouteRecorder:
             if cx >= frame.shape[1]:
                 break
             b, g, r = frame[scan_y, cx]
+            ri, gi, bi = int(r), int(g), int(b)
             if color_type == "hp":
-                in_bar = int(r) > 100
+                # 红色占优才算条内（排除灰色空白背景）
+                in_bar = ri > 80 and ri - gi > 10 and ri - bi > 10
             else:
-                in_bar = int(b) > 180
+                # 蓝色占优才算条内（排除灰色空白背景）
+                in_bar = bi > 100 and bi - ri > 10 and bi - gi > 10
             if in_bar:
                 out_count = 0
             else:
@@ -4313,13 +4307,10 @@ class MinimapRouteRecorder:
             return True  # MP条未知时不拦截，避免误判
         th, tw = self._mp_label_template.shape[:2]
         h, w = frame.shape[:2]
-        mx, my, mw = self._mp_bar
-        # MP标签紧挨着MP条左侧：x从mx左侧110px到mx右侧5px，y在MP条上下各20px
-        x_start = max(0, mx - 110)
-        x_end = min(w, mx + 5)
-        y_start = max(0, my - 20)
-        y_end = min(h, my + 20 + th)
-        roi = frame[y_start:y_end, x_start:x_end]
+        # MP标签在底部状态栏，搜索底部80px全宽（不限制x，避免标签被边界裁切）
+        y_start = max(0, h - 80)
+        y_end = h
+        roi = frame[y_start:y_end, :]
         if roi.shape[0] < th or roi.shape[1] < tw:
             return True
         result = cv2.matchTemplate(roi, self._mp_label_template, cv2.TM_CCOEFF_NORMED)
