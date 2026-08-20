@@ -1332,6 +1332,7 @@ class MinimapRouteRecorder:
         self._climb_direction = 0
         self._climb_start_y = 0
         self._climb_action_time = 0
+        self._move_stuck_inited = False  # 爬梯结束重置卡住检测
 
     def _do_teleport(self, current_y):
         """执行一次瞬移：按方向键+瞬移技能键"""
@@ -1404,6 +1405,8 @@ class MinimapRouteRecorder:
                 if VK_RIGHT in self._random_move_keys:
                     self._key_up(VK_RIGHT)
                 self._climb_state = "climbing"
+                self._climb_start_y = py  # 记录起始Y，用于攀爬成功确认
+                self._climb_action_time = time.time() * 1000  # 记录攀爬开始时间
                 if self._climb_direction > 0:
                     if VK_DOWN in self._random_move_keys:
                         self._key_up(VK_DOWN)
@@ -1414,13 +1417,25 @@ class MinimapRouteRecorder:
                         self._key_up(VK_UP)
                     if VK_DOWN not in self._random_move_keys:
                         self._key_down(VK_DOWN)
+                _debug_log("[爬梯] 开始攀爬 方向=%s 起始Y=%.0f 目标Y=%.0f" % (
+                    "上" if self._climb_direction > 0 else "下", py, self._climb_target_y))
                 return False
 
         if self._climb_state == "climbing":
+            now_ms = time.time() * 1000
+            elapsed = now_ms - self._climb_action_time
+            # === Y值确认：攀爬800ms后检测Y是否变化，没变化=被怪挡住/没抓稳=失败 ===
+            if elapsed > 800 and abs(py - self._climb_start_y) < 6:
+                _debug_log("[爬梯] 失败：Y未变化(%.0f->%.0f) %.0fms，重置重试（战斗系统先清怪）" % (
+                    self._climb_start_y, py, elapsed))
+                self._reset_climb()
+                return False
             # 持续按住上/下，检测是否到达目标高度
             cdy = self._climb_target_y - py
             if abs(cdy) <= 4:
                 # 到达目标高度，停止攀爬
+                _debug_log("[爬梯] 成功：Y从%.0f到%.0f，用时%.0fms" % (
+                    self._climb_start_y, py, elapsed))
                 self._reset_climb()
                 return False  # 下一轮继续水平移动到目标x
             # 修正方向（可能爬过了）
@@ -1601,12 +1616,31 @@ class MinimapRouteRecorder:
                     self._key_up(VK_RIGHT)
                 if VK_LEFT not in self._random_move_keys:
                     self._key_down(VK_LEFT)
+
+            # === 卡住检测：水平移动时每1.5秒确认X是否变化，没变化=被障碍物卡住→跳跃脱困 ===
+            now_ms = time.time() * 1000
+            if not getattr(self, '_move_stuck_inited', False) or self._move_stuck_dir != (1 if dx > 0 else -1):
+                self._move_stuck_last_x = px
+                self._move_stuck_last_time = now_ms
+                self._move_stuck_dir = 1 if dx > 0 else -1
+                self._move_stuck_inited = True
+            elif now_ms - self._move_stuck_last_time > 1500:
+                if abs(px - self._move_stuck_last_x) < 5:
+                    fight_cfg = self._get_fight_config()
+                    jump_key = fight_cfg.get("jump_key", "")
+                    if jump_key and now_ms - getattr(self, '_move_stuck_jump_time', 0) > 1200:
+                        self._press_game_key(jump_key, duration=80)
+                        self._move_stuck_jump_time = now_ms
+                        _debug_log("[移动] 卡住：方向=%s X=%.0f 1.5秒未变化，跳跃脱困" % (
+                            "右" if dx > 0 else "左", px))
+                self._move_stuck_last_x = px
+                self._move_stuck_last_time = now_ms
+
             # 微高差平台对接：Y差3-20像素，边走边跳跨上相邻平台
             if 3 <= abs(dy) <= 20:
                 fight_cfg = self._get_fight_config()
                 jump_key = fight_cfg.get("jump_key", "")
                 if jump_key:
-                    now_ms = time.time() * 1000
                     last_jump = getattr(self, '_last_platform_gap_jump', 0)
                     if now_ms - last_jump > 350:
                         self._press_game_key(jump_key, duration=60)
@@ -1617,6 +1651,7 @@ class MinimapRouteRecorder:
                 self._key_up(VK_LEFT)
             if VK_RIGHT in self._random_move_keys:
                 self._key_up(VK_RIGHT)
+            self._move_stuck_inited = False  # 到达目标X，重置卡住检测
 
         # 到达判断
         if abs(dx) <= 4 and abs(dy) <= 6:
