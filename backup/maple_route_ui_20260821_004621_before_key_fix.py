@@ -3018,22 +3018,22 @@ class MinimapRouteRecorder:
                             hp_marker = data.get('hp_marker')
                             if hp_marker:
                                 hx, hy = hp_marker
-                                pen = gdi32.CreatePen(0, 1, 0xFFFFFF)  # 白框1px
+                                pen = gdi32.CreatePen(0, 2, 0x0000FF)  # 红框
                                 if pen:
                                     gdi_objs.append(pen)
                                 old_pen = gdi32.SelectObject(hdc, pen)
                                 gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
-                                gdi32.Rectangle(hdc, hx - 3, hy, hx + 3, hy + 10)
+                                gdi32.Rectangle(hdc, hx - 2, hy, hx + 2, hy + 10)
                                 gdi32.SelectObject(hdc, old_pen)
                             mp_marker = data.get('mp_marker')
                             if mp_marker:
                                 mx, my = mp_marker
-                                pen = gdi32.CreatePen(0, 1, 0xFFFFFF)  # 白框1px
+                                pen = gdi32.CreatePen(0, 2, 0xFF8000)  # 蓝框
                                 if pen:
                                     gdi_objs.append(pen)
                                 old_pen = gdi32.SelectObject(hdc, pen)
                                 gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
-                                gdi32.Rectangle(hdc, mx - 3, my, mx + 3, my + 10)
+                                gdi32.Rectangle(hdc, mx - 2, my, mx + 2, my + 10)
                                 gdi32.SelectObject(hdc, old_pen)
                             char_pos = data.get('char_pos')
                             if char_pos:
@@ -3881,7 +3881,7 @@ class MinimapRouteRecorder:
         return None
 
     def _press_game_key(self, key_name, duration=None):
-        """SendInput发键 + AttachThreadInput到游戏线程强制前台。duration为按键保持ms，默认随机50-150"""
+        """keybd_event发键 + AttachThreadInput强制前台。duration为按键保持ms，默认随机30-120"""
         vk = self._key_to_vk(key_name)
         if vk is None:
             _debug_log("按键未知: %s" % key_name)
@@ -3890,70 +3890,32 @@ class MinimapRouteRecorder:
             _debug_log("无窗口句柄")
             return
         if duration is None:
-            duration = random.randint(50, 150)
+            duration = random.randint(30, 120)
         kernel32 = ctypes.windll.kernel32
         scan = user32.MapVirtualKeyW(vk, 0)
         EXTENDED_VKS = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0xA3, 0xA5}
         ext = 0x0001 if vk in EXTENDED_VKS else 0
         old_fg = user32.GetForegroundWindow()
         _debug_log("发键 %s vk=0x%02X scan=0x%02X ext=%d dur=%d" % (key_name, vk, scan, ext, duration))
-
-        # === 强制把游戏窗口拉到前台 ===
-        game_thread = user32.GetWindowThreadProcessId(self.hwnd, None)
-        cur_thread = kernel32.GetCurrentThreadId()
-        attached = False
-        if game_thread != 0 and game_thread != cur_thread:
-            attached = user32.AttachThreadInput(cur_thread, game_thread, True)
-
-        # 先模拟按一下Alt键，绕过Windows SetForegroundWindow限制
-        user32.keybd_event(0x12, 0, 0, 0)  # Alt down
-        user32.keybd_event(0x12, 0, 0x0002, 0)  # Alt up
-        user32.BringWindowToTop(self.hwnd)
-        fg_ret = user32.SetForegroundWindow(self.hwnd)
-        # 如果还没成功，再试一次（带最小化恢复）
-        if user32.GetForegroundWindow() != self.hwnd:
-            if user32.IsIconic(self.hwnd):
-                user32.ShowWindow(self.hwnd, 9)  # SW_RESTORE
+        if old_fg != self.hwnd:
+            fg_thread = user32.GetWindowThreadProcessId(old_fg, None)
+            cur_thread = kernel32.GetCurrentThreadId()
+            user32.AttachThreadInput(cur_thread, fg_thread, True)
+            user32.BringWindowToTop(self.hwnd)
             user32.SetForegroundWindow(self.hwnd)
-        time.sleep(0.05)
-        fg_now = user32.GetForegroundWindow()
-        fg_ok = (fg_now == self.hwnd)
-        if not fg_ok:
-            _debug_log("[发键警告] 前台切换失败! fg_ret=%d 当前前台hwnd=%s 目标hwnd=%s attached=%d" % (
-                fg_ret, fg_now, self.hwnd, attached))
-
-        # === 用 SendInput 发送按键（比 keybd_event 更可靠）===
-        class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort),
-                        ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
-                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
-        class INPUT(ctypes.Structure):
-            class _INPUT(ctypes.Union):
-                _fields_ = [("ki", KEYBDINPUT)]
-            _anonymous_ = ("_input",)
-            _fields_ = [("type", ctypes.c_ulong), ("_input", _INPUT)]
-
-        def send_key(vk_code, scan_code, flags):
-            inp = INPUT()
-            inp.type = 1  # INPUT_KEYBOARD
-            inp.ki.wVk = vk_code
-            inp.ki.wScan = scan_code
-            inp.ki.dwFlags = flags
-            inp.ki.time = 0
-            inp.ki.dwExtraInfo = ctypes.pointer(ctypes.c_ulong(0))
-            user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
-
-        send_key(vk, scan, ext)  # keydown
-        time.sleep(duration / 1000.0)
-        send_key(vk, scan, ext | 0x0002)  # keyup (KEYEVENTF_KEYUP)
-        _debug_log("SendInput已发送 fg_ok=%d attached=%d game_thread=%d" % (fg_ok, attached, game_thread))
+            user32.AttachThreadInput(cur_thread, fg_thread, False)
         time.sleep(0.03)
-
-        # 恢复原前台窗口并分离线程
-        if attached:
-            if old_fg and old_fg != self.hwnd:
-                user32.SetForegroundWindow(old_fg)
-            user32.AttachThreadInput(cur_thread, game_thread, False)
+        user32.keybd_event(vk, scan, ext, 0)
+        time.sleep(duration / 1000.0)
+        user32.keybd_event(vk, scan, ext | 0x0002, 0)
+        _debug_log("keybd_event已发送")
+        time.sleep(0.02)
+        if old_fg and old_fg != self.hwnd:
+            fg_thread = user32.GetWindowThreadProcessId(old_fg, None)
+            cur_thread = kernel32.GetCurrentThreadId()
+            user32.AttachThreadInput(cur_thread, fg_thread, True)
+            user32.SetForegroundWindow(old_fg)
+            user32.AttachThreadInput(cur_thread, fg_thread, False)
 
     def _detect_hp_mp_bars(self, frame):
         """检测HP/MP血条：只搜底部25px，HSV颜色，HP在左MP在右"""
@@ -3986,16 +3948,11 @@ class MinimapRouteRecorder:
             else:
                 _debug_log("HP总宽测量失败, 使用填充宽=%d" % hp_bar[2])
         if mp_bar:
-            if hp_bar:
-                # MP条总宽 = HP条总宽（红条测出来的长度直接复制给蓝条）
-                mp_bar = (mp_bar[0], mp_bar[1], hp_bar[2])
-                _debug_log("MP总宽复制HP=%d, MP左边界x=%d" % (hp_bar[2], mp_bar[0]))
+            total = self._measure_bar_total_width(frame, mp_bar[0], mp_bar[1], "mp")
+            if total:
+                mp_bar = (mp_bar[0], mp_bar[1], total)
             else:
-                total = self._measure_bar_total_width(frame, mp_bar[0], mp_bar[1], "mp")
-                if total:
-                    mp_bar = (mp_bar[0], mp_bar[1], total)
-                else:
-                    _debug_log("MP总宽测量失败, 使用填充宽=%d" % mp_bar[2])
+                _debug_log("MP总宽测量失败, 使用填充宽=%d" % mp_bar[2])
         # 稳定性缓存：偏差太大就用上次的位置，避免跳变误触发
         if not hasattr(self, '_hp_bar_stable'):
             self._hp_bar_stable = None
@@ -4085,9 +4042,9 @@ class MinimapRouteRecorder:
     COLOR_MATCH_DIST = 50         # 欧氏距离阈值，小于此值算同色
 
     def _is_bar_blank_at(self, frame, bar, pct, color_type):
-        """竖框检测：在pct%位置取竖框，框内100%是灰色背景则判定为低于阈值=加药。
-        灰色背景原色BGR=(190,190,190)，纯色不变色，用颜色距离判定。
-        框内全部是灰色 = 空 = 血/蓝已用完 = 加药"""
+        """小竖方框检测：在pct%位置取竖框，框内没有参考色则判定为低于阈值。
+        color_type='hp': 匹配红色参考色, 'mp': 匹配蓝色参考色
+        框内没有匹配色像素 = 空 = 血量/蓝量低于阈值"""
         if bar is None or frame is None:
             return False
         x, y, bw = bar
@@ -4097,23 +4054,23 @@ class MinimapRouteRecorder:
         bar_h = min(10, frame.shape[0] - y)
         if bar_h <= 0:
             return False
-        GRAY_B, GRAY_G, GRAY_R = 190, 190, 190
-        GRAY_DIST_SQ = 25 ** 2  # 颜色距离阈值
-        gray_count = 0
+        ref = self.HP_REF_COLOR if color_type == "hp" else self.MP_REF_COLOR
+        rb, rg, rr = ref
+        dist_sq = self.COLOR_MATCH_DIST ** 2
+        filled = 0
         total = 0
-        for dx in range(-2, 3):
+        for dx in range(-1, 2):
             for dy in range(0, bar_h):
                 xx = check_x + dx
                 yy = y + dy
                 if 0 <= xx < frame.shape[1] and 0 <= yy < frame.shape[0]:
                     b, g, r = frame[yy, xx]
                     total += 1
-                    bi, gi, ri = int(b), int(g), int(r)
-                    if (bi - GRAY_B) ** 2 + (gi - GRAY_G) ** 2 + (ri - GRAY_R) ** 2 <= GRAY_DIST_SQ:
-                        gray_count += 1
-        result = total > 0 and gray_count == total
-        _debug_log("竖框检测 %s: x=%d pct=%d 灰色=%d/%d -> %s" % (
-            color_type, check_x, pct, gray_count, total, result))
+                    if (int(b) - rb) ** 2 + (int(g) - rg) ** 2 + (int(r) - rr) ** 2 <= dist_sq:
+                        filled += 1
+        result = total > 0 and filled == 0
+        _debug_log("竖框检测 %s: x=%d pct=%d 同色=%d/%d -> %s" % (
+            color_type, check_x, pct, filled, total, result))
         return result
 
     def _init_digit_templates(self):
@@ -4358,7 +4315,7 @@ class MinimapRouteRecorder:
             return True
         result = cv2.matchTemplate(roi, self._mp_label_template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
-        visible = max_val >= 0.45
+        visible = max_val >= 0.75
         if not visible:
             _debug_log("[MP遮挡] 标签匹配度%.3f<0.75, 判定被遮挡" % max_val)
         return visible
@@ -4906,10 +4863,9 @@ class MinimapRouteRecorder:
 
             # === 透明蒙板（怪物/黄点/血条红点/蓝条蓝点统一显示）===
             # 检测结果由 _combat_tick 每350ms更新到 self._monsters / self._player_screen_pos
-            # 蒙板只要窗口绑定成功就启动（不依赖_running），确保加药竖框始终可见
-            if self.hwnd and not self._monster_overlay_running:
-                self._start_monster_overlay()
             if self._running:
+                if not self._monster_overlay_running:
+                    self._start_monster_overlay()
                 try:
                     if self._monster_overlay_data is None:
                         self._monster_overlay_data = {}
@@ -4920,6 +4876,9 @@ class MinimapRouteRecorder:
                         self._monster_overlay_data["char_pos"] = self._player_screen_pos
                 except Exception as e:
                     print("[蒙板] 同步异常:", e)
+            else:
+                if self._monster_overlay_running:
+                    self._stop_monster_overlay()
 
             # === 准星拖拽绑定检测 ===
             if self._drag_crosshair:
