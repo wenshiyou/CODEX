@@ -1,0 +1,11 @@
+# 核心依赖
+ultralytics>=8.0.0          # YOLOv8 目标检测
+opencv-python>=4.8.0        # 图像处理、小地图窗口
+numpy>=1.24.0               # 数值计算
+mss>=9.0.0                  # 高速屏幕截图
+PyQt5>=5.15.0               # GUI 面板
+pywin32>=306                # Win32 API（键鼠模拟、窗口查找）
+scikit-learn>=1.3.0         # DBSCAN 聚类（平台提取）
+
+# 打包工具
+pyinstaller>=6.0.0          # 打包成 EXE

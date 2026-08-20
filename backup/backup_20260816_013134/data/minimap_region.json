@@ -1,0 +1,14 @@
+{
+  "minimap": {
+    "left": 5,
+    "top": 15,
+    "width": 200,
+    "height": 220
+  },
+  "map": {
+    "left": 10,
+    "top": 100,
+    "width": 190,
+    "height": 120
+  }
+}

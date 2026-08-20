@@ -1,0 +1,64 @@
+{
+  "game": {
+    "window_title": "MapleStory",
+    "capture_region": [0, 0, 1364, 768],
+    "fps": 30
+  },
+  "yolo": {
+    "model_path": "data/models/best.pt",
+    "confidence": 0.5,
+    "iou_threshold": 0.45,
+    "device": "cpu",
+    "class_names": {
+      "player": 0,
+      "monster": 1,
+      "ladder": 2,
+      "npc": 3,
+      "portal": 4
+    }
+  },
+  "combat": {
+    "platform_y_threshold": 30,
+    "move_speed": 5.0,
+    "up_key": "w",
+    "down_key": "s",
+    "left_key": "a",
+    "right_key": "d"
+  },
+  "pathfinding": {
+    "jump_height_threshold": 120,
+    "prefer_ladder_height": 200,
+    "ladder_climb_time_per_100px": 1.0,
+    "jump_time": 0.8
+  },
+  "skills": [
+    {"name": "主攻1", "key": "x", "type": "attack", "cooldown": 0.3, "distance": 150, "enabled": true, "priority": 0},
+    {"name": "主攻2", "key": "c", "type": "attack", "cooldown": 1.0, "distance": 200, "enabled": false, "priority": 1},
+    {"name": "BUFF1", "key": "1", "type": "buff", "cooldown": 180, "distance": 0, "enabled": false, "priority": 0},
+    {"name": "BUFF2", "key": "2", "type": "buff", "cooldown": 300, "distance": 0, "enabled": false, "priority": 1},
+    {"name": "跳跃", "key": "alt", "type": "jump", "cooldown": 0.5, "distance": 0, "enabled": true, "priority": 0},
+    {"name": "瞬移", "key": "e", "type": "teleport", "cooldown": 1.0, "distance": 200, "enabled": false, "priority": 0}
+  ],
+  "potions": {
+    "hp_threshold": 30,
+    "hp_key": "q",
+    "mp_threshold": 20,
+    "mp_key": "w",
+    "hp_bar_region": [430, 720, 130, 12],
+    "mp_bar_region": [580, 720, 110, 12],
+    "hp_color": [255, 0, 0],
+    "mp_color": [0, 0, 255]
+  },
+  "platforms_file": "data/platforms.json",
+  "ladders_file": "data/ladders.json",
+  "player_tracker": {
+    "mode": "auto",
+    "match_threshold": 0.7,
+    "templates_dir": "data/templates"
+  },
+  "minimap": {
+    "enabled": true,
+    "region": [0, 0, 170, 160],
+    "scale": 2.0
+  }
+}

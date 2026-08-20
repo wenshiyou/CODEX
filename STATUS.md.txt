@@ -1,0 +1,57 @@
+# 冒险岛挂机脚本 - 项目状态总结
+> 沙箱满之前，总结好放在文件中，换新对话直接读此文件。
+> 目录：C:\Users\PC\Doubao\chats\2026-08-15\new-chat-4\maple_bot\
+> 主入口：maple_route_ui.py（OpenCV自绘UI），打包用 MapleBot.spec
+
+【当前任务】2026-08-17 修复键盘输入和血条检测，已重新打包
+- 键盘输入：SendInput在64位下INPUT结构体对齐不对返回0，已全部换回keybd_event（_key_down/_key_up/_press_game_key/_release_all_keys），清理了SendInput结构体死代码
+- 血条检测：_detect_hp_mp_bars 从底部15% ROI+BGR阈值 改为 底部60像素 ROI+HSV颜色分割（HP红色双范围0-10/170-180合并，MP青蓝90-130）
+- 打包：dist/MapleBot.exe (65MB)，pyinstaller MapleBot.spec --clean --noconfirm
+
+【已完成】
+- 主UI迁移到 maple_route_ui.py（OpenCV自绘，330x566，5个标签页：路线/打怪/药品/聊天/设置）
+- 窗口绑定：可拖拽准星拖到游戏窗口释放即绑定，已绑窗口下拉列表（右键解绑，左键点其他地方关闭）
+- 准星位置 (88, 490)，窗口绑定按钮圆形区域居中
+- 小地图三特征点检测v3：左=小地图文字，右=大地图文字，下=底部蓝色线
+- 平台/梯子录制（F5/F6），清除（F7），保存（F8），手动框选（F9）
+- 方案系统：3套方案，保存/切换/清除下拉菜单，手动/随机模式
+- 随机模式自动选方案打平台（状态机：idle/moving/attacking/returning）
+- 全局鼠标钩子（低级钩子WH_MOUSE_LL），用于准星拖拽绑定
+- 人物特征功能（2026-08-16完成）：
+  * 截图人物身体存模板，最多10套，存 data/char_templates/char_N.png + meta.json
+  * 点"人物特征"按钮→弹窗框选→自动保存，满10套替换最早
+  * 点"特征清除"→清空所有模板（内存+磁盘）
+  * _match_character(frame): 模板匹配(cv2.matchTemplate TM_CCOEFF_NORMED, 阈值0.75)返回人物中心点
+  * _calc_character_monster_distance(char_pos, bbox): 欧氏像素距离
+  * _find_nearest_monster(char_pos, bboxes): 找最近怪物（YOLO集成后调用）
+  * 启动时自动加载已保存模板
+
+【待解决】
+1. YOLO怪物检测 — 等训练好的 .onnx 模型和 classes.txt，集成后调用 _match_character + _find_nearest_monster 画线连接人物和怪物
+2. 打怪/药品/聊天标签页 — 目前还是空白底板(ui_tab_fight.png/ui_tab_potion.png/ui_tab_chat.png)，等素材再对接
+3. N键需焦点，F9可能被占（可用鼠标点按钮替代）
+
+【关键代码位置 maple_route_ui.py】
+- _on_mouse (约1077行): 鼠标回调，标签页切换+按钮+下拉+准星+已绑窗口
+- 已绑窗口下拉关闭逻辑 (约1155行): 左键点按钮/菜单以外区域关闭
+- _capture_character_feature (约1548行): 人物特征截图框选
+- _match_character: 模板匹配找人物
+- _calc_character_monster_distance / _find_nearest_monster: 距离计算（待YOLO集成）
+- manual_select_region (约1420行): 小地图手动框选
+- run (约1570行): 主循环
+
+【常量】
+- UI_W=330, UI_H=566
+- 准星 _crosshair_home=(88, 490), _crosshair_size=18
+- 已绑窗口按钮 UI_BOUND_X=15, UI_BOUND_Y=513, UI_BOUND_W=100, UI_BOUND_H=23
+- 人物特征 CHAR_MAX_TEMPLATES=10, CHAR_MATCH_THRESHOLD=0.75
+
+【打包】
+- pyinstaller MapleBot.spec --clean --noconfirm
+- 产物: dist/MapleBot.exe (约64MB)
+- 打包前需关闭正在运行的 MapleBot.exe 否则文件锁定
+
+【项目永久规则】
+一.沙箱满之前写好总结放在这里覆盖以前的内容，开新对话后第一时间读取
+二.全程用中文输出
+三.每30分钟备份一次当前代码到 backup/ 目录
