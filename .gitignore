@@ -25,3 +25,11 @@ Thumbs.db
 # Temp
 *.tmp
 *.log
+
+# Debug temp files
+crash_*.txt
+debug_*.png
+debug_*.txt
+test_*.txt
+test_*.err
+*.pyc

@@ -1,2 +1,0 @@
-C:\Users\PC\Doubao\chats\2026-08-15\new-chat-4\maple_bot\maple_route_ui.py:522: DeprecationWarning: mss.mss is deprecated and will be removed in a future release; use mss.MSS instead
-  self.sct = mss.mss()
