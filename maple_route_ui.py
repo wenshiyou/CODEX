@@ -3890,7 +3890,7 @@ class MinimapRouteRecorder:
             _debug_log("无窗口句柄")
             return
         if duration is None:
-            duration = random.randint(50, 150)
+            duration = random.randint(80, 180)
         kernel32 = ctypes.windll.kernel32
         scan = user32.MapVirtualKeyW(vk, 0)
         EXTENDED_VKS = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0xA3, 0xA5}
@@ -3936,18 +3936,25 @@ class MinimapRouteRecorder:
         def send_key(vk_code, scan_code, flags):
             inp = INPUT()
             inp.type = 1  # INPUT_KEYBOARD
-            inp.ki.wVk = vk_code
+            inp.ki.wVk = 0  # 扫描码模式下wVk设0
             inp.ki.wScan = scan_code
-            inp.ki.dwFlags = flags
+            inp.ki.dwFlags = flags | 0x0008  # KEYEVENTF_SCANCODE，DirectInput兼容
             inp.ki.time = 0
             inp.ki.dwExtraInfo = ctypes.pointer(ctypes.c_ulong(0))
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
+        # 清除可能卡住的修饰键（Alt/Ctrl/Shift），避免Alt+Key组合
+        for mod_vk in (0x12, 0x11, 0x10):  # Alt, Ctrl, Shift
+            if user32.GetAsyncKeyState(mod_vk) & 0x8000:
+                mod_scan = user32.MapVirtualKeyW(mod_vk, 0)
+                send_key(mod_vk, mod_scan, 0x0002)  # KEYEVENTF_KEYUP
+                _debug_log("清除卡住的修饰键 vk=0x%02X" % mod_vk)
+
         send_key(vk, scan, ext)  # keydown
         time.sleep(duration / 1000.0)
         send_key(vk, scan, ext | 0x0002)  # keyup (KEYEVENTF_KEYUP)
-        _debug_log("SendInput已发送 fg_ok=%d attached=%d game_thread=%d" % (fg_ok, attached, game_thread))
-        time.sleep(0.03)
+        _debug_log("SendInput(扫描码)已发送 fg_ok=%d attached=%d game_thread=%d dur=%d" % (fg_ok, attached, game_thread, duration))
+        time.sleep(0.05)
 
         # 恢复原前台窗口并分离线程
         if attached:
