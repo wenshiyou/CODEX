@@ -3985,24 +3985,18 @@ class MinimapRouteRecorder:
                                              y_center=hy, y_tol=6, max_w=120)
         if mp_bar is None:
             mp_bar = self._find_longest_hbar(mp_mask, y_start, max_w=120)
-        # 测量条的总宽度（填充+空白），替换填充宽度
+        # 固定血条位置和宽度（窗口大小固定1382x807，坐标不变）
+        # HP条：左=510，宽=107；MP条：左=619，宽=107（和HP一样长）
+        FIXED_HP_LEFT = 510
+        FIXED_MP_LEFT = 619
+        FIXED_BAR_WIDTH = 107
         if hp_bar:
-            total = self._measure_bar_total_width(frame, hp_bar[0], hp_bar[1], "hp")
-            if total:
-                hp_bar = (hp_bar[0], hp_bar[1], total)
-            else:
-                _debug_log("HP总宽测量失败, 使用填充宽=%d" % hp_bar[2])
+            hp_bar = (FIXED_HP_LEFT, hp_bar[1], FIXED_BAR_WIDTH)
         if mp_bar:
-            if hp_bar:
-                # MP条总宽 = HP条总宽（红条测出来的长度直接复制给蓝条）
-                mp_bar = (mp_bar[0], mp_bar[1], hp_bar[2])
-                _debug_log("MP总宽复制HP=%d, MP左边界x=%d" % (hp_bar[2], mp_bar[0]))
-            else:
-                total = self._measure_bar_total_width(frame, mp_bar[0], mp_bar[1], "mp")
-                if total:
-                    mp_bar = (mp_bar[0], mp_bar[1], total)
-                else:
-                    _debug_log("MP总宽测量失败, 使用填充宽=%d" % mp_bar[2])
+            mp_bar = (FIXED_MP_LEFT, mp_bar[1], FIXED_BAR_WIDTH)
+        elif hp_bar:
+            # MP颜色检测失败（MP不满时蓝色少），用HP的y坐标+固定位置
+            mp_bar = (FIXED_MP_LEFT, hp_bar[1], FIXED_BAR_WIDTH)
         # 稳定性缓存：偏差太大就用上次的位置，避免跳变误触发
         if not hasattr(self, '_hp_bar_stable'):
             self._hp_bar_stable = None
