@@ -3018,22 +3018,22 @@ class MinimapRouteRecorder:
                             hp_marker = data.get('hp_marker')
                             if hp_marker:
                                 hx, hy = hp_marker
-                                pen = gdi32.CreatePen(0, 2, 0x0000FF)  # 红框
+                                pen = gdi32.CreatePen(0, 1, 0xFFFFFF)  # 白框1px
                                 if pen:
                                     gdi_objs.append(pen)
                                 old_pen = gdi32.SelectObject(hdc, pen)
                                 gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
-                                gdi32.Rectangle(hdc, hx - 2, hy, hx + 2, hy + 10)
+                                gdi32.Rectangle(hdc, hx - 3, hy, hx + 3, hy + 10)
                                 gdi32.SelectObject(hdc, old_pen)
                             mp_marker = data.get('mp_marker')
                             if mp_marker:
                                 mx, my = mp_marker
-                                pen = gdi32.CreatePen(0, 2, 0xFF8000)  # 蓝框
+                                pen = gdi32.CreatePen(0, 1, 0xFFFFFF)  # 白框1px
                                 if pen:
                                     gdi_objs.append(pen)
                                 old_pen = gdi32.SelectObject(hdc, pen)
                                 gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
-                                gdi32.Rectangle(hdc, mx - 2, my, mx + 2, my + 10)
+                                gdi32.Rectangle(hdc, mx - 3, my, mx + 3, my + 10)
                                 gdi32.SelectObject(hdc, old_pen)
                             char_pos = data.get('char_pos')
                             if char_pos:
@@ -4043,9 +4043,9 @@ class MinimapRouteRecorder:
     COLOR_MATCH_DIST = 50         # 欧氏距离阈值，小于此值算同色
 
     def _is_bar_blank_at(self, frame, bar, pct, color_type):
-        """小竖方框检测：在pct%位置取竖框，框内没有参考色则判定为低于阈值。
-        color_type='hp': 匹配红色参考色, 'mp': 匹配蓝色参考色
-        框内没有匹配色像素 = 空 = 血量/蓝量低于阈值"""
+        """竖框检测：在pct%位置取竖框，框内100%是灰色背景则判定为低于阈值=加药。
+        灰色背景原色BGR=(190,190,190)，纯色不变色，用颜色距离判定。
+        框内全部是灰色 = 空 = 血/蓝已用完 = 加药"""
         if bar is None or frame is None:
             return False
         x, y, bw = bar
@@ -4055,23 +4055,23 @@ class MinimapRouteRecorder:
         bar_h = min(10, frame.shape[0] - y)
         if bar_h <= 0:
             return False
-        ref = self.HP_REF_COLOR if color_type == "hp" else self.MP_REF_COLOR
-        rb, rg, rr = ref
-        dist_sq = self.COLOR_MATCH_DIST ** 2
-        filled = 0
+        GRAY_B, GRAY_G, GRAY_R = 190, 190, 190
+        GRAY_DIST_SQ = 25 ** 2  # 颜色距离阈值
+        gray_count = 0
         total = 0
-        for dx in range(-1, 2):
+        for dx in range(-2, 3):
             for dy in range(0, bar_h):
                 xx = check_x + dx
                 yy = y + dy
                 if 0 <= xx < frame.shape[1] and 0 <= yy < frame.shape[0]:
                     b, g, r = frame[yy, xx]
                     total += 1
-                    if (int(b) - rb) ** 2 + (int(g) - rg) ** 2 + (int(r) - rr) ** 2 <= dist_sq:
-                        filled += 1
-        result = total > 0 and filled == 0
-        _debug_log("竖框检测 %s: x=%d pct=%d 同色=%d/%d -> %s" % (
-            color_type, check_x, pct, filled, total, result))
+                    bi, gi, ri = int(b), int(g), int(r)
+                    if (bi - GRAY_B) ** 2 + (gi - GRAY_G) ** 2 + (ri - GRAY_R) ** 2 <= GRAY_DIST_SQ:
+                        gray_count += 1
+        result = total > 0 and gray_count == total
+        _debug_log("竖框检测 %s: x=%d pct=%d 灰色=%d/%d -> %s" % (
+            color_type, check_x, pct, gray_count, total, result))
         return result
 
     def _init_digit_templates(self):
