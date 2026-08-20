@@ -3881,7 +3881,7 @@ class MinimapRouteRecorder:
         return None
 
     def _press_game_key(self, key_name, duration=None):
-        """keybd_event发键 + AttachThreadInput强制前台。duration为按键保持ms，默认随机30-120"""
+        """keybd_event发键 + AttachThreadInput到游戏线程强制前台。duration为按键保持ms，默认随机30-120"""
         vk = self._key_to_vk(key_name)
         if vk is None:
             _debug_log("按键未知: %s" % key_name)
@@ -3897,25 +3897,26 @@ class MinimapRouteRecorder:
         ext = 0x0001 if vk in EXTENDED_VKS else 0
         old_fg = user32.GetForegroundWindow()
         _debug_log("发键 %s vk=0x%02X scan=0x%02X ext=%d dur=%d" % (key_name, vk, scan, ext, duration))
-        if old_fg != self.hwnd:
-            fg_thread = user32.GetWindowThreadProcessId(old_fg, None)
-            cur_thread = kernel32.GetCurrentThreadId()
-            user32.AttachThreadInput(cur_thread, fg_thread, True)
-            user32.BringWindowToTop(self.hwnd)
-            user32.SetForegroundWindow(self.hwnd)
-            user32.AttachThreadInput(cur_thread, fg_thread, False)
+        # 附加到游戏窗口的输入线程（不是前台窗口线程），保持附加到发完键
+        game_thread = user32.GetWindowThreadProcessId(self.hwnd, None)
+        cur_thread = kernel32.GetCurrentThreadId()
+        attached = False
+        if game_thread != 0 and game_thread != cur_thread:
+            attached = user32.AttachThreadInput(cur_thread, game_thread, True)
+        user32.BringWindowToTop(self.hwnd)
+        fg_ret = user32.SetForegroundWindow(self.hwnd)
         time.sleep(0.03)
+        # 在附加状态下发送按键，确保输入进入游戏窗口
         user32.keybd_event(vk, scan, ext, 0)
         time.sleep(duration / 1000.0)
         user32.keybd_event(vk, scan, ext | 0x0002, 0)
-        _debug_log("keybd_event已发送")
+        _debug_log("keybd_event已发送 fg_ret=%d attached=%d game_thread=%d" % (fg_ret, attached, game_thread))
         time.sleep(0.02)
-        if old_fg and old_fg != self.hwnd:
-            fg_thread = user32.GetWindowThreadProcessId(old_fg, None)
-            cur_thread = kernel32.GetCurrentThreadId()
-            user32.AttachThreadInput(cur_thread, fg_thread, True)
-            user32.SetForegroundWindow(old_fg)
-            user32.AttachThreadInput(cur_thread, fg_thread, False)
+        # 恢复原前台窗口并分离线程
+        if attached:
+            if old_fg and old_fg != self.hwnd:
+                user32.SetForegroundWindow(old_fg)
+            user32.AttachThreadInput(cur_thread, game_thread, False)
 
     def _detect_hp_mp_bars(self, frame):
         """检测HP/MP血条：只搜底部25px，HSV颜色，HP在左MP在右"""
@@ -4315,7 +4316,7 @@ class MinimapRouteRecorder:
             return True
         result = cv2.matchTemplate(roi, self._mp_label_template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
-        visible = max_val >= 0.75
+        visible = max_val >= 0.45
         if not visible:
             _debug_log("[MP遮挡] 标签匹配度%.3f<0.75, 判定被遮挡" % max_val)
         return visible
@@ -4863,9 +4864,10 @@ class MinimapRouteRecorder:
 
             # === 透明蒙板（怪物/黄点/血条红点/蓝条蓝点统一显示）===
             # 检测结果由 _combat_tick 每350ms更新到 self._monsters / self._player_screen_pos
+            # 蒙板只要窗口绑定成功就启动（不依赖_running），确保加药竖框始终可见
+            if self.hwnd and not self._monster_overlay_running:
+                self._start_monster_overlay()
             if self._running:
-                if not self._monster_overlay_running:
-                    self._start_monster_overlay()
                 try:
                     if self._monster_overlay_data is None:
                         self._monster_overlay_data = {}
@@ -4876,9 +4878,6 @@ class MinimapRouteRecorder:
                         self._monster_overlay_data["char_pos"] = self._player_screen_pos
                 except Exception as e:
                     print("[蒙板] 同步异常:", e)
-            else:
-                if self._monster_overlay_running:
-                    self._stop_monster_overlay()
 
             # === 准星拖拽绑定检测 ===
             if self._drag_crosshair:
