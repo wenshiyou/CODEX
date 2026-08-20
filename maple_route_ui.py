@@ -4395,13 +4395,15 @@ class MinimapRouteRecorder:
             else:
                 self._mp_pot_wait_until = 0
 
-            # 吃药诊断日志（每秒一次）
+            # 吃药诊断日志（每秒一次，无条件输出，便于排查）
             if now - getattr(self, '_last_pot_diag_log', 0) > 1000:
                 self._last_pot_diag_log = now
                 hp_info = "无条" if not self._hp_bar else "x=%d,w=%d" % (self._hp_bar[0], self._hp_bar[2])
                 mp_info = "无条" if not self._mp_bar else "x=%d,w=%d" % (self._mp_bar[0], self._mp_bar[2])
-                print("[吃药诊断] 遮挡=%s HP条:%s HP空=%s MP条:%s MP空=%s" % (
-                    occluded, hp_info, hp_blank, mp_info, mp_blank))
+                overlay = "开" if self._monster_overlay_running else "关"
+                mp_tpl = "无" if self._mp_label_template is None else "%dx%d" % self._mp_label_template.shape[:2]
+                print("[吃药诊断] 蒙板=%s 遮挡=%s MP模板=%s HP条:%s HP空=%s MP条:%s MP空=%s" % (
+                    overlay, occluded, mp_tpl, hp_info, hp_blank, mp_info, mp_blank))
 
         # 宠物食品 — 按冷却周期自动喂（不受运行状态控制，不受遮挡影响，脚本开了就生效）
         pet_key = cfg.get("pet_key", "")
