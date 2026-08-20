@@ -26,9 +26,15 @@ except Exception:
     pass
 
 def _debug_log(msg):
-    """写调试日志到文件，exe无控制台时用"""
+    """写调试日志到文件，exe无控制台时用。超过20MB自动轮转备份。"""
     try:
-        with open(os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else ".", "debug.log"), "a", encoding="utf-8") as f:
+        path = os.path.join(os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else ".", "debug.log")
+        if os.path.exists(path) and os.path.getsize(path) > 20 * 1024 * 1024:
+            bak = path + ".bak"
+            if os.path.exists(bak):
+                os.remove(bak)
+            os.rename(path, bak)
+        with open(path, "a", encoding="utf-8") as f:
             f.write("[%s] %s\n" % (time.strftime("%H:%M:%S"), msg))
     except Exception:
         pass
@@ -3172,10 +3178,12 @@ class MinimapRouteRecorder:
                     wr = self.window_rect
                     if first_draw[0]:
                         _debug_log("[怪物蒙板] 窗口几何: %dx%d +%d+%d" % (wr['width'], wr['height'], wr['left'], wr['top']))
+                        first_draw[0] = False
                     user32.SetWindowPos(hwnd, -1, wr['left'], wr['top'],
                                         wr['width'], wr['height'], 0x0050)
                 elif first_draw[0]:
                     _debug_log("[怪物蒙板] 警告：hwnd或window_rect无效")
+                    first_draw[0] = False
             except Exception as e:
                 _debug_log("[怪物蒙板] SetWindowPos异常: %s" % e)
 
@@ -3217,10 +3225,6 @@ class MinimapRouteRecorder:
                     wr = self.window_rect
                     overlay.geometry("%dx%d+%d+%d" % (
                         wr['width'], wr['height'], wr['left'], wr['top']))
-                    if _overlay_first_draw[0]:
-                        print("[怪物蒙板] 窗口几何: %dx%d +%d+%d" % (wr['width'], wr['height'], wr['left'], wr['top']))
-                elif _overlay_first_draw[0]:
-                    print("[怪物蒙板] 警告：hwnd或window_rect无效，蒙板无法定位")
                 canvas.delete('all')
                 data = self._monster_overlay_data
                 now_ms = time.time() * 1000
@@ -3881,7 +3885,7 @@ class MinimapRouteRecorder:
         return None
 
     def _press_game_key(self, key_name, duration=None):
-        """SendInput发键 + AttachThreadInput到游戏线程强制前台。duration为按键保持ms，默认随机50-150"""
+        """SendInput扫描码发键 + AttachThreadInput强制前台。duration为按键保持ms，默认随机80-180"""
         vk = self._key_to_vk(key_name)
         if vk is None:
             _debug_log("按键未知: %s" % key_name)
