@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -6,11 +6,11 @@ __pycache__/
 
 # Build
 build/
-dist/
 *.spec.bak
 
-# Auto backups (file copy method)
+# Auto backups
 auto_backups/
+备份_*/
 
 # IDE
 .vscode/
@@ -22,28 +22,66 @@ auto_backups/
 Thumbs.db
 .DS_Store
 
-# Temp
+# Temp / logs
 *.tmp
 *.log
-
-# Debug temp files
 crash_*.txt
 debug_*.png
 debug_*.txt
+debug_*.py
 test_*.txt
 test_*.err
+test_*.py
 *.pyc
 
 # Test screenshots (keyboard/bar debugging)
 after_key.png
+after_move.png
 before_key.png
 bar1.png
 bar2.png
+bar_scale.png
 bottom_bar.png
 char_full.png
 char_pos.png
 keyboard_issue.png
 user_screenshot.png
-
-# Manual backup folders
-备份_*/
+screen_now.png
+current_screen.png
+check_*.png
+verify*.png
+verify_screen.png
+verify_yellow*.png
+ss*.png
+shot*.png
+ref*.png
+asset_*.png
+ui_*.png
+minimap_*.png
+platform_gap.png
+route_issue.png
+err_*.png
+uploaded*.png
+user_*.png
+debug_*.png
+debug_*.py
+test_*.png
+test_*.py
+top_left.png
+region_selector.py
+select_minimap_region.py
+patch_v2.py
+_*.py
+maple_route_ui_backup*.py
+maple_route_ui_*.py
+*.spec.bak
+stderr.txt
+stdout.txt
+keyboard_test.*
+crash_*.txt
+test_out*.txt
+test_err*.txt
+test_potion*.txt
+STATUS.md.txt
+Umi-OCR.exe
+best.onnx
