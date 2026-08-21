@@ -179,6 +179,9 @@ OFFSET_Y_CLICK = (319, 628, 85, 45)
 BTN_REFRESH = (28, 103, 57, 26)
 BTN_MANUAL = (91, 104, 56, 25)
 BTN_PLAN_TOOLBAR = (156, 104, 57, 25)
+# 【模块B】scale_x手动校准按钮（人物停在平台两端点按钮记录）
+BTN_CALIB_LEFT  = (220, 104, 19, 24)  # 左端点按钮（记录人物在平台最左端的坐标）
+BTN_CALIB_RIGHT = (245, 104, 19, 24)  # 右端点按钮（记录人物在平台最右端的坐标）
 
 # === 窗口绑定 + 准星 ===
 BTN_WINBIND = (25, 826, 124, 46)
@@ -217,6 +220,7 @@ VK_F7 = 0x76
 VK_F8 = 0x77
 VK_F9 = 0x78
 VK_F10 = 0x79
+VK_F11 = 0x7A  # 坐标测量热键
 VK_F12 = 0x7B
 
 # 游戏控制按键（冒险岛默认，可根据实际设置调整）
@@ -548,11 +552,19 @@ class MinimapRouteRecorder:
         self.recording_ladder = False
         self.platform_points = []
         self.ladder_points = []
-
         # 方案系统：当前方案(1-3) + 运行方式(手动/随机)
         self.current_route = 1
         self.route_mode = "手动"
         self._dropdown = None  # 当前展开的下拉菜单: None/"save"/"route"/"mode"/"clear_route"
+        # 【模块B】平台选择：选择在哪个平台上打怪（编号从1开始，空列表=全部平台）
+        self._selected_platforms = []  # 选中的平台编号列表，空=全部平台
+        self._show_platform_selector = False  # 是否显示平台选择面板
+        # 平台选择按钮区域（小地图左上方）
+        self._btn_platform_selector = None  # "台子选择"按钮
+        self._btn_platform_selector_close = None  # 选择面板关闭按钮
+        # 【模块B】左右端点按钮按下特效状态
+        self._calib_left_pressed = False
+        self._calib_right_pressed = False
         # 可拖拽准星（窗口绑定用）
         self._crosshair_size = CROSSHAIR_SIZE
         self._crosshair_home = CROSSHAIR_POS
@@ -596,6 +608,9 @@ class MinimapRouteRecorder:
         self._ui_refresh = load_png(resource_path(os.path.join("data", "ui_refresh.png")))
         self._ui_manual = load_png(resource_path(os.path.join("data", "ui_manual.png")))
         self._ui_plan_toolbar = load_png(resource_path(os.path.join("data", "ui_plan_toolbar.png")))
+        # 【模块B】scale_x手动校准按钮素材（人物停在平台两端点按钮记录）
+        self._ui_calib_left = load_png(resource_path(os.path.join("data", "ui_calib_left.png")))
+        self._ui_calib_right = load_png(resource_path(os.path.join("data", "ui_calib_right.png")))
         # MP标签模板（遮挡检测：标签在=没挡住=吃药，标签消失=被挡住=不吃药）
         _mp_label_path = resource_path(os.path.join("data", "templates", "mp_label.png"))
         if os.path.exists(_mp_label_path):
@@ -673,7 +688,13 @@ class MinimapRouteRecorder:
         self._combat_last_target_pos = None  # 上一次攻击目标位置(x,y)，用于近战挡身体时搜血条
         self._combat_held_keys = set()     # 持续按住的方向键（流畅移动用）
         self._combat_move_dir = None       # 当前持续移动方向 "left"/"right"/None
-        self._combat_locked_target = None  # 锁定的目标 (cx, cy)，打死才换
+        self._combat_locked_target = None  # 锁定的目标 (cx, cy)，打死才换，不中途切换
+        # === 模块A：打怪优化新增状态变量 ===
+        self._combat_active = False         # 【战斗活跃标志】技能范围内有怪时=True，此时暂停巡路移动，专心打怪
+        self._combat_target_lock_x = None   # 【锁定目标首次X】记录刚锁定时目标的X坐标，用于1秒无变化检测
+        self._combat_target_lock_time = 0    # 【锁定目标时间戳】记录锁定目标的时间(毫秒)，用于计算1秒是否到了
+        self._combat_target_alive = False    # 【目标是否存活】有血条或伤害数字时=True，说明怪还没打死
+        self._combat_range_clear = False     # 【范围清怪模式】技能范围内有怪时=True，范围内怪全部打完才恢复巡路
         self._player_map_pos = None        # 玩家小地图坐标，用于判断当前平台
         self._monster_hp_bars = []         # 检测到的怪物血条 [(x,y,w,h),...]
         self._hp_pot_wait_until = 0        # HP吃药等待到这个时间
@@ -776,10 +797,14 @@ class MinimapRouteRecorder:
         print("[自动备份] 已启动，每30分钟Git自动提交一次")
 
     def _auto_backup_loop(self):
-        """自动备份循环：每30分钟检查一次，源码有修改则git commit"""
+        """自动备份循环：每30分钟检查一次，源码有修改则git commit并push到远程
+        用途：防止本地文件丢失，自动同步到GitHub远程仓库
+        注意：GitHub单文件硬限制100MB，exe约66MB可正常推送"""
         import subprocess
         git_exe = r"C:\Program Files\Git\bin\git.exe"
         work_dir = os.path.dirname(os.path.abspath(__file__))
+        # Windows专用：CREATE_NO_WINDOW标志，防止subprocess弹出控制台黑窗
+        CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
         while True:
             try:
                 time.sleep(60)  # 每分钟检查一次
@@ -788,18 +813,33 @@ class MinimapRouteRecorder:
                     continue
                 if not os.path.exists(git_exe):
                     continue
-                # 检查是否有修改
-                result = subprocess.run([git_exe, "status", "--porcelain"], cwd=work_dir, capture_output=True, text=True)
+                # 步骤1：检查是否有修改
+                result = subprocess.run([git_exe, "status", "--porcelain"], cwd=work_dir,
+                                        capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
                 if not result.stdout.strip():
                     self._last_backup_time = now
                     continue
-                # 执行git add和commit
-                subprocess.run([git_exe, "add", "-A"], cwd=work_dir, capture_output=True)
+                # 步骤2：git add 所有修改
+                subprocess.run([git_exe, "add", "-A"], cwd=work_dir,
+                               capture_output=True, creationflags=CREATE_NO_WINDOW)
+                # 步骤3：git commit
                 timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
                 commit_msg = "自动备份 %s" % timestamp
-                subprocess.run([git_exe, "commit", "-m", commit_msg], cwd=work_dir, capture_output=True)
+                subprocess.run([git_exe, "commit", "-m", commit_msg], cwd=work_dir,
+                               capture_output=True, creationflags=CREATE_NO_WINDOW)
                 self._last_backup_time = now
                 print("[自动备份] Git已提交: %s" % commit_msg)
+                # 步骤4：git push 到远程GitHub（大陆网络可能失败，失败不影响本地commit）
+                push_result = subprocess.run([git_exe, "push", "origin", "main"], cwd=work_dir,
+                                             capture_output=True, text=True, creationflags=CREATE_NO_WINDOW,
+                                             timeout=60)
+                if push_result.returncode == 0:
+                    print("[自动备份] 已推送到远程GitHub")
+                else:
+                    # push失败（网络问题），本地commit已保存，下次重试
+                    print("[自动备份] push失败(网络问题)，本地已保存，下次重试: %s" % push_result.stderr[:200])
+            except subprocess.TimeoutExpired:
+                print("[自动备份] push超时(网络慢)，本地已保存，下次重试")
             except Exception as e:
                 print("[自动备份] 异常:", e)
                 time.sleep(60)
@@ -1671,6 +1711,9 @@ class MinimapRouteRecorder:
         """随机模式每帧状态机"""
         if not self._random_running:
             return
+        # 【新系统】使用重新定义的打怪/移动/梯子系统时，禁用旧巡路状态机
+        if getattr(self, '_use_new_system', True):
+            return
 
         if self._random_state == "idle":
             if self.route_mode == "手动":
@@ -1694,6 +1737,10 @@ class MinimapRouteRecorder:
             print("[随机] 选择方案%d（%d平台），开始逐个打" % (route_id, len(self.platforms)))
 
         elif self._random_state == "moving":
+            # 【模块A-需求2】战斗活跃时暂停巡路移动，由_combat_tick接管打怪
+            # 原理：技能范围内有怪时_combat_active=True，此时人物应专心打怪不往别的平台跑
+            if getattr(self, '_combat_active', False):
+                return
             if self._random_platform_idx >= len(self.platforms):
                 # 全部平台打完，回起点
                 self._random_state = "returning"
@@ -1843,6 +1890,467 @@ class MinimapRouteRecorder:
         xs = [p[0] for p in pts]
         return min(xs), max(xs)
 
+    def _get_current_manual_platform(self):
+        """【模块B】获取人物当前所在的手动录制平台（用于移动边界限制）
+        用途：判断人物在哪个手动录制平台上，限制人物在平台X范围内打怪
+        原理：
+          1. 遍历所有手动录制平台
+          2. 计算人物小地图坐标到平台折线的距离
+          3. 距离最小且≤15px的平台 = 人物当前所在平台
+        返回：平台对象dict；找不到返回None"""
+        if not self.platforms or not self._player_map_pos:
+            return None
+        mx, my = self._player_map_pos
+        best_pf = None
+        best_dist = 999.0
+        for pf in self.platforms:
+            pts = self._platform_points(pf)
+            d = self._point_to_polyline_dist(mx, my, pts)
+            if d < best_dist:
+                best_dist = d
+                best_pf = pf
+        if best_pf and best_dist <= 15:
+            return best_pf
+        return None
+
+    def _check_platform_boundary(self):
+        """【模块B】检测人物是否超出手动录制平台的X边界，超出则返回往回走的方向
+        用途：人物到了平台边缘自动回去，只打平台X范围内的怪
+        原理：
+          1. 获取人物当前所在的手动录制平台
+          2. 获取平台X范围（x_min, x_max）
+          3. 人物X < x_min → 需要往右走回去
+          4. 人物X > x_max → 需要往左走回去
+          5. 在范围内 → 返回None（不需要调整）
+        返回：'right'=需要往右走, 'left'=需要往左走, None=在范围内"""
+        pf = self._get_current_manual_platform()
+        if pf is None or not self._player_map_pos:
+            return None
+        x_min, x_max = self._platform_x_range(pf)
+        px = self._player_map_pos[0]
+        if px < x_min + 2:  # 超出左边界2px
+            return 'right'
+        elif px > x_max - 2:  # 超出右边界2px
+            return 'left'
+        return None
+
+    def _is_monster_in_manual_platform(self, screen_x, screen_y):
+        """【模块B】判断怪是否在人物当前手动录制平台的X范围内
+        用途：只打平台X范围内的怪，超出范围的怪不打
+        原理：
+          1. 获取人物当前所在的手动录制平台
+          2. 估算怪的小地图X坐标
+          3. 怪X在平台X范围内 → True
+          4. 超出范围或没有手动录制平台 → False（没有手动录制时全地图打怪）
+        参数：screen_x, screen_y = 怪屏幕坐标
+        返回：True=在范围内可以打, False=超出范围不打（或没有手动录制平台）"""
+        pf = self._get_current_manual_platform()
+        if pf is None:
+            return True  # 没有手动录制平台时，全地图打怪（用自动录制平台）
+        map_pos = self._screen_to_map(screen_x, screen_y)
+        if map_pos is None:
+            return False
+        x_min, x_max = self._platform_x_range(pf)
+        return x_min <= map_pos[0] <= x_max
+
+    # ========================================================================
+    # 【模块B】平台判定优化：配合小地图绿线和人物光点，判定怪在哪个平台
+    # ========================================================================
+
+    def _screen_to_map(self, screen_x, screen_y):
+        """【模块B】屏幕坐标转小地图坐标（以人物光点为参考点，比固定scale更准）
+        用途：怪在屏幕中的位置(YOLO检测) → 估算怪在小地图上的坐标
+        原理：怪小地图X = 人物小地图X + (怪屏幕X - 人物屏幕X) * scale
+              怪小地图Y = 人物小地图Y + (怪屏幕Y - 人物屏幕Y) * scale
+        参数：screen_x, screen_y = 怪在游戏画面中的屏幕坐标
+        返回：(map_x, map_y) 估算的小地图坐标；人物位置未知时返回None"""
+        # 人物小地图坐标（黄色光点中心）
+        if not self._player_map_pos or not self._player_screen_pos:
+            return None
+        pmap_x, pmap_y = self._player_map_pos       # 人物在小地图上的坐标
+        pscr_x, pscr_y = self._player_screen_pos     # 人物在游戏画面中的屏幕坐标
+        # scale比例：小地图px / 屏幕px，默认0.10（1382px窗口≈150px小地图），后续可自动校准
+        scale = getattr(self, '_map_screen_scale', 0.10)
+        # 以人物为参考点，计算怪相对于人物的偏移，再转成小地图偏移
+        map_x = pmap_x + (screen_x - pscr_x) * scale
+        map_y = pmap_y + (screen_y - pscr_y) * scale
+        return (map_x, map_y)
+
+    def _update_scale_calibration(self):
+        """【模块B】自动校准scale比例（人物移动时记录屏幕和小地图变化，计算实际比例）
+        用途：替代固定scale=0.10，越跑越准
+        原理：
+          1. 记录上一帧人物的屏幕坐标和小地图坐标
+          2. 当前帧计算变化量 Δ屏幕 和 Δ小地图
+          3. 实际scale = Δ小地图 / Δ屏幕（变化量足够大时才更新，避免噪声）
+          4. 用滑动平均更新校准值（新值占20%，旧值占80%）
+        调用时机：每帧人物位置更新后调用"""
+        if not self._player_map_pos or not self._player_screen_pos:
+            return
+        cur_map = self._player_map_pos
+        cur_scr = self._player_screen_pos
+        last_map = getattr(self, '_last_calib_map', None)
+        last_scr = getattr(self, '_last_calib_scr', None)
+        if last_map and last_scr:
+            dx_scr = abs(cur_scr[0] - last_scr[0])
+            dy_scr = abs(cur_scr[1] - last_scr[1])
+            dx_map = abs(cur_map[0] - last_map[0])
+            dy_map = abs(cur_map[1] - last_map[1])
+            # X轴变化量>20屏幕px时才校准（避免静止时噪声）
+            if dx_scr > 20 and dx_map > 1:
+                scale_x = dx_map / dx_scr
+                old_scale = getattr(self, '_calibrated_scale_x', 0.10)
+                # 滑动平均：新值占20%，旧值占80%，防止突变
+                self._calibrated_scale_x = old_scale * 0.8 + scale_x * 0.2
+                self._map_screen_scale = self._calibrated_scale_x  # 更新主scale
+            # Y轴变化量>15屏幕px时才校准
+            if dy_scr > 15 and dy_map > 1:
+                scale_y = dy_map / dy_scr
+                old_scale_y = getattr(self, '_calibrated_scale_y', 0.10)
+                self._calibrated_scale_y = old_scale_y * 0.8 + scale_y * 0.2
+        # 保存当前帧坐标供下次校准
+        self._last_calib_map = cur_map
+        self._last_calib_scr = cur_scr
+
+    def _auto_calibrate_edges(self):
+        """【模块B】自动记录人物最左/最右端点（每3秒检测一次，人物站在边缘3秒自动记录）
+        用途：通过记录人物在最左和最右时的屏幕X和小地图X，计算实际scale_x
+        原理：
+          1. 每3秒检测一次人物位置（避免每帧比较，减少性能消耗）
+          2. 比最左点更左 → 更新最左点（记录屏幕X+小地图X+小地图Y）
+          3. 比最右点更右 → 更新最右点
+          4. 左右都记录到后 → scale_x = (右小地图X - 左小地图X) / (右屏幕X - 左屏幕X)
+        使用方法：人物站在最左边3秒自动记录，再站最右边3秒自动记录
+        手动校准优先：_manual_calib_done=True时，跳过自动记录（避免覆盖手动值）
+        副作用（永久记住）：
+          1. 自动记录的左右端点可能不是真正的平台两端（人物没走到边缘）
+          2. 如果人物在小地图范围内移动，记录的范围偏小，scale_x不准
+          3. 解决：不准时用手动记录（人物停在平台两端点按钮）"""
+        # 手动校准已执行时，跳过自动记录（避免覆盖手动值）
+        if getattr(self, '_manual_calib_done', False):
+            return
+        # 每3秒检测一次（避免每帧比较，减少性能消耗，人物站在边缘3秒自动记录）
+        now_ms = time.time() * 1000
+        last_time = getattr(self, '_last_auto_calib_time', 0)
+        if now_ms - last_time < 3000:
+            return
+        self._last_auto_calib_time = now_ms
+        if not self._player_map_pos or not self._player_screen_pos:
+            # 调试：每5秒打印一次检测状态，帮助排查
+            _now = time.time()
+            if not hasattr(self, '_last_calib_debug') or _now - self._last_calib_debug > 5:
+                self._last_calib_debug = _now
+                _debug_log("[自动校准] 检测状态: 小地图位置=%s 屏幕位置=%s (屏幕位置需设置人物特征模板)" % (
+                    'OK' if self._player_map_pos else 'None',
+                    'OK' if self._player_screen_pos else 'None(需设置人物特征)'))
+            return
+        cur_scr_x = self._player_screen_pos[0]
+        cur_map_x = self._player_map_pos[0]
+        # 初始化左右端点记录
+        left_pt = getattr(self, '_calib_left_pt', None)
+        right_pt = getattr(self, '_calib_right_pt', None)
+        # 自动更新最左点（当前屏幕X比记录的更左）
+        if left_pt is None or cur_scr_x < left_pt[0]:
+            # 记录完整坐标：(屏幕X, 小地图X, 小地图Y)
+            self._calib_left_pt = (cur_scr_x, cur_map_x, self._player_map_pos[1])
+            left_pt = self._calib_left_pt
+        # 自动更新最右点（当前屏幕X比记录的更右）
+        if right_pt is None or cur_scr_x > right_pt[0]:
+            # 记录完整坐标：(屏幕X, 小地图X, 小地图Y)
+            self._calib_right_pt = (cur_scr_x, cur_map_x, self._player_map_pos[1])
+            right_pt = self._calib_right_pt
+        # 左右都记录到后，计算scale_x
+        if left_pt and right_pt and right_pt[0] > left_pt[0] + 50:
+            # 屏幕X差>50px才计算（避免范围太小不准）
+            dx_scr = right_pt[0] - left_pt[0]
+            dx_map = right_pt[1] - left_pt[1]
+            if dx_map > 1:
+                scale_x = dx_map / dx_scr
+                # 自动校准的scale_x权重50%（因为可能不是真正的平台两端）
+                old_scale = getattr(self, '_calibrated_scale_x', 0.10)
+                self._calibrated_scale_x = old_scale * 0.5 + scale_x * 0.5
+                self._map_screen_scale = self._calibrated_scale_x
+
+    def _manual_calibrate_left(self):
+        """【模块B】手动记录左端点（人物停在平台最左端后点按钮）
+        用途：自动记录不准时，用手动方式精确记录平台两端
+        原理：记录当前人物的屏幕X和完整小地图坐标(X,Y)作为左端点
+        副作用：手动记录后关闭自动记录（避免自动记录覆盖手动值）"""
+        if not self._player_map_pos or not self._player_screen_pos:
+            self._add_log("手动校准失败：未检测到人物位置")
+            return
+        # 记录完整坐标：(屏幕X, 小地图X, 小地图Y)
+        self._calib_left_pt = (self._player_screen_pos[0], self._player_map_pos[0], self._player_map_pos[1])
+        self._manual_calib_done = True  # 标记手动校准已执行，关闭自动记录
+        self._add_log("已记录左端点：屏幕X=%d 小地图(%d,%d)" % (
+            self._player_screen_pos[0], self._player_map_pos[0], self._player_map_pos[1]))
+        self._recalc_scale_from_edges()
+
+    def _manual_calibrate_right(self):
+        """【模块B】手动记录右端点（人物停在平台最右端后点按钮）
+        用途：自动记录不准时，用手动方式精确记录平台两端
+        原理：记录当前人物的屏幕X和完整小地图坐标(X,Y)作为右端点
+        副作用：手动记录后关闭自动记录（避免自动记录覆盖手动值）"""
+        if not self._player_map_pos or not self._player_screen_pos:
+            self._add_log("手动校准失败：未检测到人物位置")
+            return
+        # 记录完整坐标：(屏幕X, 小地图X, 小地图Y)
+        self._calib_right_pt = (self._player_screen_pos[0], self._player_map_pos[0], self._player_map_pos[1])
+        self._manual_calib_done = True  # 标记手动校准已执行，关闭自动记录
+        self._add_log("已记录右端点：屏幕X=%d 小地图(%d,%d)" % (
+            self._player_screen_pos[0], self._player_map_pos[0], self._player_map_pos[1]))
+        self._recalc_scale_from_edges()
+
+    def _recalc_scale_from_edges(self):
+        """【模块B】根据左右端点重新计算scale_x（手动记录后调用）
+        原理：scale_x = (右小地图X - 左小地图X) / (右屏幕X - 左屏幕X)
+        记录格式：(屏幕X, 小地图X, 小地图Y)
+        手动记录的scale_x权重100%（精确记录，直接覆盖）"""
+        left_pt = getattr(self, '_calib_left_pt', None)
+        right_pt = getattr(self, '_calib_right_pt', None)
+        if left_pt and right_pt and right_pt[0] > left_pt[0]:
+            dx_scr = right_pt[0] - left_pt[0]   # 屏幕X差
+            dx_map = right_pt[1] - left_pt[1]   # 小地图X差
+            if dx_map > 0 and dx_scr > 0:
+                scale_x = dx_map / dx_scr
+                self._calibrated_scale_x = scale_x  # 手动记录直接覆盖（100%权重）
+                self._map_screen_scale = scale_x
+                self._add_log("scale_x校准完成：%.4f (左%dx→%d, 右%dx→%d)" % (
+                    scale_x, left_pt[0], left_pt[1], right_pt[0], right_pt[1]))
+
+    def _get_monster_map_pos_verified(self, screen_x, screen_y):
+        """【模块B】怪物小地图坐标验证（方法B平台绿线50% + 方法A线性转换50% 加权平均，带偏差检测）
+        用途：让怪物光点在小地图上显示得更准，同时避免平台判定错误导致完全错位
+        原理：
+          方法A（线性转换）：用校准后的scale线性转换屏幕坐标→小地图坐标
+          方法B（平台绿线校准）：判断怪在哪个平台，用绿线在对应X处的Y值
+          偏差检测：方法B的Y和方法A的Y偏差>30px时，判定平台判定错误，只用方法A
+          折中方案：最终Y = 方法B_Y × 0.5 + 方法A_Y × 0.5
+          - 方法B权重50%：平台绿线有参考价值，但可能判定错误
+          - 方法A权重50%：线性转换更稳定，防止平台判定错误导致怪物点完全跳平台
+          - X坐标用方法A（线性转换更准，绿线X可能有采样误差）
+        副作用（永久记住）：
+          1. 平台判定错不会完全错位（有方法A兜底+偏差检测），但也不会完全落在绿线上
+          2. 依赖平台录制质量，没录平台的地方只用方法A
+          3. 怪物在空中（跳跃/被击退）时，方法B会拉回绿线，有50%方法A缓冲
+          4. 偏差>30px时只用方法A，避免平台判定错误把怪拉到错误楼层
+        参数：screen_x, screen_y = 怪物屏幕坐标
+        返回：(map_x, map_y) 验证后的小地图坐标"""
+        # 方法A：线性转换（用校准后的scale）
+        pos_a = self._screen_to_map(screen_x, screen_y)
+        if pos_a is None:
+            return None
+        # 【模块B】Y轴偏差检测：怪物X离人物近（<200px）时，应该是同平台的怪
+        # 如果方法A的Y和人物Y差太大（>50px），说明Y转换不准（比如第二层怪跑到第三层）
+        # 用人物Y作为怪物Y（同平台怪Y差不多），避免Y偏差太大
+        if self._player_map_pos and self._player_screen_pos:
+            dx_screen = abs(screen_x - self._player_screen_pos[0])
+            if dx_screen < 200:  # 怪物离人物近，应该是同平台
+                dy_map = abs(pos_a[1] - self._player_map_pos[1])
+                if dy_map > 50:  # Y偏差太大，说明转换不准
+                    # 用人物Y作为怪物Y（同平台怪Y差不多）
+                    pos_a = (pos_a[0], self._player_map_pos[1])
+        # 方法B：平台绿线校准
+        monster_pf = self._get_monster_platform(screen_x, screen_y)
+        pos_b_y = None
+        if monster_pf:
+            pts = self._platform_points(monster_pf)
+            if pts:
+                # 先检查怪的X是否在平台绿线的X范围内
+                xs = [p[0] for p in pts]
+                pf_xmin, pf_xmax = min(xs), max(xs)
+                if pf_xmin <= pos_a[0] <= pf_xmax:
+                    # 怪的X在平台范围内 → 用绿线Y（方法B有效）
+                    best_y = pos_a[1]
+                    best_dx = 999
+                    for (px, py) in pts:
+                        dx = abs(px - pos_a[0])
+                        if dx < best_dx:
+                            best_dx = dx
+                            best_y = py
+                    pos_b_y = best_y
+                # 怪的X在平台范围外（对应不到Y）→ 不用方法B，直接用方法A
+        # 如果方法B失败（怪X不在平台范围/找不到平台），直接用方法A
+        if pos_b_y is None:
+            return pos_a
+        # 偏差检测：方法B的Y和方法A的Y偏差>30px时，判定平台判定错误，只用方法A
+        # 避免平台判定错误把怪从第二层拉到第三层
+        y_diff = abs(pos_b_y - pos_a[1])
+        if y_diff > 30:
+            return pos_a
+        # 折中方案：加权平均
+        # Y = 方法B(平台绿线) × 50% + 方法A(线性转换) × 50%
+        # X用方法A（线性转换更准）
+        final_x = pos_a[0]
+        final_y = pos_b_y * 0.5 + pos_a[1] * 0.5
+        return (final_x, final_y)
+
+    def _get_monster_platform(self, screen_x, screen_y):
+        """【模块B】判定怪在哪个平台上（用手动录制平台判定）
+        用途：找怪时判断怪和人物是否同平台，还是在上面/下面的平台
+        原理：
+          1. 怪屏幕坐标(YOLO) → 估算小地图坐标(_screen_to_map)
+          2. 用手动录制的平台判定：距离≤15px = 在该平台上
+        参数：screen_x, screen_y = 怪在游戏画面中的屏幕坐标
+        返回：平台对象dict；找不到返回None"""
+        map_pos = self._screen_to_map(screen_x, screen_y)
+        if map_pos is None:
+            return None
+        mx, my = map_pos
+        # 用手动录制的平台判定
+        if not self.platforms:
+            return None
+        best_pf = None
+        best_dist = 999.0
+        for pf in self.platforms:
+            pts = self._platform_points(pf)
+            d = self._point_to_polyline_dist(mx, my, pts)
+            if d < best_dist:
+                best_dist = d
+                best_pf = pf
+        if best_pf and best_dist <= 15:
+            return best_pf
+        return None
+
+    def _get_slope_direction(self, screen_x, screen_y):
+        """【模块B】判定怪相对于人物是上坡、下坡还是平地
+        用途：斜坡打怪时，上坡需要跳着打，下坡直接走过去打
+        原理：
+          1. 先判定怪在哪个平台(_get_monster_platform)
+          2. 怪和人物同平台：比较怪估算的小地图Y 和 人物在绿线上的Y
+             - 怪Y < 人物Y → 上坡（怪在更高处）
+             - 怪Y > 人物Y → 下坡（怪在更低处）
+             - 相差≤5 → 平地
+          3. 怪在不同平台：直接判定上平台/下平台
+        参数：screen_x, screen_y = 怪在游戏画面中的屏幕坐标
+        返回：'up'=上坡/上平台, 'down'=下坡/下平台, 'flat'=平地, None=未知"""
+        if not self._player_map_pos:
+            return None
+        # 步骤1：怪在哪个平台
+        monster_pf = self._get_monster_platform(screen_x, screen_y)
+        # 步骤2：人物在哪个平台
+        player_pf = self._get_current_platform()
+        if monster_pf is None or player_pf is None:
+            return None
+        # 步骤3：同平台 → 比较Y判断上坡/下坡
+        if monster_pf.get('id') == player_pf.get('id'):
+            map_pos = self._screen_to_map(screen_x, screen_y)
+            if map_pos is None:
+                return None
+            monster_y = map_pos[1]  # 怪估算的小地图Y
+            player_y = self._player_map_pos[1]  # 人物小地图Y
+            y_diff = monster_y - player_y
+            if y_diff < -5:
+                return 'up'    # 怪Y更小 = 怪在更高处 = 上坡
+            elif y_diff > 5:
+                return 'down'  # 怪Y更大 = 怪在更低处 = 下坡
+            else:
+                return 'flat'  # Y相近 = 平地
+        else:
+            # 步骤4：不同平台 → 比较平台Y判断上/下平台
+            m_pts = self._platform_points(monster_pf)
+            p_pts = self._platform_points(player_pf)
+            m_avg_y = sum(p[1] for p in m_pts) / len(m_pts)
+            p_avg_y = sum(p[1] for p in p_pts) / len(p_pts)
+            if m_avg_y < p_avg_y:
+                return 'up'    # 怪所在平台Y更小 = 上面的平台
+            else:
+                return 'down'  # 怪所在平台Y更大 = 下面的平台
+
+    def _find_nearest_monster_all(self):
+        """【模块B】综合找最近的怪（包括同平台和上下平台，考虑平台切换惩罚）
+        用途：同平台没怪时，找最近的怪，包括需要爬梯子/跳下去的怪
+        原理：
+          1. 对每个检测到的怪，计算"综合距离" = 屏幕距离 + 平台切换惩罚
+          2. 同平台怪：惩罚=0（直接走过去打）
+          3. 上平台怪：惩罚≈爬梯子时间(约2秒=2000距离单位)
+          4. 下平台怪：惩罚≈跳下去时间(约0.5秒=500距离单位)
+          5. 返回综合距离最小的怪
+        返回：(screen_x, screen_y, 综合距离, 平台对象, 方向)；没怪返回None"""
+        if not self._monsters or not self._player_screen_pos:
+            return None
+        px, py = self._player_screen_pos
+        best = None
+        best_cost = 99999
+        for (x1, y1, x2, y2, score) in self._monsters:
+            cx = (x1 + x2) // 2  # 怪中心X
+            cy = y2               # 怪脚底Y
+            screen_dist = int(np.sqrt((cx - px) ** 2 + (cy - py) ** 2))
+            # 判定怪在哪个平台
+            monster_pf = self._get_monster_platform(cx, cy)
+            player_pf = self._get_current_platform()
+            # 平台切换惩罚
+            if monster_pf and player_pf and monster_pf.get('id') != player_pf.get('id'):
+                direction = self._get_slope_direction(cx, cy)
+                if direction == 'up':
+                    penalty = 2000  # 上平台需要爬梯子，惩罚大
+                elif direction == 'down':
+                    penalty = 500   # 下平台跳下去，惩罚小
+                else:
+                    penalty = 1000
+            else:
+                direction = self._get_slope_direction(cx, cy) or 'flat'
+                penalty = 0       # 同平台无惩罚
+            cost = screen_dist + penalty
+            if cost < best_cost:
+                best_cost = cost
+                best = (cx, cy, cost, monster_pf, direction)
+        return best
+
+    # ========================================================================
+    # 【模块C】绿线波动检测：只要绿线不是直的，有波动的地方就要跳着跑
+    # ========================================================================
+
+    def _check_platform_slope_ahead(self, move_dir, look_ahead=50):
+        """【模块C】检测人物前方绿线是否有波动（断层/上坡/下坡），有则需要跳着跑
+        用途：只要绿线不是直的，有波动的地方（断层、上坡、下坡），就要跳着跑过去
+        原理：
+          1. 获取人物当前平台的绿线折点
+          2. 找到人物在绿线上的最近点
+          3. 根据移动方向，取前方look_ahead距离(小地图px)内的绿线点
+          4. 计算这些点的Y变化范围(maxY - minY)
+          5. Y变化>阈值(10px) = 有波动，需要跳
+        参数：move_dir='left'/'right'，look_ahead=前方检测距离(小地图px，默认50)
+        返回：True=前方有波动需要跳，False=平直绿线不需要跳"""
+        current_pf = self._get_current_platform()
+        if not current_pf or not self._player_map_pos:
+            return False
+        pts = self._platform_points(current_pf)
+        if len(pts) < 2:
+            return False
+        ppx, ppy = self._player_map_pos
+        # 步骤1：找到人物在绿线上的最近点索引
+        best_idx = 0
+        best_dist = 999.0
+        for i, (x, y) in enumerate(pts):
+            d = ((x - ppx) ** 2 + (y - ppy) ** 2) ** 0.5
+            if d < best_dist:
+                best_dist = d
+                best_idx = i
+        # 步骤2：根据移动方向，取前方look_ahead距离内的绿线点
+        ahead_pts = []
+        if move_dir == 'right':
+            # 向右移动：取索引增大方向的点（X增大）
+            for i in range(best_idx, len(pts)):
+                if pts[i][0] - ppx <= look_ahead:
+                    ahead_pts.append(pts[i])
+                else:
+                    break
+        else:  # left
+            # 向左移动：取索引减小方向的点（X减小）
+            for i in range(best_idx, -1, -1):
+                if ppx - pts[i][0] <= look_ahead:
+                    ahead_pts.append(pts[i])
+                else:
+                    break
+        if len(ahead_pts) < 2:
+            return False
+        # 步骤3：计算前方绿线点的Y变化范围
+        ys = [p[1] for p in ahead_pts]
+        y_range = max(ys) - min(ys)
+        # Y变化>10px判定为有波动（断层/上坡/下坡），需要跳着跑
+        return y_range > 10
+
     def extract_platform(self, points):
         """录制的路径点抽稀后保存为折线（曲线），一条录制=一个平台。"""
         if len(points) < 2:
@@ -1951,6 +2459,33 @@ class MinimapRouteRecorder:
 
     def _on_mouse(self, event, x, y, flags, param):
         """鼠标点击回调：标签页切换 + 路线页按钮"""
+        # 【模块B】右键点击坐标测量（放在最开头，避免被其他处理拦截）
+        # 用途：测量血条/蓝条/按钮等元素的精确坐标
+        if event == cv2.EVENT_RBUTTONDOWN:
+            import ctypes
+            pt = (ctypes.c_long * 2)()  # [x, y] 用数组模拟POINT结构
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            screen_x, screen_y = pt[0], pt[1]
+            if self.hwnd:
+                rect = ctypes.wintypes.RECT()
+                ctypes.windll.user32.GetWindowRect(self.hwnd, ctypes.byref(rect))
+                win_x = screen_x - rect.left
+                win_y = screen_y - rect.top
+                # 获取该位置的像素颜色
+                color_str = ""
+                try:
+                    frame = self._capture_window()
+                    if frame is not None and 0 <= win_y < frame.shape[0] and 0 <= win_x < frame.shape[1]:
+                        b, g, r = frame[win_y, win_x]
+                        color_str = " RGB(%d,%d,%d)" % (r, g, b)
+                except Exception:
+                    pass
+                msg = "坐标: (%d,%d)%s" % (win_x, win_y, color_str)
+                print("[坐标测量] 窗口内=(%d,%d)%s" % (win_x, win_y, color_str))
+                self._add_log(msg)
+            else:
+                self._add_log("请先绑定游戏窗口")
+            return
         # 松开按钮：清除按下状态
         if event == cv2.EVENT_LBUTTONUP:
             self._pressed_btn = None
@@ -2109,7 +2644,7 @@ class MinimapRouteRecorder:
                         if not self._bound_windows:
                             self._bound_dropdown = False
                     return
-            return
+            # 注意：这里不能return，否则其他区域的右键点击（如坐标测量）会被拦截
 
         # 已绑窗口下拉菜单：左键点击其他地方则关闭
         if self._bound_dropdown and event == cv2.EVENT_LBUTTONDOWN:
@@ -2168,9 +2703,51 @@ class MinimapRouteRecorder:
             self.manual_select_region()
             return
         # BTN_PLAN_TOOLBAR 仅显示方案名/自动，不处理点击
+        # 【模块B】scale_x手动校准按钮点击
+        if _in(BTN_CALIB_LEFT, x, y):
+            print("[鼠标] 记录左端点")
+            self._calib_left_pressed = 3  # 按下特效：显示3帧阴影
+            self._manual_calibrate_left()
+            return
+        if _in(BTN_CALIB_RIGHT, x, y):
+            print("[鼠标] 记录右端点")
+            self._calib_right_pressed = 3  # 按下特效：显示3帧阴影
+            self._manual_calibrate_right()
+            return
 
         # 5. 小地图区域内点击
         if UI_MAP_X <= x < UI_MAP_X + UI_MAP_W and UI_MAP_Y <= y < UI_MAP_Y + UI_MAP_H:
+            # 【模块B】台子选择按钮点击（小地图左上方）
+            if self._btn_platform_selector and _in(self._btn_platform_selector, x, y):
+                self._show_platform_selector = not self._show_platform_selector
+                print("[台子选择] 打开面板" if self._show_platform_selector else "[台子选择] 关闭面板")
+                return
+            # 【模块B】台子选择面板中的点击
+            if self._show_platform_selector and self.platforms:
+                panel_x, panel_y = UI_MAP_X + 10, UI_MAP_Y + 30
+                panel_w = UI_MAP_W - 20
+                # 关闭按钮X
+                if self._btn_platform_selector_close and _in(self._btn_platform_selector_close, x, y):
+                    self._show_platform_selector = False
+                    print("[台子选择] 关闭面板")
+                    return
+                # 平台编号点击（切换选中状态：点一下选择，再点一下取消）
+                per_row = 5
+                for idx, pf in enumerate(self.platforms):
+                    pf_num = idx + 1
+                    row = idx // per_row
+                    col = idx % per_row
+                    item_x = panel_x + 10 + col * 36
+                    item_y = panel_y + 28 + row * 22
+                    # 点击区域：圆形周围（比圆形稍大一点方便点击）
+                    if item_x <= x < item_x + 18 and item_y <= y < item_y + 18:
+                        if pf_num in self._selected_platforms:
+                            self._selected_platforms.remove(pf_num)
+                            print("[台子选择] 取消选择平台%d" % pf_num)
+                        else:
+                            self._selected_platforms.append(pf_num)
+                            print("[台子选择] 选择平台%d" % pf_num)
+                        return
             return
         if _in(BTN_PLATFORM, x, y):
             print("[鼠标] 平台"); self._handle_hotkey(VK_F5); return
@@ -2263,23 +2840,90 @@ class MinimapRouteRecorder:
         # === 渲染小地图内容 ===
         display = map_area.copy()
         h, w = display.shape[:2]
-        for p in self.platforms:
-            pts = self._platform_points(p)
-            if len(pts) >= 2:
-                cv2.polylines(display, [np.array(pts, np.int32).reshape(-1, 1, 2)], False, COLOR_PLATFORM, 1)
+        # 【模块B】怪物紫色点（先画，放在绿线后面，避免挡住绿线）
+        # 紫色点圆心重叠在绿线上：相同X时用绿线的Y值
+        if self._monsters and self._player_map_pos and self._player_screen_pos:
+            COLOR_MONSTER_MAP = (255, 0, 255)  # 紫色BGR
+            for (x1, y1, x2, y2, score) in self._monsters:
+                mcx = (x1 + x2) // 2
+                mcy = y2
+                mpos = self._get_monster_map_pos_verified(mcx, mcy)
+                if mpos:
+                    mx, my = int(mpos[0]), int(mpos[1])
+                    # 紫色点圆心重叠在绿线上：找怪物X位置对应的绿线Y值
+                    for p in self.platforms:
+                        pts = self._platform_points(p)
+                        if len(pts) >= 2:
+                            # 找X最接近怪物X的绿线点，总是用绿线Y值（去掉距离限制）
+                            best_y = None
+                            best_dx = 999
+                            for (px, py) in pts:
+                                dx = abs(px - mx)
+                                if dx < best_dx:
+                                    best_dx = dx
+                                    best_y = py
+                            if best_y is not None:
+                                my = best_y  # 用绿线的Y值
+                                break
+                    if 0 <= mx < w and 0 <= my < h:
+                        cv2.circle(display, (mx, my), 2, COLOR_MONSTER_MAP, -1)
+        # 【模块B】在小地图上画scale_x校准的左右端点（白色十字，放在绿线底下）
+        # 左端点：白色十字；右端点：白色十字
+        # 记录格式：(屏幕X, 小地图X, 小地图Y)，所以用[1]和[2]作为小地图坐标
+        calib_left = getattr(self, '_calib_left_pt', None)
+        calib_right = getattr(self, '_calib_right_pt', None)
+        if calib_left and len(calib_left) >= 3:
+            lx, ly = int(calib_left[1]), int(calib_left[2])  # 小地图X, 小地图Y
+            if 0 <= lx < w and 0 <= ly < h:
+                cv2.line(display, (lx-2, ly), (lx+2, ly), (255, 255, 255), 1)
+                cv2.line(display, (lx, ly-2), (lx, ly+2), (255, 255, 255), 1)
+        if calib_right and len(calib_right) >= 3:
+            rx, ry = int(calib_right[1]), int(calib_right[2])  # 小地图X, 小地图Y
+            if 0 <= rx < w and 0 <= ry < h:
+                cv2.line(display, (rx-2, ry), (rx+2, ry), (255, 255, 255), 1)
+                cv2.line(display, (rx, ry-2), (rx, ry+2), (255, 255, 255), 1)
+        # 梯子（蓝线）
         for l in self.ladders:
             x = int(max(0, min(l["x"], w - 1)))
             y1 = int(max(0, min(l["y_top"], h - 1)))
             y2 = int(max(0, min(l["y_bottom"], h - 1)))
             cv2.line(display, (x, y1), (x, y2), COLOR_LADDER, 1)
+        # 录制中的平台/梯子（黄色）
         if self.recording_platform and len(self.platform_points) > 1:
             cv2.polylines(display, [np.array(self.platform_points, np.int32).reshape(-1, 1, 2)], False, COLOR_RECORDING, 1)
         if self.recording_ladder and len(self.ladder_points) > 1:
             cv2.polylines(display, [np.array(self.ladder_points, np.int32).reshape(-1, 1, 2)], False, COLOR_RECORDING, 1)
+        # 人物光点（黄点+红圈）
         if player_pos:
             cv2.circle(display, player_pos, 2, COLOR_PLAYER, -1)
             cv2.circle(display, player_pos, 4, (0, 0, 255), 1)
+        # 手动录制平台：画整条深绿色线（最后画，始终在最上层）
+        # 同时保留Y值+X范围+边界回退功能
+        for p in self.platforms:
+            pts = self._platform_points(p)
+            if len(pts) >= 2:
+                cv2.polylines(display, [np.array(pts, np.int32).reshape(-1, 1, 2)], False, COLOR_PLATFORM, 1)
         map_display = cv2.resize(display, (FIXED_W, MAP_H), interpolation=cv2.INTER_NEAREST)
+
+        # 【模块B】在缩放后的map_display上画平台编号（更清晰，不会被缩放模糊）
+        # 坐标从原始分辨率转换到缩放后分辨率：x * FIXED_W / w, y * MAP_H / h
+        scale_x = FIXED_W / w if w > 0 else 1.0
+        scale_y = MAP_H / h if h > 0 else 1.0
+        # 平台编号（缩放后画，红色，加大，不用加粗，LINE_AA抗锯齿）
+        for p in self.platforms:
+            pts = self._platform_points(p)
+            if len(pts) >= 2:
+                pf_id = p.get('id', 0) + 1
+                xs = [pt[0] for pt in pts]
+                ys = [pt[1] for pt in pts]
+                cx = int(sum(xs) / len(xs) * scale_x)  # 平台X中心（缩放后）
+                cy_top = int(min(ys) * scale_y) - 8     # 绿线上方8PX（缩放后，避免和绿线重叠）
+                if 0 <= cx < FIXED_W and 0 <= cy_top < MAP_H:
+                    # 红色数字加白色边框（先画白色粗描边，再画红色细字，更清晰）
+                    cv2.putText(map_display, str(pf_id), (cx, cy_top),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 3, cv2.LINE_AA)
+                    cv2.putText(map_display, str(pf_id), (cx, cy_top),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1, cv2.LINE_AA)
 
         # 随机模式运行状态
         if self._random_running:
@@ -2298,6 +2942,29 @@ class MinimapRouteRecorder:
         draw_asset(frame, self._ui_refresh, *BTN_REFRESH)
         draw_asset(frame, self._ui_manual, *BTN_MANUAL)
         draw_asset(frame, self._ui_plan_toolbar, *BTN_PLAN_TOOLBAR)
+        # 【模块B】scale_x手动校准按钮（左端点/右端点）
+        draw_asset(frame, self._ui_calib_left, *BTN_CALIB_LEFT)
+        draw_asset(frame, self._ui_calib_right, *BTN_CALIB_RIGHT)
+        # 【模块B】按钮按下阴影特效（按下时画半透明黑色覆盖层，持续3帧）
+        if self._calib_left_pressed > 0:
+            cv2.rectangle(frame, (BTN_CALIB_LEFT[0], BTN_CALIB_LEFT[1]),
+                          (BTN_CALIB_LEFT[0]+BTN_CALIB_LEFT[2], BTN_CALIB_LEFT[1]+BTN_CALIB_LEFT[3]),
+                          (0, 0, 0), -1)
+            self._calib_left_pressed -= 1
+        if self._calib_right_pressed > 0:
+            cv2.rectangle(frame, (BTN_CALIB_RIGHT[0], BTN_CALIB_RIGHT[1]),
+                          (BTN_CALIB_RIGHT[0]+BTN_CALIB_RIGHT[2], BTN_CALIB_RIGHT[1]+BTN_CALIB_RIGHT[3]),
+                          (0, 0, 0), -1)
+            self._calib_right_pressed -= 1
+        # 【模块B】记录后按钮高亮（白色边框表示已记录）
+        if getattr(self, '_calib_left_pt', None):
+            cv2.rectangle(frame, (BTN_CALIB_LEFT[0]-1, BTN_CALIB_LEFT[1]-1),
+                          (BTN_CALIB_LEFT[0]+BTN_CALIB_LEFT[2]+1, BTN_CALIB_LEFT[1]+BTN_CALIB_LEFT[3]+1),
+                          (255, 255, 255), 1)
+        if getattr(self, '_calib_right_pt', None):
+            cv2.rectangle(frame, (BTN_CALIB_RIGHT[0]-1, BTN_CALIB_RIGHT[1]-1),
+                          (BTN_CALIB_RIGHT[0]+BTN_CALIB_RIGHT[2]+1, BTN_CALIB_RIGHT[1]+BTN_CALIB_RIGHT[3]+1),
+                          (255, 255, 255), 1)
         # 第三个框显示当前方案名或"随机"
         plan_label = "随机" if self.route_mode == "随机" else "方案%d" % self.current_route
         (plw, plh), _ = cv2.getTextSize(plan_label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
@@ -2308,6 +2975,68 @@ class MinimapRouteRecorder:
         # === 缩放到UI尺寸并合成到背景 ===
         map_scaled = cv2.resize(map_display, (UI_MAP_W, UI_MAP_H), interpolation=cv2.INTER_LINEAR)
         frame[UI_MAP_Y:UI_MAP_Y+UI_MAP_H, UI_MAP_X:UI_MAP_X+UI_MAP_W] = map_scaled
+
+        # === 【模块B】台子选择按钮（小地图左上方）===
+        # 点击弹出选择面板，可多选平台，选完关闭
+        btn_sel_x, btn_sel_y, btn_sel_w, btn_sel_h = UI_MAP_X + 5, UI_MAP_Y + 5, 60, 20
+        self._btn_platform_selector = (btn_sel_x, btn_sel_y, btn_sel_w, btn_sel_h)
+        cv2.rectangle(frame, (btn_sel_x, btn_sel_y), (btn_sel_x+btn_sel_w, btn_sel_y+btn_sel_h), (60, 60, 60), -1)
+        cv2.rectangle(frame, (btn_sel_x, btn_sel_y), (btn_sel_x+btn_sel_w, btn_sel_y+btn_sel_h), (150, 150, 150), 1)
+        cv2.putText(frame, "台子选择", (btn_sel_x+5, btn_sel_y+14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+        # 显示当前选中的平台数量
+        if self._selected_platforms:
+            sel_text = "已选:%d" % len(self._selected_platforms)
+            cv2.putText(frame, sel_text, (btn_sel_x+btn_sel_w+5, btn_sel_y+14),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1, cv2.LINE_AA)
+        else:
+            cv2.putText(frame, "全部", (btn_sel_x+btn_sel_w+5, btn_sel_y+14),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (200, 200, 200), 1, cv2.LINE_AA)
+
+        # === 【模块B】台子选择面板（点击"台子选择"后弹出）===
+        if self._show_platform_selector and self.platforms:
+            # 面板位置：小地图内部，覆盖在小地图上
+            panel_x, panel_y = UI_MAP_X + 10, UI_MAP_Y + 30
+            panel_w, panel_h = UI_MAP_W - 20, min(150, 30 + len(self.platforms) * 22)
+            # 面板背景
+            cv2.rectangle(frame, (panel_x, panel_y), (panel_x+panel_w, panel_y+panel_h), (40, 40, 40), -1)
+            cv2.rectangle(frame, (panel_x, panel_y), (panel_x+panel_w, panel_y+panel_h), (180, 180, 180), 1)
+            # 标题
+            cv2.putText(frame, "选择打怪平台（可多选）", (panel_x+8, panel_y+16),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+            # 关闭按钮X
+            close_x, close_y = panel_x + panel_w - 20, panel_y + 4
+            self._btn_platform_selector_close = (close_x, close_y, 16, 16)
+            cv2.rectangle(frame, (close_x, close_y), (close_x+16, close_y+16), (80, 80, 80), -1)
+            cv2.putText(frame, "X", (close_x+4, close_y+13),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1, cv2.LINE_AA)
+            # 平台编号列表（每行5个，圆形样式：选中=黄底黑字，未选中=白底黑字）
+            per_row = 5
+            for idx, pf in enumerate(self.platforms):
+                pf_num = idx + 1  # 编号从1开始
+                row = idx // per_row
+                col = idx % per_row
+                item_x = panel_x + 10 + col * 36
+                item_y = panel_y + 28 + row * 22
+                # 圆形中心和半径
+                circle_cx = item_x + 8
+                circle_cy = item_y + 8
+                circle_r = 8
+                # 选中=黄底黑字，未选中=白底黑字
+                checked = pf_num in self._selected_platforms
+                bg_color = (0, 255, 255) if checked else (255, 255, 255)  # 黄色/白色BGR
+                text_color = (0, 0, 0)  # 黑色
+                cv2.circle(frame, (circle_cx, circle_cy), circle_r, bg_color, -1)
+                cv2.circle(frame, (circle_cx, circle_cy), circle_r, (100, 100, 100), 1)
+                # 编号文字（居中）
+                num_text = str(pf_num)
+                (tw, th), _ = cv2.getTextSize(num_text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)
+                cv2.putText(frame, num_text, (circle_cx - tw//2, circle_cy + th//2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, text_color, 1, cv2.LINE_AA)
+                # 记录每个编号的点击区域（用于鼠标点击检测）
+                # 存储在临时变量中，on_mouse时用
+        else:
+            self._btn_platform_selector_close = None
 
         # === 路线页按钮素材（参考图精确坐标，支持透明）===
         draw_asset(frame, self._ui_platform, *BTN_PLATFORM)
@@ -4095,38 +4824,19 @@ class MinimapRouteRecorder:
 
         # 固定血条位置和宽度（窗口大小固定1382x807，坐标不变）
         # HP条：左=510，宽=107；MP条：左=619，宽=107（和HP一样长）
+        # Y坐标固定成死值，不随检测变化，避免每次启动Y值不一样
         FIXED_HP_LEFT = 510
         FIXED_MP_LEFT = 619
         FIXED_BAR_WIDTH = 107
+        FIXED_BAR_Y = 782  # HP/MP条固定Y坐标（死值，如需调整改这个数字）
         if hp_bar:
-            hp_bar = (FIXED_HP_LEFT, hp_bar[1], FIXED_BAR_WIDTH)
+            hp_bar = (FIXED_HP_LEFT, FIXED_BAR_Y, FIXED_BAR_WIDTH)
         if mp_bar:
-            mp_bar = (FIXED_MP_LEFT, mp_bar[1], FIXED_BAR_WIDTH)
+            mp_bar = (FIXED_MP_LEFT, FIXED_BAR_Y, FIXED_BAR_WIDTH)
         elif hp_bar:
-            # MP颜色检测失败（MP不满时蓝色少），用HP的y坐标+固定位置
-            mp_bar = (FIXED_MP_LEFT, hp_bar[1], FIXED_BAR_WIDTH)
-        # 稳定性缓存：Y坐标一旦确定就完全固定（只动X，X也已固定），避免竖框上下移动
-        if not hasattr(self, '_hp_bar_stable'):
-            self._hp_bar_stable = None
-        if not hasattr(self, '_mp_bar_stable'):
-            self._mp_bar_stable = None
-        # HP：缓存为空时才设置，之后Y永久固定
-        if hp_bar and 60 <= hp_bar[2] <= 160 and 200 <= hp_bar[0] <= 900:
-            if self._hp_bar_stable is None:
-                self._hp_bar_stable = hp_bar
-                _debug_log("[血条] HP Y固定为%d" % hp_bar[1])
-            else:
-                # Y固定，只更新X和宽（X和宽也已固定，这里保持缓存不变）
-                pass
-        if self._hp_bar_stable:
-            hp_bar = self._hp_bar_stable
-        # MP：缓存为空时才设置，之后Y永久固定
-        if mp_bar and 50 <= mp_bar[2] <= 140:
-            if self._mp_bar_stable is None:
-                self._mp_bar_stable = mp_bar
-                _debug_log("[血条] MP Y固定为%d" % mp_bar[1])
-        if self._mp_bar_stable:
-            mp_bar = self._mp_bar_stable
+            # MP颜色检测失败（MP不满时蓝色少），用固定Y坐标
+            mp_bar = (FIXED_MP_LEFT, FIXED_BAR_Y, FIXED_BAR_WIDTH)
+        # Y已固定成死值，不需要稳定性缓存，避免覆盖固定Y值导致双检测框
         _debug_log("血条检测: hp=%s mp=%s" % (hp_bar, mp_bar))
         return hp_bar, mp_bar
 
@@ -4400,6 +5110,56 @@ class MinimapRouteRecorder:
             bars = filtered
         return bars
 
+    def _detect_damage_number(self, target_cx, target_cy):
+        """【模块A-需求4】检测目标头顶上方是否有伤害数字（红→黄渐变+黑描边）
+        用途：攻击怪物时头顶会飘出红→黄渐变的伤害数字(如422/484)，有数字=怪还活着
+        参数：target_cx=目标中心X, target_cy=目标脚底Y
+        原理：
+          1. 从YOLO识别的怪物bbox中找到对应目标，取头顶y1作基准（不同怪物高度不同）
+          2. 在头顶上方60px区域内搜索红→黄渐变色(H:0-35, 饱和度≥70, 亮度≥70)
+          3. 像素≥25个且有连通区域≥10像素 → 判定有伤害数字
+        返回：True=有伤害数字(怪活着), False=没有"""
+        # 步骤1：从已检测怪物列表中找到离目标中心最近的怪物，获取其头顶y1
+        target_y1 = None
+        best_d = 999
+        for (x1, y1, x2, y2, _) in self._monsters:
+            cx = (x1 + x2) // 2  # 怪物中心X
+            cy = y2               # 怪物脚底Y
+            d = abs(cx - target_cx) + abs(cy - target_cy)  # 曼哈顿距离
+            if d < best_d:
+                best_d = d
+                target_y1 = y1  # 记录怪物头顶Y
+        if target_y1 is None:
+            return False  # 没找到对应怪物，无法检测
+
+        # 步骤2：截取游戏画面，在目标头顶上方区域搜索
+        frame = self._capture_window()
+        if frame is None:
+            return False
+        h, w = frame.shape[:2]
+        # 搜索区域：头顶y1上方60px，水平中心±45px（覆盖伤害数字飘动范围）
+        rx1 = max(0, target_cx - 45)
+        rx2 = min(w, target_cx + 45)
+        ry1 = max(0, target_y1 - 60)  # 头顶上方60px
+        ry2 = min(h, target_y1 + 5)   # 包含头顶位置
+        if rx2 <= rx1 or ry2 <= ry1:
+            return False
+        roi = frame[ry1:ry2, rx1:rx2]  # 截取搜索区域
+
+        # 步骤3：HSV颜色空间检测红→黄渐变色
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        # H:0-35覆盖红(0)、橙(15)、黄(30)；饱和度≥70排除灰色；亮度≥70排除暗色
+        mask = cv2.inRange(hsv, np.array([0, 70, 70]), np.array([35, 255, 255]))
+        if np.sum(mask > 0) < 25:
+            return False  # 红→黄像素太少，不是伤害数字
+
+        # 步骤4：连通区域检测，排除零散噪点
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for cnt in contours:
+            if cv2.contourArea(cnt) >= 10:  # 有面积≥10的连通区域=数字
+                return True
+        return False
+
     def _get_player_screen_pos(self, frame):
         """获取人物在游戏画面中的坐标（复用_match_character内存模板+X/Y偏移）
         匹配失败时：1.5秒宽限期内用上次成功位置，超过才返回None"""
@@ -4653,26 +5413,19 @@ class MinimapRouteRecorder:
         return same_platform
 
     def _is_monster_on_platform(self, monster_cx, monster_cy):
-        """判断怪是否在玩家当前平台（绿线曲线）上。
-        1. 有平台数据：估算怪的小地图坐标 → 点到当前平台折线距离≤12
+        """判断怪是否在玩家当前平台上（已接入新的_get_monster_platform逻辑）
+        1. 有平台数据：用新函数判定怪在哪个平台，和人物当前平台ID比较
         2. 无平台数据：回退到屏幕y差判断（怪脚vs人手≤50）"""
-        current_pf = self._get_current_platform()
-        if not current_pf or not self._player_map_pos or not self._player_screen_pos:
-            if self._player_screen_pos:
-                return abs(monster_cy - self._player_screen_pos[1]) <= 50
-            return False
-        pmap_x, pmap_y = self._player_map_pos
-        pscr_x, pscr_y = self._player_screen_pos
-        # 小地图px/屏幕px换算比（默认0.08，录制时可自动校准）
-        scale = getattr(self, '_map_screen_scale', 0.08)
-        # 估算怪的小地图坐标
-        m_map_x = pmap_x + (monster_cx - pscr_x) * scale
-        m_map_y = pmap_y + (monster_cy - pscr_y) * scale
-        # 点到平台折线距离≤12算在平台上
-        pts = self._platform_points(current_pf)
-        dist = self._point_to_polyline_dist(m_map_x, m_map_y, pts)
-        on_platform = dist <= 12
-        return on_platform
+        # 调用新函数：怪屏幕坐标 → 估算小地图坐标 → 到绿线距离最小的平台
+        monster_pf = self._get_monster_platform(monster_cx, monster_cy)
+        player_pf = self._get_current_platform()
+        if monster_pf and player_pf:
+            # 平台ID相同 = 同平台
+            return monster_pf.get('id') == player_pf.get('id')
+        # 无平台数据时回退到屏幕y差判断（兼容旧版本）
+        if self._player_screen_pos:
+            return abs(monster_cy - self._player_screen_pos[1]) <= 50
+        return False
 
     def _combat_tick(self):
         """人性化战斗：反应延迟→转身→走位→攻击，群攻3只起，带随机容错"""
@@ -4681,6 +5434,46 @@ class MinimapRouteRecorder:
         now = time.time() * 1000
         fight_cfg = self._get_fight_config()
         pot_cfg = self._get_potion_config()
+
+        # === 【模块B】手动录制平台边界检测 + 回退 ===
+        # 人物到了平台边缘，不管在打怪还是做什么，都回退平台宽度的20%
+        # 回退完成后继续正常打怪
+        boundary_dir = self._check_platform_boundary()
+        if boundary_dir and not getattr(self, '_platform_retreat_active', False):
+            # 触发回退：计算回退目标（平台宽度的20%）
+            pf = self._get_current_manual_platform()
+            if pf and self._player_map_pos:
+                x_min, x_max = self._platform_x_range(pf)
+                platform_width = x_max - x_min
+                retreat_dist = platform_width * 0.2  # 回退平台宽度的20%
+                px = self._player_map_pos[0]
+                if boundary_dir == 'right':
+                    # 超出左边界，往右回退
+                    self._platform_retreat_target_x = px + retreat_dist
+                    self._platform_retreat_dir = 'right'
+                else:
+                    # 超出右边界，往左回退
+                    self._platform_retreat_target_x = px - retreat_dist
+                    self._platform_retreat_dir = 'left'
+                self._platform_retreat_active = True
+                self._release_combat_move()  # 释放当前移动键
+                _debug_log("[平台边界] 触发回退 方向=%s 目标X=%.1f 回退距离=%.1f" % (
+                    boundary_dir, self._platform_retreat_target_x, retreat_dist))
+        # 回退过程中：按住方向键往回走，不攻击
+        if getattr(self, '_platform_retreat_active', False) and self._player_map_pos:
+            px = self._player_map_pos[0]
+            target = self._platform_retreat_target_x
+            rdir = self._platform_retreat_dir
+            reached = (rdir == 'right' and px >= target) or (rdir == 'left' and px <= target)
+            if reached:
+                # 到达回退目标，恢复正常
+                self._platform_retreat_active = False
+                self._release_combat_move()
+                _debug_log("[平台边界] 回退完成 到达X=%.1f" % px)
+            else:
+                # 继续回退：按住方向键
+                self._set_combat_move(rdir)
+                return  # 回退过程中不攻击，直接返回
 
         # === 释放到期的定时按键（走位用，不阻塞主循环）===
         if self._combat_timed_keys:
@@ -4773,6 +5566,11 @@ class MinimapRouteRecorder:
             self._combat_target_idx = 0
             self._combat_last_target_pos = None
             self._combat_locked_target = None
+            # 【模块A】无怪时重置所有战斗状态，恢复巡路
+            self._combat_active = False          # 取消战斗活跃，巡路恢复移动
+            self._combat_range_clear = False     # 退出范围清怪模式
+            self._combat_target_lock_x = None    # 清除锁定X基准
+            self._combat_target_alive = False    # 清除存活状态
             self._release_combat_move()
             return
 
@@ -4787,10 +5585,27 @@ class MinimapRouteRecorder:
 
         # 计算怪物距离并排序（同平台优先，距离相近时左边先打）
         # 怪的Y用bbox底部（脚的位置），和人物点（手的位置）基准对齐
+        # 【模块B】手动录制平台X范围过滤：有手动录制平台时只打X范围内的怪
+        # 【模块B】平台选择过滤：只打选中平台上的怪（空列表=全部平台）
+        has_manual_pf = self._get_current_manual_platform() is not None
+        has_platform_select = len(self._selected_platforms) > 0
         monster_dists = []
         for (x1, y1, x2, y2, score) in self._monsters:
             cx = (x1 + x2) // 2
             cy = y2  # 脚的位置
+            # 有手动录制平台时，只打X范围内的怪
+            if has_manual_pf and not self._is_monster_in_manual_platform(cx, cy):
+                continue
+            # 平台选择过滤：只打选中平台上的怪
+            if has_platform_select:
+                monster_pf = self._get_monster_platform(cx, cy)
+                if monster_pf:
+                    pf_num = monster_pf.get('id', 0) + 1  # 编号从1开始
+                    if pf_num not in self._selected_platforms:
+                        continue
+                else:
+                    # 怪不在任何录制平台上，不打
+                    continue
             dist = int(np.sqrt((cx - px) ** 2 + (cy - py) ** 2))
             same_platform = self._is_monster_on_platform(cx, cy)
             # 距离20px为一档，同档内按cx升序（左边先打），避免左右晃动
@@ -4801,8 +5616,29 @@ class MinimapRouteRecorder:
         if monster_dists[0][0] != 0:
             self._release_combat_move()
             self._combat_locked_target = None
+            # 【模块A】同平台无怪，重置战斗状态
+            self._combat_active = False
+            self._combat_range_clear = False
             return
         monster_dists = [(d, cx, cy) for (prio, db, cx, d, cy) in monster_dists if prio == 0]
+
+        # === 【模块A】技能范围内清怪模式（纯增量：范围内有怪优先打，不改变远处移动逻辑）===
+        # 原理：技能攻击距离(默认150px)内的怪优先全部打完，打完一只接下一只，全部清完才走
+        atk_dist = fight_cfg.get("atk1_distance", 150)  # 读取配置的攻击距离
+        in_range = [(d, cx, cy) for d, cx, cy in monster_dists if d <= atk_dist]  # 筛选范围内的怪
+        if in_range:
+            # 范围内有怪：进入清怪模式，只考虑范围内的怪
+            if not self._combat_range_clear:
+                self._combat_range_clear = True  # 标记进入范围清怪模式
+                _debug_log("[打怪] 进入技能范围清怪模式，范围内%d只怪" % len(in_range))
+            self._combat_active = True  # 战斗活跃，暂停巡路移动
+            monster_dists = in_range  # 只打范围内的怪，打完一只自动选下一只
+        else:
+            # 范围内无怪：结束清怪模式，但不return，继续原有远处移动逻辑（纯增量不改变旧行为）
+            if self._combat_range_clear:
+                self._combat_range_clear = False
+                _debug_log("[打怪] 技能范围内已清完，继续原有移动逻辑")
+            self._combat_active = False  # 取消战斗活跃，巡路可移动
 
         # === 目标锁定规则：锁一只打死再换，不中途切换 ===
         target = None
@@ -4823,6 +5659,10 @@ class MinimapRouteRecorder:
             target = monster_dists[0]
             self._combat_locked_target = (target[1], target[2])
             self._combat_target_hp_confirmed = False  # 新目标重置血条确认状态
+            # 【模块A-需求10】记录新目标的首次X和锁定时间，用于1秒无变化检测
+            self._combat_target_lock_x = target[1]    # 记录锁定时目标的X坐标
+            self._combat_target_lock_time = now         # 记录锁定时间(毫秒)
+            self._combat_target_alive = False           # 新目标存活状态待确认
             _debug_log("[打怪] 锁定新目标: 距离%dpx 位置(%d,%d)" % (
                 target[0], target[1], target[2]))
 
@@ -4832,17 +5672,40 @@ class MinimapRouteRecorder:
         # 记录目标位置，用于下一轮血条搜索
         self._combat_last_target_pos = (t_cx, t_cy)
 
-        # === 攻击成功确认：目标附近检测到血条=攻击命中=成功 ===
-        if not getattr(self, '_combat_target_hp_confirmed', False):
-            for (bx, by, bw, bh) in self._monster_hp_bars:
-                bcx = bx + bw // 2
-                bcy = by + bh // 2
-                if abs(bcx - t_cx) < 55 and abs(bcy - t_cy) < 65:
-                    self._combat_target_hp_confirmed = True
-                    _debug_log("[打怪] 攻击成功确认：目标血条已出现 位置(%d,%d) 血条(%d,%d,%dx%d)" % (
-                        t_cx, t_cy, bx, by, bw, bh))
-                    self._rlog("命中目标(血条确认)", (0, 200, 0))
-                    break
+        # === 【模块A-需求10】1秒X无变化检测：怪1秒内X没变化→放弃锁定（可能是死怪/建筑误检）===
+        # 原理：真怪会左右移动，建筑/石头不会动。锁定1秒后X变化<5px就判定为假目标
+        if self._combat_target_lock_x is not None and now - self._combat_target_lock_time > 1000:
+            x_change = abs(t_cx - self._combat_target_lock_x)  # 计算1秒内X变化量
+            if x_change < 5:
+                # X变化<5px，判定为假目标（建筑/死怪），放弃锁定选下一只
+                _debug_log("[打怪] 目标1秒X无变化(变化%dpx<5)，放弃锁定" % x_change)
+                self._combat_locked_target = None   # 清除锁定
+                self._combat_target_lock_x = None    # 清除X基准
+                self._combat_target_alive = False    # 清除存活状态
+                return  # 直接返回，下一帧重新选目标
+            else:
+                # X有变化，更新基准时间和X，继续监测
+                self._combat_target_lock_x = t_cx
+                self._combat_target_lock_time = now
+
+        # === 【模块A-需求4】怪物存活检测：血条 OR 伤害数字，出现一种就说明怪还在 ===
+        # 原理：怪被攻击时头顶会出现绿色血条和红→黄渐变的伤害数字，任意一种出现=怪未死
+        target_has_hp = False  # 标记是否检测到血条
+        for (bx, by, bw, bh) in self._monster_hp_bars:
+            bcx = bx + bw // 2  # 血条中心X
+            bcy = by + bh // 2  # 血条中心Y
+            if abs(bcx - t_cx) < 55 and abs(bcy - t_cy) < 65:
+                target_has_hp = True  # 目标附近有血条
+                break
+        # 伤害数字检测：目标头顶上方有红→黄渐变像素聚集（攻击后短暂出现）
+        target_has_dmg = self._detect_damage_number(t_cx, t_cy)
+        # 血条 OR 伤害数字，任意一种=怪还活着
+        self._combat_target_alive = target_has_hp or target_has_dmg
+        # 攻击成功确认：首次检测到血条=攻击命中
+        if target_has_hp and not getattr(self, '_combat_target_hp_confirmed', False):
+            self._combat_target_hp_confirmed = True
+            _debug_log("[打怪] 攻击成功确认：目标血条已出现 位置(%d,%d)" % (t_cx, t_cy))
+            self._rlog("命中目标(血条确认)", (0, 200, 0))
 
         # 面向判断：怪在右按右键，怪在左按左键
         needed_facing = 1 if t_cx > px else -1
@@ -4880,22 +5743,25 @@ class MinimapRouteRecorder:
                     self._release_combat_move()
                     return
             self._set_combat_move(move_dir)
-            # 斜坡上靠近时边走边跳（避免被台阶卡住）
-            if on_slope and jump_key and now - self._combat_last_jump > 400:
+            # 【模块C】跳跃触发：斜坡(怪Y差>25) OR 前方绿线有波动(断层/上坡/下坡)，都要跳着跑
+            slope_ahead = self._check_platform_slope_ahead(move_dir)
+            if (on_slope or slope_ahead) and jump_key and now - self._combat_last_jump > 400:
                 self._press_game_key(jump_key, duration=80)
                 self._combat_last_jump = now
             self._combat_last_move = now
             return
 
         # 进入攻击范围
-        if on_slope:
-            # 斜坡攻击：保持朝目标X方向移动 + 周期性跳跃 + 攻击（站着打不到斜坡上的怪）
-            move_dir = "right" if t_cx > px else "left"
+        move_dir = "right" if t_cx > px else "left"
+        # 【模块C】跳跃触发：斜坡(怪Y差>25) OR 前方绿线有波动(断层/上坡/下坡)，都要跳着跑+攻击
+        slope_ahead = self._check_platform_slope_ahead(move_dir)
+        if on_slope or slope_ahead:
+            # 斜坡/波动攻击：保持朝目标X方向移动 + 周期性跳跃 + 攻击（站着打不到波动地形上的怪）
             self._set_combat_move(move_dir)
             if jump_key and now - self._combat_last_jump > 350:
                 self._press_game_key(jump_key, duration=70)
                 self._combat_last_jump = now
-            _debug_log("[打怪] 斜坡攻击 y_diff=%d 方向=%s 跳跃间隔=%dms" % (y_diff, move_dir, now - self._combat_last_jump))
+            _debug_log("[打怪] 斜坡/波动攻击 y_diff=%d 绿线波动=%s 方向=%s" % (y_diff, slope_ahead, move_dir))
         else:
             # 平地：站定攻击
             self._release_combat_move()
@@ -5022,6 +5888,19 @@ class MinimapRouteRecorder:
             else:
                 player_pos = self.last_player_pos
             self._player_map_pos = player_pos  # 保存小地图坐标供战斗逻辑判断平台
+            # 【模块B】独立检测人物屏幕位置（不依赖运行状态，脚本启动就工作，和加药一样）
+            # 用于自动校准scale和记录左右端点；_combat_tick中不再重复检测
+            if self.hwnd and (not getattr(self, '_player_screen_pos', None) or self.frame_count % 10 == 0):
+                try:
+                    _frame = self._capture_window()
+                    if _frame is not None:
+                        self._player_screen_pos = self._get_player_screen_pos(_frame)
+                except Exception:
+                    pass
+            # 【模块B】自动校准scale比例（人物移动时记录屏幕和小地图变化，越跑越准）
+            self._update_scale_calibration()
+            # 【模块B】自动记录人物最左/最右端点（用于scale_x校准，每帧只做2次比较不卡）
+            self._auto_calibrate_edges()
 
             if self.recording_platform and player_pos:
                 self.platform_points.append(player_pos)
