@@ -2840,33 +2840,6 @@ class MinimapRouteRecorder:
         # === 渲染小地图内容 ===
         display = map_area.copy()
         h, w = display.shape[:2]
-        # 【模块B】怪物紫色点（先画，放在绿线后面，避免挡住绿线）
-        # 紫色点圆心重叠在绿线上：相同X时用绿线的Y值
-        if self._monsters and self._player_map_pos and self._player_screen_pos:
-            COLOR_MONSTER_MAP = (255, 0, 255)  # 紫色BGR
-            for (x1, y1, x2, y2, score) in self._monsters:
-                mcx = (x1 + x2) // 2
-                mcy = y2
-                mpos = self._get_monster_map_pos_verified(mcx, mcy)
-                if mpos:
-                    mx, my = int(mpos[0]), int(mpos[1])
-                    # 紫色点圆心重叠在绿线上：找怪物X位置对应的绿线Y值
-                    for p in self.platforms:
-                        pts = self._platform_points(p)
-                        if len(pts) >= 2:
-                            # 找X最接近怪物X的绿线点，总是用绿线Y值（去掉距离限制）
-                            best_y = None
-                            best_dx = 999
-                            for (px, py) in pts:
-                                dx = abs(px - mx)
-                                if dx < best_dx:
-                                    best_dx = dx
-                                    best_y = py
-                            if best_y is not None:
-                                my = best_y  # 用绿线的Y值
-                                break
-                    if 0 <= mx < w and 0 <= my < h:
-                        cv2.circle(display, (mx, my), 2, COLOR_MONSTER_MAP, -1)
         # 【模块B】在小地图上画scale_x校准的左右端点（白色十字，放在绿线底下）
         # 左端点：白色十字；右端点：白色十字
         # 记录格式：(屏幕X, 小地图X, 小地图Y)，所以用[1]和[2]作为小地图坐标
@@ -2905,10 +2878,40 @@ class MinimapRouteRecorder:
                 cv2.polylines(display, [np.array(pts, np.int32).reshape(-1, 1, 2)], False, COLOR_PLATFORM, 1)
         map_display = cv2.resize(display, (FIXED_W, MAP_H), interpolation=cv2.INTER_NEAREST)
 
-        # 【模块B】在缩放后的map_display上画平台编号（更清晰，不会被缩放模糊）
-        # 坐标从原始分辨率转换到缩放后分辨率：x * FIXED_W / w, y * MAP_H / h
+        # 【模块B】在缩放后的map_display上画怪物紫色点（半径6，清晰可见）
+        # 坐标从原始分辨率转换到缩放后：x * scale_x, y * scale_y
+        # 紫色点圆心重叠在绿线上：相同X时用绿线Y值，绿线在display上已画好，紫色点在其上层
         scale_x = FIXED_W / w if w > 0 else 1.0
         scale_y = MAP_H / h if h > 0 else 1.0
+        if self._monsters and self._player_map_pos and self._player_screen_pos:
+            COLOR_MONSTER_MAP = (255, 0, 255)  # 紫色BGR
+            for (x1, y1, x2, y2, score) in self._monsters:
+                mcx = (x1 + x2) // 2
+                mcy = y2
+                mpos = self._get_monster_map_pos_verified(mcx, mcy)
+                if mpos:
+                    mx, my = int(mpos[0]), int(mpos[1])
+                    # 找怪物X位置对应的绿线Y值，让紫色点圆心重叠在绿线上
+                    for p in self.platforms:
+                        pts = self._platform_points(p)
+                        if len(pts) >= 2:
+                            best_y = None
+                            best_dx = 999
+                            for (px, py) in pts:
+                                dx = abs(px - mx)
+                                if dx < best_dx:
+                                    best_dx = dx
+                                    best_y = py
+                            if best_y is not None:
+                                my = best_y
+                                break
+                    # 转换到缩放后坐标，画半径6的实心紫色圆
+                    dx_s = int(mx * scale_x)
+                    dy_s = int(my * scale_y)
+                    if 0 <= dx_s < FIXED_W and 0 <= dy_s < MAP_H:
+                        cv2.circle(map_display, (dx_s, dy_s), 6, COLOR_MONSTER_MAP, -1)
+
+        # 【模块B】在缩放后的map_display上画平台编号（更清晰，不会被缩放模糊）
         # 平台编号（缩放后画，红色，加大，不用加粗，LINE_AA抗锯齿）
         for p in self.platforms:
             pts = self._platform_points(p)
