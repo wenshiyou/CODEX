@@ -604,6 +604,14 @@ class MinimapRouteRecorder:
         else:
             self._mp_label_template = None
             _debug_log("[MP遮挡] 标签模板不存在, 跳过遮挡检测")
+        # 血条空白灰色模板（竖框内模板匹配，匹配到=空白=加药）
+        _gray_bar_path = resource_path(os.path.join("data", "templates", "gray_bar.png"))
+        if os.path.exists(_gray_bar_path):
+            self._gray_bar_template = cv2.imread(_gray_bar_path)
+            _debug_log("[加药] 灰色空白模板已加载 %dx%d" % self._gray_bar_template.shape[:2])
+        else:
+            self._gray_bar_template = None
+            _debug_log("[加药] 灰色空白模板不存在, 回退颜色检测")
         # 运行日志（新信息在底部，向上流动，可滚动）
         self._runtime_logs = []  # [{time, msg, color}]
         self._log_scroll = 0  # 0=底部（最新），正数=向上滚动看历史
@@ -4040,11 +4048,11 @@ class MinimapRouteRecorder:
             user32.AttachThreadInput(cur_thread, game_thread, False)
 
     def _detect_hp_mp_bars(self, frame):
-        """检测HP/MP血条：只搜底部25px，HSV颜色，HP在左MP在右"""
+        """检测HP/MP血条：搜底部50px（血条在y=770~778，距底部约30px），HSV颜色，HP在左MP在右"""
         if frame is None:
             return None, None
         h, w = frame.shape[:2]
-        y_start = max(0, h - 25)
+        y_start = max(0, h - 50)  # 原h-25太小，血条在y=770距底部37px，需要搜到底部50px
         roi = frame[y_start:, :]
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
         # HP红色
@@ -4097,26 +4105,26 @@ class MinimapRouteRecorder:
         elif hp_bar:
             # MP颜色检测失败（MP不满时蓝色少），用HP的y坐标+固定位置
             mp_bar = (FIXED_MP_LEFT, hp_bar[1], FIXED_BAR_WIDTH)
-        # 稳定性缓存：偏差太大就用上次的位置，避免跳变误触发
+        # 稳定性缓存：Y坐标一旦确定就完全固定（只动X，X也已固定），避免竖框上下移动
         if not hasattr(self, '_hp_bar_stable'):
             self._hp_bar_stable = None
         if not hasattr(self, '_mp_bar_stable'):
             self._mp_bar_stable = None
-        # HP校验：宽60-160，x在200-900，和缓存x差<50
+        # HP：缓存为空时才设置，之后Y永久固定
         if hp_bar and 60 <= hp_bar[2] <= 160 and 200 <= hp_bar[0] <= 900:
-            if self._hp_bar_stable is None or abs(hp_bar[0] - self._hp_bar_stable[0]) < 50:
+            if self._hp_bar_stable is None:
                 self._hp_bar_stable = hp_bar
+                _debug_log("[血条] HP Y固定为%d" % hp_bar[1])
+            else:
+                # Y固定，只更新X和宽（X和宽也已固定，这里保持缓存不变）
+                pass
         if self._hp_bar_stable:
             hp_bar = self._hp_bar_stable
-        # MP校验：宽50-140，在HP右边0-200px
+        # MP：缓存为空时才设置，之后Y永久固定
         if mp_bar and 50 <= mp_bar[2] <= 140:
-            if hp_bar:
-                if 0 <= mp_bar[0] - hp_bar[0] <= 200:
-                    if self._mp_bar_stable is None or abs(mp_bar[0] - self._mp_bar_stable[0]) < 50:
-                        self._mp_bar_stable = mp_bar
-            else:
-                if self._mp_bar_stable is None or abs(mp_bar[0] - self._mp_bar_stable[0]) < 50:
-                    self._mp_bar_stable = mp_bar
+            if self._mp_bar_stable is None:
+                self._mp_bar_stable = mp_bar
+                _debug_log("[血条] MP Y固定为%d" % mp_bar[1])
         if self._mp_bar_stable:
             mp_bar = self._mp_bar_stable
         _debug_log("血条检测: hp=%s mp=%s" % (hp_bar, mp_bar))
@@ -4186,44 +4194,29 @@ class MinimapRouteRecorder:
     COLOR_MATCH_DIST = 50         # 欧氏距离阈值，小于此值算同色
 
     def _is_bar_blank_at(self, frame, bar, pct, color_type):
-        """竖框检测：在pct%位置取竖框，框内100%是纯灰色才判定为低于阈值=加药。
-        严格灰色判定：距离(190,190,190)<=12，且明确排除红色占优/蓝色占优像素。
-        框内有一点红/蓝就不加药。框内全部灰色=空=血/蓝已用完=加药"""
-        if bar is None or frame is None:
+        """竖框检测：在pct%位置取区域，用灰色模板匹配，匹配到=空白=加药。
+        模板是用户截取的血条空白灰色部分(gray_bar.png)，直接matchTemplate。"""
+        if bar is None or frame is None or self._gray_bar_template is None:
             return False
         x, y, bw = bar
         check_x = x + int(bw * pct / 100.0)
         if check_x >= frame.shape[1] or check_x < 0:
             return False
-        bar_h = min(10, frame.shape[0] - y)
-        if bar_h <= 0:
+        th, tw = self._gray_bar_template.shape[:2]
+        # 在check_x周围取比模板大的ROI
+        roi_x1 = max(0, check_x - tw // 2 - 4)
+        roi_y1 = max(0, y - 3)
+        roi_x2 = min(frame.shape[1], roi_x1 + tw + 8)
+        roi_y2 = min(frame.shape[0], roi_y1 + th + 6)
+        roi = frame[roi_y1:roi_y2, roi_x1:roi_x2]
+        if roi.shape[0] < th or roi.shape[1] < tw:
             return False
-        GRAY_B, GRAY_G, GRAY_R = 190, 190, 190
-        GRAY_DIST_SQ = 12 ** 2  # 收紧灰色距离阈值（原25太松，会把偏红偏蓝边缘算成灰）
-        gray_count = 0
-        total = 0
-        for dx in range(-2, 3):
-            for dy in range(0, bar_h):
-                xx = check_x + dx
-                yy = y + dy
-                if 0 <= xx < frame.shape[1] and 0 <= yy < frame.shape[0]:
-                    b, g, r = frame[yy, xx]
-                    total += 1
-                    bi, gi, ri = int(b), int(g), int(r)
-                    # 1. 灰色距离判定
-                    is_gray = (bi - GRAY_B) ** 2 + (gi - GRAY_G) ** 2 + (ri - GRAY_R) ** 2 <= GRAY_DIST_SQ
-                    # 2. 明确排除红色占优像素（血条颜色）
-                    if ri > gi + 12 and ri > bi + 12:
-                        is_gray = False
-                    # 3. 明确排除蓝色占优像素（蓝条颜色）
-                    if bi > ri + 12 and bi > gi + 12:
-                        is_gray = False
-                    if is_gray:
-                        gray_count += 1
-        result = total > 0 and gray_count == total
-        _debug_log("竖框检测 %s: x=%d pct=%d 灰色=%d/%d -> %s" % (
-            color_type, check_x, pct, gray_count, total, result))
-        return result
+        result = cv2.matchTemplate(roi, self._gray_bar_template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(result)
+        match_ok = max_val >= 0.70
+        _debug_log("竖框匹配 %s: x=%d pct=%d 匹配度=%.3f -> %s" % (
+            color_type, check_x, pct, max_val, match_ok))
+        return match_ok
 
     def _init_digit_templates(self):
         """生成0-9数字模板（用cv2绘图，不依赖外部OCR）"""
@@ -4463,26 +4456,21 @@ class MinimapRouteRecorder:
         return disp
 
     def _is_mp_label_visible(self, frame):
-        """模板匹配检测MP标签是否可见。
+        """模板匹配检测MP标签是否可见（全窗口检测原图）。
         可见=True => 没被遮挡，可以吃药
         不可见=False => 被挡住，跳过吃药"""
         if self._mp_label_template is None or frame is None:
             return True  # 无模板时不拦截
-        if not self._mp_bar:
-            return True  # MP条未知时不拦截，避免误判
         th, tw = self._mp_label_template.shape[:2]
         h, w = frame.shape[:2]
-        # MP标签在底部状态栏，搜索底部80px全宽（不限制x，避免标签被边界裁切）
-        y_start = max(0, h - 80)
-        y_end = h
-        roi = frame[y_start:y_end, :]
-        if roi.shape[0] < th or roi.shape[1] < tw:
+        if h < th or w < tw:
             return True
-        result = cv2.matchTemplate(roi, self._mp_label_template, cv2.TM_CCOEFF_NORMED)
+        # 全窗口直接检测原图，不做ROI裁剪
+        result = cv2.matchTemplate(frame, self._mp_label_template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
-        visible = max_val >= 0.45
+        visible = max_val >= 0.35
         if not visible:
-            _debug_log("[MP遮挡] 标签匹配度%.3f<0.75, 判定被遮挡" % max_val)
+            _debug_log("[MP遮挡] 全窗口匹配度%.3f<0.35, 判定被遮挡" % max_val)
         return visible
 
     def _check_auto_potion(self):
@@ -5165,4 +5153,28 @@ class MinimapRouteRecorder:
 
 
 if __name__ == "__main__":
+    # === 管理员权限检查 ===
+    # 游戏(冒险岛怀旧服)以管理员权限运行，UIPI会阻止普通权限进程向管理员进程发送模拟输入
+    # 必须以管理员权限启动bot，否则按键/加药全部无效
+    import ctypes as _ctypes, sys as _sys
+    def _is_admin():
+        try:
+            return _ctypes.windll.shell32.IsUserAnAdmin()
+        except:
+            return False
+    if not _is_admin():
+        print("[权限] 检测到非管理员权限，游戏以管理员运行时必须以管理员启动bot")
+        print("[权限] 正在自动以管理员权限重启...")
+        try:
+            _params = " ".join(['"%s"' % a for a in _sys.argv[1:]]) if len(_sys.argv) > 1 else ""
+            _ctypes.windll.shell32.ShellExecuteW(None, "runas", _sys.executable, _params, None, 1)
+        except Exception as _e:
+            print("[权限] 自动提升失败: %s" % _e)
+            print("[权限] 请右键 MapleBot.exe 选择'以管理员身份运行'")
+            try:
+                input("按回车退出...")
+            except:
+                pass
+        _sys.exit()
+    print("[权限] 已以管理员权限运行，模拟输入可正常发送到游戏")
     MinimapRouteRecorder().run()

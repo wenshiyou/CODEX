@@ -33,3 +33,17 @@ debug_*.txt
 test_*.txt
 test_*.err
 *.pyc
+
+# Test screenshots (keyboard/bar debugging)
+after_key.png
+before_key.png
+bar1.png
+bar2.png
+bottom_bar.png
+char_full.png
+char_pos.png
+keyboard_issue.png
+user_screenshot.png
+
+# Manual backup folders
+备份_*/
