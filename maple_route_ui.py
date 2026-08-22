@@ -707,6 +707,18 @@ class MinimapRouteRecorder:
         pf_file, ld_file = route_files(self.current_route)
         self.platforms = self._load(pf_file, "platforms")
         self.ladders = self._load(ld_file, "ladders")
+        # 加载当前方案的左右端点（和平台梯子一起作为一套方案，永久保存）
+        self._calib_left_pt = None
+        self._calib_right_pt = None
+        calib_file = os.path.join(DATA_DIR, "route_%d_calib.json" % self.current_route)
+        if os.path.exists(calib_file):
+            try:
+                with open(calib_file, "r", encoding="utf-8") as f:
+                    cd = json.load(f)
+                self._calib_left_pt = cd.get("calib_left")
+                self._calib_right_pt = cd.get("calib_right")
+            except Exception:
+                pass
 
         # 加载按钮栏整图
         self._btn_bar_img = None
@@ -883,6 +895,7 @@ class MinimapRouteRecorder:
             if "map" in data and "minimap" in data:
                 self.map_area_rect = data["map"]
                 self.minimap_rect = data["minimap"]
+                self._recalc_scale_from_region()
                 print("Loaded saved region:", self.map_area_rect["width"], "x", self.map_area_rect["height"])
                 return True
         except Exception:
@@ -1173,16 +1186,25 @@ class MinimapRouteRecorder:
         return os.path.exists(pf_file)
 
     def _save_to_route(self, route_id):
-        """保存当前录制的平台+梯子到指定方案文件（覆盖）"""
+        """保存当前录制的平台+梯子+端点到指定方案文件（覆盖）"""
         pf_file, ld_file = route_files(route_id)
         with open(pf_file, "w", encoding="utf-8") as f:
             json.dump({"platforms": self.platforms, "count": len(self.platforms)}, f, indent=2)
         with open(ld_file, "w", encoding="utf-8") as f:
             json.dump({"ladders": self.ladders, "count": len(self.ladders)}, f, indent=2)
+        # 同时保存左右端点到方案文件
+        calib_file = os.path.join(DATA_DIR, "route_%d_calib.json" % route_id)
+        with open(calib_file, "w", encoding="utf-8") as f:
+            json.dump({"calib_left": self._calib_left_pt, "calib_right": self._calib_right_pt}, f, indent=2)
+        # 同时保存左右端点（和平台梯子一套方案）
+        calib_file = os.path.join(DATA_DIR, "route_%d_calib.json" % route_id)
+        with open(calib_file, "w", encoding="utf-8") as f:
+            json.dump({"calib_left": self._calib_left_pt, "calib_right": self._calib_right_pt}, f, indent=2)
         self.current_route = route_id
         self._save_route_config()
-        print("[保存] 方案%d: %d 平台, %d 梯子（已覆盖）" % (
-            route_id, len(self.platforms), len(self.ladders)))
+        print("[保存] 方案%d: %d 平台, %d 梯子, 端点左=%s 右=%s（已覆盖）" % (
+            route_id, len(self.platforms), len(self.ladders),
+            "有" if self._calib_left_pt else "无", "有" if self._calib_right_pt else "无"))
 
     def _save(self):
         """保存到当前方案（兼容切换时调用）"""
@@ -1200,6 +1222,18 @@ class MinimapRouteRecorder:
         pf_file, ld_file = route_files(route_id)
         self.platforms = self._load(pf_file, "platforms")
         self.ladders = self._load(ld_file, "ladders")
+        # 切换方案时加载对应方案的左右端点
+        self._calib_left_pt = None
+        self._calib_right_pt = None
+        calib_file = os.path.join(DATA_DIR, "route_%d_calib.json" % route_id)
+        if os.path.exists(calib_file):
+            try:
+                with open(calib_file, "r", encoding="utf-8") as f:
+                    cd = json.load(f)
+                self._calib_left_pt = cd.get("calib_left")
+                self._calib_right_pt = cd.get("calib_right")
+            except Exception:
+                pass
         self._save_route_config()
         print("[切换] 方案 %d: %d 平台, %d 梯子" % (
             route_id, len(self.platforms), len(self.ladders)))
@@ -1207,7 +1241,8 @@ class MinimapRouteRecorder:
     def _clear_route_file(self, route_id):
         """清除指定方案：删除文件，若为当前方案则清空内存"""
         pf_file, ld_file = route_files(route_id)
-        for f in (pf_file, ld_file):
+        calib_file = os.path.join(DATA_DIR, "route_%d_calib.json" % route_id)
+        for f in (pf_file, ld_file, calib_file):
             if os.path.exists(f):
                 os.remove(f)
         if route_id == self.current_route:
@@ -1969,11 +2004,13 @@ class MinimapRouteRecorder:
             return None
         pmap_x, pmap_y = self._player_map_pos       # 人物在小地图上的坐标
         pscr_x, pscr_y = self._player_screen_pos     # 人物在游戏画面中的屏幕坐标
-        # scale比例：小地图px / 屏幕px，默认0.10（1382px窗口≈150px小地图），后续可自动校准
-        scale = getattr(self, '_map_screen_scale', 0.10)
+        # X和Y用各自的scale（小地图宽高比例可能不同）
+        # scale_x靠端点校准最准，scale_y从map_area_rect尺寸计算初始值+人物上下移动微调
+        scale_x = getattr(self, '_calibrated_scale_x', 0.10)
+        scale_y = getattr(self, '_calibrated_scale_y', 0.10)
         # 以人物为参考点，计算怪相对于人物的偏移，再转成小地图偏移
-        map_x = pmap_x + (screen_x - pscr_x) * scale
-        map_y = pmap_y + (screen_y - pscr_y) * scale
+        map_x = pmap_x + (screen_x - pscr_x) * scale_x
+        map_y = pmap_y + (screen_y - pscr_y) * scale_y
         return (map_x, map_y)
 
     def _update_scale_calibration(self):
@@ -2070,6 +2107,14 @@ class MinimapRouteRecorder:
                 old_scale = getattr(self, '_calibrated_scale_x', 0.10)
                 self._calibrated_scale_x = old_scale * 0.5 + scale_x * 0.5
                 self._map_screen_scale = self._calibrated_scale_x
+        # 端点有更新就自动保存到文件（永久保存，重启不丢失）
+        if (left_pt != self._calib_left_pt) or (right_pt != self._calib_right_pt):
+            try:
+                calib_file = os.path.join(DATA_DIR, "route_%d_calib.json" % self.current_route)
+                with open(calib_file, "w", encoding="utf-8") as f:
+                    json.dump({"calib_left": self._calib_left_pt, "calib_right": self._calib_right_pt}, f, indent=2)
+            except Exception:
+                pass
 
     def _manual_calibrate_left(self):
         """【模块B】手动记录左端点（人物停在平台最左端后点按钮）
@@ -2101,6 +2146,18 @@ class MinimapRouteRecorder:
             self._player_screen_pos[0], self._player_map_pos[0], self._player_map_pos[1]))
         self._recalc_scale_from_edges()
 
+    def _recalc_scale_from_region(self):
+        """【模块B】根据小地图区域尺寸计算X/Y scale初始值
+        原理：小地图内部尺寸FIXED_W x MAP_H / 屏幕上小地图像素尺寸 = scale
+        这样即使不移动人物，X和Y scale也有准确初始值"""
+        r = getattr(self, 'map_area_rect', None)
+        if r and r["width"] > 0 and r["height"] > 0:
+            self._calibrated_scale_x = FIXED_W / r["width"]
+            self._calibrated_scale_y = MAP_H / r["height"]
+            self._map_screen_scale = self._calibrated_scale_x
+            print("[scale] 初始值: X=%.4f Y=%.4f (区域%dx%d)" % (
+                self._calibrated_scale_x, self._calibrated_scale_y, r["width"], r["height"]))
+
     def _recalc_scale_from_edges(self):
         """【模块B】根据左右端点重新计算scale_x（手动记录后调用）
         原理：scale_x = (右小地图X - 左小地图X) / (右屏幕X - 左屏幕X)
@@ -2119,71 +2176,34 @@ class MinimapRouteRecorder:
                     scale_x, left_pt[0], left_pt[1], right_pt[0], right_pt[1]))
 
     def _get_monster_map_pos_verified(self, screen_x, screen_y):
-        """【模块B】怪物小地图坐标验证（方法B平台绿线50% + 方法A线性转换50% 加权平均，带偏差检测）
-        用途：让怪物光点在小地图上显示得更准，同时避免平台判定错误导致完全错位
+        """【模块B】怪物屏幕坐标转小地图坐标（X用线性转换，Y用平台绿线校准）
         原理：
-          方法A（线性转换）：用校准后的scale线性转换屏幕坐标→小地图坐标
-          方法B（平台绿线校准）：判断怪在哪个平台，用绿线在对应X处的Y值
-          偏差检测：方法B的Y和方法A的Y偏差>30px时，判定平台判定错误，只用方法A
-          折中方案：最终Y = 方法B_Y × 0.5 + 方法A_Y × 0.5
-          - 方法B权重50%：平台绿线有参考价值，但可能判定错误
-          - 方法A权重50%：线性转换更稳定，防止平台判定错误导致怪物点完全跳平台
-          - X坐标用方法A（线性转换更准，绿线X可能有采样误差）
-        副作用（永久记住）：
-          1. 平台判定错不会完全错位（有方法A兜底+偏差检测），但也不会完全落在绿线上
-          2. 依赖平台录制质量，没录平台的地方只用方法A
-          3. 怪物在空中（跳跃/被击退）时，方法B会拉回绿线，有50%方法A缓冲
-          4. 偏差>30px时只用方法A，避免平台判定错误把怪拉到错误楼层
-        参数：screen_x, screen_y = 怪物屏幕坐标
-        返回：(map_x, map_y) 验证后的小地图坐标"""
-        # 方法A：线性转换（用校准后的scale）
+          X = 人物小地图X + (怪屏幕X - 人物屏幕X) * scale（线性转换）
+          Y = 先线性转换得到估算Y，再在平台绿线中找X附近(±50px)且Y最接近的点
+          - 找到且Y偏差<15px → 用绿线Y（怪站在平台上）
+          - 没找到或偏差太大 → 用线性转换Y（怪在空中/高处/没录平台）
+        参数：screen_x, screen_y = 怪物屏幕坐标（YOLO检测框的中心点X，底部Y）
+        返回：(map_x, map_y) 小地图坐标；人物位置未知时返回None"""
+        # 方法A：以人物为参考点线性转换
         pos_a = self._screen_to_map(screen_x, screen_y)
         if pos_a is None:
             return None
-        # 【模块B】Y轴偏差检测：怪物X离人物近（<200px）时，应该是同平台的怪
-        # 如果方法A的Y和人物Y差太大（>50px），说明Y转换不准（比如第二层怪跑到第三层）
-        # 用人物Y作为怪物Y（同平台怪Y差不多），避免Y偏差太大
-        if self._player_map_pos and self._player_screen_pos:
-            dx_screen = abs(screen_x - self._player_screen_pos[0])
-            if dx_screen < 200:  # 怪物离人物近，应该是同平台
-                dy_map = abs(pos_a[1] - self._player_map_pos[1])
-                if dy_map > 50:  # Y偏差太大，说明转换不准
-                    # 用人物Y作为怪物Y（同平台怪Y差不多）
-                    pos_a = (pos_a[0], self._player_map_pos[1])
-        # 方法B：平台绿线校准
-        monster_pf = self._get_monster_platform(screen_x, screen_y)
-        pos_b_y = None
-        if monster_pf:
-            pts = self._platform_points(monster_pf)
-            if pts:
-                # 先检查怪的X是否在平台绿线的X范围内
-                xs = [p[0] for p in pts]
-                pf_xmin, pf_xmax = min(xs), max(xs)
-                if pf_xmin <= pos_a[0] <= pf_xmax:
-                    # 怪的X在平台范围内 → 用绿线Y（方法B有效）
-                    best_y = pos_a[1]
-                    best_dx = 999
-                    for (px, py) in pts:
-                        dx = abs(px - pos_a[0])
-                        if dx < best_dx:
-                            best_dx = dx
-                            best_y = py
-                    pos_b_y = best_y
-                # 怪的X在平台范围外（对应不到Y）→ 不用方法B，直接用方法A
-        # 如果方法B失败（怪X不在平台范围/找不到平台），直接用方法A
-        if pos_b_y is None:
-            return pos_a
-        # 偏差检测：方法B的Y和方法A的Y偏差>30px时，判定平台判定错误，只用方法A
-        # 避免平台判定错误把怪从第二层拉到第三层
-        y_diff = abs(pos_b_y - pos_a[1])
-        if y_diff > 30:
-            return pos_a
-        # 折中方案：加权平均
-        # Y = 方法B(平台绿线) × 50% + 方法A(线性转换) × 50%
-        # X用方法A（线性转换更准）
-        final_x = pos_a[0]
-        final_y = pos_b_y * 0.5 + pos_a[1] * 0.5
-        return (final_x, final_y)
+        map_x, map_y = pos_a
+        # Y值平台绿线校准：找X最接近怪物X的绿线点（怪物正下方），Y偏差<15px才校准
+        best_y = None
+        best_dx = 999
+        for p in self.platforms:
+            pts = self._platform_points(p)
+            for (px, py) in pts:
+                dx = abs(px - map_x)
+                dy = abs(py - map_y)
+                # X最接近且Y偏差<15px（怪站在这个平台上）
+                if dx < best_dx and dy < 15:
+                    best_dx = dx
+                    best_y = py
+        if best_y is not None:
+            map_y = best_y
+        return (map_x, map_y)
 
     def _get_monster_platform(self, screen_x, screen_y):
         """【模块B】判定怪在哪个平台上（用手动录制平台判定）
@@ -2567,21 +2587,49 @@ class MinimapRouteRecorder:
                     self._char_dropdown = False
                     return
 
-        # 日志滚动条点击
-        if event == cv2.EVENT_LBUTTONDOWN:
-            sb_x = UI_LOG_X + UI_LOG_W - 10
-            sb_y = UI_LOG_Y + 22
-            sb_w = 8
-            sb_h = UI_LOG_H - 24
-            if sb_x <= x < sb_x + sb_w and sb_y <= y < sb_y + sb_h:
-                mid = sb_y + sb_h // 2
-                if y < mid:
-                    self._log_scroll = max(0, self._log_scroll - 1)
-                else:
-                    total = len(self._runtime_logs)
-                    max_lines = max(1, (UI_LOG_H - 24) // 16)
-                    self._log_scroll = min(max(0, total - max_lines), self._log_scroll + 1)
+        # 日志滚动条：拖拽+滚轮
+        sb_x = UI_LOG_X + UI_LOG_W - 10
+        sb_y = UI_LOG_Y + 22
+        sb_w = 8
+        sb_h = UI_LOG_H - 24
+        line_h = 16
+        max_lines = max(1, sb_h // line_h)
+        total = len(self._runtime_logs)
+        max_scroll = max(0, total - max_lines)
+
+        def _clamp_scroll(v):
+            return max(0, min(max_scroll, v))
+
+        # 鼠标滚轮（在日志区域内滚动3行）
+        if event == cv2.EVENT_MOUSEWHEEL:
+            if UI_LOG_X <= x < UI_LOG_X + UI_LOG_W and UI_LOG_Y <= y < UI_LOG_Y + UI_LOG_H:
+                if flags > 0:  # 向上滚
+                    self._log_scroll = _clamp_scroll(self._log_scroll - 3)
+                else:  # 向下滚
+                    self._log_scroll = _clamp_scroll(self._log_scroll + 3)
                 return
+
+        # 点击滚动条：开始拖拽
+        if event == cv2.EVENT_LBUTTONDOWN:
+            if sb_x <= x < sb_x + sb_w and sb_y <= y < sb_y + sb_h:
+                self._dragging_log_scroll = True
+                # 直接跳到点击位置
+                if max_scroll > 0 and sb_h > 0:
+                    rel = (y - sb_y) / sb_h
+                    self._log_scroll = _clamp_scroll(int(rel * max_scroll))
+                return
+
+        # 拖拽滚动条
+        if event == cv2.EVENT_MOUSEMOVE and getattr(self, '_dragging_log_scroll', False):
+            if max_scroll > 0 and sb_h > 0:
+                rel = max(0.0, min(1.0, (y - sb_y) / sb_h))
+                self._log_scroll = _clamp_scroll(int(rel * max_scroll))
+            return
+
+        # 松开拖拽
+        if event == cv2.EVENT_LBUTTONUP and getattr(self, '_dragging_log_scroll', False):
+            self._dragging_log_scroll = False
+            return
 
         # 2. 手动框选模式（小地图合成区域内拖拽）
         if self._selecting:
@@ -2855,32 +2903,14 @@ class MinimapRouteRecorder:
             if 0 <= rx < w and 0 <= ry < h:
                 cv2.line(display, (rx-2, ry), (rx+2, ry), (255, 255, 255), 1)
                 cv2.line(display, (rx, ry-2), (rx, ry+2), (255, 255, 255), 1)
-        # 梯子（蓝线）
-        for l in self.ladders:
-            x = int(max(0, min(l["x"], w - 1)))
-            y1 = int(max(0, min(l["y_top"], h - 1)))
-            y2 = int(max(0, min(l["y_bottom"], h - 1)))
-            cv2.line(display, (x, y1), (x, y2), COLOR_LADDER, 1)
         # 录制中的平台/梯子（黄色）
         if self.recording_platform and len(self.platform_points) > 1:
             cv2.polylines(display, [np.array(self.platform_points, np.int32).reshape(-1, 1, 2)], False, COLOR_RECORDING, 1)
         if self.recording_ladder and len(self.ladder_points) > 1:
             cv2.polylines(display, [np.array(self.ladder_points, np.int32).reshape(-1, 1, 2)], False, COLOR_RECORDING, 1)
-        # 人物光点（黄点+红圈）
-        if player_pos:
-            cv2.circle(display, player_pos, 2, COLOR_PLAYER, -1)
-            cv2.circle(display, player_pos, 4, (0, 0, 255), 1)
-        # 手动录制平台：画整条深绿色线（最后画，始终在最上层）
-        # 同时保留Y值+X范围+边界回退功能
-        for p in self.platforms:
-            pts = self._platform_points(p)
-            if len(pts) >= 2:
-                cv2.polylines(display, [np.array(pts, np.int32).reshape(-1, 1, 2)], False, COLOR_PLATFORM, 1)
         map_display = cv2.resize(display, (FIXED_W, MAP_H), interpolation=cv2.INTER_NEAREST)
 
         # 【模块B】在缩放后的map_display上画怪物紫色点（半径6，清晰可见）
-        # 坐标从原始分辨率转换到缩放后：x * scale_x, y * scale_y
-        # 紫色点圆心重叠在绿线上：相同X时用绿线Y值，绿线在display上已画好，紫色点在其上层
         scale_x = FIXED_W / w if w > 0 else 1.0
         scale_y = MAP_H / h if h > 0 else 1.0
         if self._monsters and self._player_map_pos and self._player_screen_pos:
@@ -2890,43 +2920,43 @@ class MinimapRouteRecorder:
                 mcy = y2
                 mpos = self._get_monster_map_pos_verified(mcx, mcy)
                 if mpos:
-                    mx, my = int(mpos[0]), int(mpos[1])
-                    # 找怪物X位置对应的绿线Y值，让紫色点圆心重叠在绿线上
-                    for p in self.platforms:
-                        pts = self._platform_points(p)
-                        if len(pts) >= 2:
-                            best_y = None
-                            best_dx = 999
-                            for (px, py) in pts:
-                                dx = abs(px - mx)
-                                if dx < best_dx:
-                                    best_dx = dx
-                                    best_y = py
-                            if best_y is not None:
-                                my = best_y
-                                break
-                    # 转换到缩放后坐标，画半径6的实心紫色圆
-                    dx_s = int(mx * scale_x)
-                    dy_s = int(my * scale_y)
+                    dx_s = int(mpos[0] * scale_x)
+                    dy_s = int(mpos[1] * scale_y)
                     if 0 <= dx_s < FIXED_W and 0 <= dy_s < MAP_H:
                         cv2.circle(map_display, (dx_s, dy_s), 6, COLOR_MONSTER_MAP, -1)
 
-        # 【模块B】在缩放后的map_display上画平台编号（更清晰，不会被缩放模糊）
-        # 平台编号（缩放后画，红色，加大，不用加粗，LINE_AA抗锯齿）
+        # 平台编号（缩放后画，红色白描边）
         for p in self.platforms:
             pts = self._platform_points(p)
             if len(pts) >= 2:
                 pf_id = p.get('id', 0) + 1
                 xs = [pt[0] for pt in pts]
                 ys = [pt[1] for pt in pts]
-                cx = int(sum(xs) / len(xs) * scale_x)  # 平台X中心（缩放后）
-                cy_top = int(min(ys) * scale_y) - 8     # 绿线上方8PX（缩放后，避免和绿线重叠）
+                cx = int(sum(xs) / len(xs) * scale_x)
+                cy_top = int(min(ys) * scale_y) - 8
                 if 0 <= cx < FIXED_W and 0 <= cy_top < MAP_H:
-                    # 红色数字加白色边框（先画白色粗描边，再画红色细字，更清晰）
                     cv2.putText(map_display, str(pf_id), (cx, cy_top),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 3, cv2.LINE_AA)
                     cv2.putText(map_display, str(pf_id), (cx, cy_top),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1, cv2.LINE_AA)
+
+        # 梯子蓝线（在编号上方，缩放后画，线宽2）
+        for l in self.ladders:
+            lx = int(l["x"] * scale_x)
+            ly1 = int(l["y_top"] * scale_y)
+            ly2 = int(l["y_bottom"] * scale_y)
+            lx = max(0, min(lx, FIXED_W - 1))
+            ly1 = max(0, min(ly1, MAP_H - 1))
+            ly2 = max(0, min(ly2, MAP_H - 1))
+            cv2.line(map_display, (lx, ly1), (lx, ly2), COLOR_LADDER, 2)
+
+        # 平台绿线（最后画，始终在最上层，缩放后画，线宽1）
+        for p in self.platforms:
+            pts = self._platform_points(p)
+            if len(pts) >= 2:
+                scaled_pts = [(int(pt[0] * scale_x), int(pt[1] * scale_y)) for pt in pts]
+                cv2.polylines(map_display, [np.array(scaled_pts, np.int32).reshape(-1, 1, 2)],
+                              False, COLOR_PLATFORM, 2)
 
         # 随机模式运行状态
         if self._random_running:
@@ -3384,6 +3414,7 @@ class MinimapRouteRecorder:
             "left": gx + pad_l, "top": gy + pad_t,
             "width": gw - pad_l - pad_r, "height": gh - pad_t - pad_b
         }
+        self._recalc_scale_from_region()
         self._save_region()
         self.frame_count = 0
         self.last_player_pos = None
@@ -5241,6 +5272,11 @@ class MinimapRouteRecorder:
         if self.hwnd is None:
             return
         now = time.time() * 1000
+        # 启动后3秒内不检测吃药（避免窗口刚加载截图不准导致误加蓝）
+        if not hasattr(self, '_pot_start_time'):
+            self._pot_start_time = now
+        if now - self._pot_start_time < 3000:
+            return
         # 每400ms检测一次，避免太频繁
         if now - self._last_pot_check < 500:
             return
@@ -5891,13 +5927,15 @@ class MinimapRouteRecorder:
             else:
                 player_pos = self.last_player_pos
             self._player_map_pos = player_pos  # 保存小地图坐标供战斗逻辑判断平台
-            # 【模块B】独立检测人物屏幕位置（不依赖运行状态，脚本启动就工作，和加药一样）
-            # 用于自动校准scale和记录左右端点；_combat_tick中不再重复检测
+            # 【模块B】独立检测人物屏幕位置+怪物（不依赖运行状态，脚本启动就工作）
             if self.hwnd and (not getattr(self, '_player_screen_pos', None) or self.frame_count % 10 == 0):
                 try:
                     _frame = self._capture_window()
                     if _frame is not None:
                         self._player_screen_pos = self._get_player_screen_pos(_frame)
+                        # 不运行时也检测怪物（每10帧一次，约100ms，跟手不卡）
+                        if not self._running and self.frame_count % 10 == 0:
+                            self._monsters = self._detect_monsters(_frame)
                 except Exception:
                     pass
             # 【模块B】自动校准scale比例（人物移动时记录屏幕和小地图变化，越跑越准）
@@ -5906,7 +5944,11 @@ class MinimapRouteRecorder:
             self._auto_calibrate_edges()
 
             if self.recording_platform and player_pos:
-                self.platform_points.append(player_pos)
+                # 同一X位置(差值<3px)的新点覆盖旧点，以后画的为准
+                if self.platform_points and abs(self.platform_points[-1][0] - player_pos[0]) < 3:
+                    self.platform_points[-1] = player_pos
+                else:
+                    self.platform_points.append(player_pos)
             if self.recording_ladder and player_pos:
                 self.ladder_points.append(player_pos)
 
