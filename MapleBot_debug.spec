@@ -1,0 +1,48 @@
+# -*- mode: python ; coding: utf-8 -*-
+# 调试版：console=True，启动时显示错误信息
+
+a = Analysis(
+    ['maple_route_ui.py'],
+    pathex=[],
+    binaries=[],
+    datas=[('C:\\Users\\PC\\Doubao\\chats\\2026-08-15\\new-chat-4\\maple_bot\\config', 'config'),
+           ('C:\\Users\\PC\\Doubao\\chats\\2026-08-15\\new-chat-4\\maple_bot\\data', 'data')],
+    hiddenimports=['ultralytics', 'cv2', 'mss', 'sklearn'],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+    optimize=0,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name='MapleBot_debug',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,
+    console=True,  # 调试版：显示控制台
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='MapleBot_debug',
+)

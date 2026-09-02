@@ -1,0 +1,15 @@
+{
+  "maps": [
+    {
+      "name": "默认地图",
+      "plans": [
+        {
+          "id": "route_001",
+          "name": "方案一",
+          "selected": false
+        }
+      ]
+    }
+  ],
+  "current_id": "route_001"
+}
