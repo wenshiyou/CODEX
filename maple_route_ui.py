@@ -1180,9 +1180,9 @@ class MinimapRouteRecorder:
             return
 
         # 2. 找"大地图"文字（小地图右侧同行）
-        roi_b_x1 = mini_x + mw
-        roi_b_x2 = min(fw, mini_x + 200)
-        roi_b = frame[max(0, mini_y - 5):mini_y + mh + 10, roi_b_x1:roi_b_x2]
+        # X范围固定100-400（不管地图多宽都能检测到，避免宽地图时超出范围）
+        roi_b_x1 = 100
+        roi_b_x2 = 400
         res_b = cv2.matchTemplate(roi_b, tpl_b, cv2.TM_CCOEFF_NORMED)
         _, val_b, _, loc_b = cv2.minMaxLoc(res_b)
         big_x = roi_b_x1 + loc_b[0]
@@ -3852,15 +3852,7 @@ class MinimapRouteRecorder:
             self._key_state[vk] = pressed
 
     def _handle_hotkey(self, vk):
-        if vk == VK_F4:
-            if self._calibrating_blue_box:
-                # 校准模式下按F4：保存并退出（不管有没有改动点）
-                self._save_and_exit_blue_box_calibration()
-            else:
-                # 正常模式下按F4：进入校准
-                print("[热键] 绿框校准 (F4)")
-                self._start_blue_box_calibration()
-        elif vk == VK_F5:
+        if vk == VK_F5:
             if self.recording_ladder:
                 print("Stop ladder first (F6)")
             elif self.recording_platform:
@@ -3932,17 +3924,6 @@ class MinimapRouteRecorder:
 
     def _on_mouse(self, event, x, y, flags, param):
         """鼠标点击回调：标签页切换 + 路线页按钮"""
-        # 蓝色框校准模式：点击小地图记录角点
-        if self._calibrating_blue_box and event == cv2.EVENT_LBUTTONDOWN:
-            if hasattr(self, '_map_disp_x') and self._map_disp_w > 0:
-                if (self._map_disp_x <= x < self._map_disp_x + self._map_disp_w and
-                        self._map_disp_y <= y < self._map_disp_y + self._map_disp_h):
-                    rel_x = x - self._map_disp_x
-                    rel_y = y - self._map_disp_y
-                    map_x = int(rel_x / self._map_scale_x) if self._map_scale_x > 0 else rel_x
-                    map_y = int(rel_y / self._map_scale_y) if self._map_scale_y > 0 else rel_y
-                    self._handle_blue_box_click(map_x, map_y)
-                    return
         # 松开按钮：清除按下状态
         if event == cv2.EVENT_LBUTTONUP:
             self._pressed_btn = None
@@ -4485,11 +4466,6 @@ class MinimapRouteRecorder:
         MAP_SCALE = min(2.0, max_scale_x, max_scale_y)  # 最大2倍，确保完整显示
         render_w = int(w * MAP_SCALE)  # 渲染宽度=原始宽度×动态放大倍数
         render_h = int(h * MAP_SCALE)  # 渲染高度=原始高度×动态放大倍数
-        # 蓝色框校准/显示（在原始尺寸上画，随缩放一起显示）
-        try:
-            self._draw_blue_box(display)
-        except Exception as e:
-            _debug_log("[蓝色框] 绘制异常: %s" % e)
         map_display = cv2.resize(display, (render_w, render_h), interpolation=cv2.INTER_NEAREST)  # 按原始比率动态放大，确保完整显示
 
         # 【模块B】在缩放后的map_display上画怪物紫色点（半径6，清晰可见）
@@ -5768,27 +5744,6 @@ class MinimapRouteRecorder:
                                 gdi32.Ellipse(hdc, cx - r, cy - r, cx + r + 1, cy + r + 1)
                                 gdi32.SelectObject(hdc, old_pen)
                                 gdi32.SelectObject(hdc, old_brush)
-                            # 镜头死区检测三个背景框（死区红色/跟随绿色，移动模式红色+序号）
-                            for _ri, _dzb in enumerate(self._bg_regions):
-                                # 移动模式下的框用红色，其他用死区/跟随状态色
-                                if self._bg_dragging == _ri:
-                                    _dzc = 0x0000FF  # 移动模式红色
-                                else:
-                                    _dzc = 0x0000FF if self._bg_motion_count < 3 else 0x00FF00  # 镜头不动=红(死区)，镜头在动=绿(跟随)
-                                _dzp = gdi32.CreatePen(0, 1, _dzc)
-                                if _dzp:
-                                    gdi_objs.append(_dzp)
-                                _old_dzp = gdi32.SelectObject(hdc, _dzp)
-                                gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
-                                gdi32.Rectangle(hdc, _dzb["x"], _dzb["y"],
-                                                _dzb["x"] + _dzb["w"], _dzb["y"] + _dzb["h"])
-                                gdi32.SelectObject(hdc, _old_dzp)
-                                # 序号标注（白色，1/2/3）
-                                gdi32.SetTextColor(hdc, 0xFFFFFF)
-                                gdi32.SetBkMode(hdc, 1)  # 透明背景
-                                _label = str(_ri + 1)
-                                gdi32.TextOutW(hdc, _dzb["x"] + 2, _dzb["y"] + 1, _label, len(_label))
-                            # 人物定位大框已移到第二个蒙板（_lock_overlay_hwnd）专门显示映射内容，第一个蒙板不再绘制
 
                             if char_pos:
                                 green_pen = gdi32.CreatePen(0, 2, 0x00FF00)
@@ -5862,28 +5817,6 @@ class MinimapRouteRecorder:
                         if brush2:
                             gdi_objs2.append(brush2)
                         user32.FillRect(hdc2, ctypes.byref(rect2), brush2)
-                        # 人物定位大框（绿色空心矩形，用小地图光点映射坐标）
-                        if getattr(self, '_player_lock_pos', None):
-                            _lock_x, _lock_y = self._player_lock_pos
-                        else:
-                            _lock_x = self.window_rect["width"] // 2 if self.window_rect else 400
-                            _lock_y = self.window_rect["height"] // 2 if self.window_rect else 300
-                        pbox_pen2 = gdi32.CreatePen(0, 2, 0x00FF00)
-                        if pbox_pen2:
-                            gdi_objs2.append(pbox_pen2)
-                        old_pbox2 = gdi32.SelectObject(hdc2, pbox_pen2)
-                        gdi32.SelectObject(hdc2, gdi32.GetStockObject(5))  # 空刷
-                        gdi32.Rectangle(hdc2, _lock_x - PLAYER_BOX_W // 2, _lock_y - PLAYER_BOX_H // 2,
-                                        _lock_x + PLAYER_BOX_W // 2, _lock_y + PLAYER_BOX_H // 2)
-                        gdi32.SelectObject(hdc2, old_pbox2)
-                        # 映射光点：小地图光点直接映射到游戏窗口的位置（黄色实心圆）
-                        _dot_brush2 = gdi32.CreateSolidBrush(0x00FFFF)
-                        if _dot_brush2:
-                            gdi_objs2.append(_dot_brush2)
-                        _old_dot2 = gdi32.SelectObject(hdc2, _dot_brush2)
-                        gdi32.SelectObject(hdc2, gdi32.GetStockObject(8))  # 空笔
-                        gdi32.Ellipse(hdc2, _lock_x - 4, _lock_y - 4, _lock_x + 4, _lock_y + 4)
-                        gdi32.SelectObject(hdc2, _old_dot2)
                     finally:
                         user32.EndPaint(hwnd, ctypes.byref(ps2))
                         for _obj in gdi_objs2:
@@ -8499,41 +8432,7 @@ class MinimapRouteRecorder:
                 try:
                     _frame = self._capture_window()
                     if _frame is not None:
-                        # 先用当前帧更新镜头状态(死区/跟随+冻结框)，再用最新状态算人物位置，保证同帧一致
-                        try:
-                            self._detect_camera_motion(_frame)
-                        except Exception as e:
-                            print("[镜头检测] 异常:", e)
-                        # 光点锁定人物坐标：小地图光点在绿框中的比例→游戏屏幕坐标（不用人物特征匹配）
-                        try:
-                            self._player_lock_pos = self.lock_screen_from_dot()
-                            # 诊断日志：每30帧打印一次窗口状态，定位_target_window_size为何为0
-                            if self.frame_count % 30 == 0:
-                                _tw = getattr(self, '_target_window_size', None)
-                                _wr = getattr(self, 'window_rect', None)
-                                print("[诊断] frame=%d target_size=%s hwnd=%s window_rect=%s lock_pos=%s" % (
-                                    self.frame_count, _tw, self.hwnd, _wr, self._player_lock_pos))
-                        except Exception as e:
-                            print("[光点锁定] 异常:", e)
-                            self._player_lock_pos = None
                         self._player_screen_pos = self._get_player_screen_pos(_frame)
-                        # === 偏移分析日志：记录光点映射位置和特征点位置的距离变化 ===
-                        try:
-                            _lp = getattr(self, '_player_lock_pos', None)
-                            _sp = getattr(self, '_player_screen_pos', None)
-                            if _lp and _sp:
-                                _dx = _lp[0] - _sp[0]
-                                _dy = _lp[1] - _sp[1]
-                                _dist = int((_dx*_dx + _dy*_dy) ** 0.5)
-                                _state = getattr(self, '_camera_state', 'unknown')
-                                _ffc = getattr(self, '_follow_frame_count', 0)
-                                _sfc = getattr(self, '_stop_frame_count', 0)
-                                _ffs = getattr(self, '_feedforward_strength', 0.0)
-                                print("[偏移分析] frame=%d state=%s follow_f=%d stop_f=%d ff=%.2f lock=(%d,%d) char=(%d,%d) dx=%d dy=%d dist=%d" % (
-                                    self.frame_count, _state, _ffc, _sfc, _ffs,
-                                    _lp[0], _lp[1], _sp[0], _sp[1], _dx, _dy, _dist))
-                        except Exception:
-                            pass
                         # 每帧触发蒙板重绘（人物框/怪物框实时跟随，不依赖100ms定时器）
                         if getattr(self, '_overlay_hwnd', None):
                             user32.InvalidateRect(self._overlay_hwnd, None, True)
