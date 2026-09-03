@@ -6484,11 +6484,11 @@ class MinimapRouteRecorder:
                             # 注：和人物特征点写法完全一样，不用self（wnd_proc回调中self会导致异常）
                             for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
                                 r = 4  # 半径4（和人物特征点一样）
-                                # 对比测试：颜色改成和人物完全一样（黄色），确认是不是颜色的问题
-                                fpen = gdi32.CreatePen(0, 1, 0x0080FF)  # 橙色边框（和人物一样）
+                                # 怪物特征点：紫蓝色 0x8000FF（测试是不是只有0xFF00FF有问题）
+                                fpen = gdi32.CreatePen(0, 1, 0x800080)  # 深紫色边框
                                 if fpen:
                                     gdi_objs.append(fpen)
-                                fbrush = gdi32.CreateSolidBrush(0x00FFFF)  # 黄色填充（和人物一样）
+                                fbrush = gdi32.CreateSolidBrush(0x8000FF)  # 紫蓝色填充（测试）
                                 if fbrush:
                                     gdi_objs.append(fbrush)
                                 old_fpen = gdi32.SelectObject(hdc, fpen)
@@ -6502,7 +6502,7 @@ class MinimapRouteRecorder:
                                 if ffont:
                                     gdi_objs.append(ffont)
                                 old_ffont = gdi32.SelectObject(hdc, ffont)
-                                gdi32.SetTextColor(hdc, 0x00FFFF)  # 黄色文字（和人物一样）
+                                gdi32.SetTextColor(hdc, 0x8000FF)  # 紫蓝色文字
                                 gdi32.SetBkMode(hdc, 1)  # 透明背景
                                 gdi32.TextOutW(hdc, fx + 7, fy - 11, txt, len(txt))
                                 gdi32.SelectObject(hdc, old_ffont)
