@@ -935,9 +935,7 @@ class MinimapRouteRecorder:
         self._monster_feature_matches = []  # 怪物特征单独匹配结果 [(x, y, tpl_id, confidence), ...]
         self._monster_overlay_thread = None
         # 人物坐标跟踪线程（单独线程，每帧截图+人物匹配，确保人物点死死咬住位置不跳变）
-        self._player_track_thread = None
-        self._player_track_stop = False
-        self._player_track_lock = threading.Lock()
+        # 人物跟踪线程已删除（改用主循环共用截图，性能更好）
         # 【模块B】自动校准状态（同屏三点校准：基点+右800+上500）
         self._auto_calib_stage = 0  # 0=空闲, 1=蒙板出三点可拖动定特色位置, 2=已记录绿点小地图位置待记录蓝点, 3=完成
         self._auto_calib_base = None  # 基点：(屏幕X, 屏幕Y, 小地图X, 小地图Y)
@@ -5905,70 +5903,7 @@ class MinimapRouteRecorder:
         self._add_log("已删除怪物特征#%d" % t["id"])
         print("[怪物特征] 已删除 #%d")
 
-    def _player_track_loop(self):
-        """人物坐标跟踪线程（单独线程，每帧截图+人物匹配，确保人物点死死咬住位置不跳变）
-        不阻塞主循环，YOLO检测和战斗逻辑继续正常运行
-        """
-        print("[人物跟踪] 线程已启动，每帧截图+匹配")
-        last_log = 0
-        _debug_saved = False  # 调试：保存第一张截图，看看线程里截到的图是不是正常的
-        while not self._player_track_stop:
-            try:
-                # 检查窗口是否绑定
-                if not self.hwnd or not win32gui.IsWindow(self.hwnd):
-                    time.sleep(0.01)
-                    continue
-                # 每帧截图
-                frame = self._capture_window()
-                if frame is None:
-                    time.sleep(0.005)
-                    continue
-                # 调试：保存第一张截图
-                if not _debug_saved:
-                    _debug_saved = True
-                    try:
-                        cv2.imwrite("debug_thread_capture.png", frame)
-                        print(f"[人物跟踪] 调试：已保存第一张截图，尺寸={frame.shape}, 特征模板数={len(self._char_templates) if self._char_templates else 0}")
-                    except Exception as e:
-                        print(f"[人物跟踪] 调试：保存截图失败: {e}")
-                # 人物特征匹配（每帧一次）
-                pos = self._get_player_screen_pos(frame)
-                # 用锁保护，更新人物位置
-                with self._player_track_lock:
-                    self._player_screen_pos = pos
-                # 每秒打印一次状态
-                now = time.time()
-                if now - last_log >= 1.0:
-                    last_log = now
-                    if pos:
-                        print(f"[人物跟踪] 线程正常 位置=({pos[0]},{pos[1]}) 置信度={pos[2]:.2f}" if len(pos) > 2 else f"[人物跟踪] 线程正常 位置=({pos[0]},{pos[1]})")
-                    else:
-                        print("[人物跟踪] 线程正常 未匹配到人物")
-            except Exception as e:
-                print(f"[人物跟踪] 线程异常: {e}")
-                time.sleep(0.01)
-            # 短暂休眠，避免CPU占用过高
-            time.sleep(0.001)
-        print("[人物跟踪] 线程已停止")
-
-    def _start_player_track(self):
-        """启动人物坐标跟踪线程"""
-        if self._player_track_thread and self._player_track_thread.is_alive():
-            print("[人物跟踪] 线程已在运行")
-            return
-        self._player_track_stop = False
-        self._player_track_thread = threading.Thread(target=self._player_track_loop, daemon=True)
-        self._player_track_thread.start()
-        print("[人物跟踪] 线程启动命令已发送")
-
-    def _stop_player_track(self):
-        """停止人物坐标跟踪线程"""
-        self._player_track_stop = True
-        if self._player_track_thread:
-            self._player_track_thread.join(timeout=2.0)
-            self._player_track_thread = None
-        print("[人物跟踪] 线程停止命令已发送")
-
+    # _player_track_loop已删除
     def _match_character(self, frame):
         """【多特征融合】在游戏画面中用多个特征模板匹配查找人物脚位置
         1. 遍历所有特征，每个特征匹配到位置后 + 该特征offset → 人物脚位置预测
@@ -9628,8 +9563,7 @@ class MinimapRouteRecorder:
         # Ensure overlay is destroyed before exit
         if self._monster_overlay_running:
             self._stop_monster_overlay()
-        # 停止人物坐标跟踪线程
-        self._stop_player_track()
+        # 人物跟踪线程已删除
         cv2.destroyAllWindows()
         print("Final:", len(self.platforms), "platforms,", len(self.ladders), "ladders")
 
