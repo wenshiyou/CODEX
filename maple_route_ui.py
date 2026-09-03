@@ -6484,26 +6484,8 @@ class MinimapRouteRecorder:
                                 gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
                                 gdi32.Rectangle(hdc, mx - 3, my, mx + 3, my + 10)
                                 gdi32.SelectObject(hdc, old_pen)
-                            char_pos = data.get('char_pos')
-                            if char_pos:
-                                if first_draw[0]:
-                                    first_draw[0] = False
-                                    _debug_log("[怪物蒙板] 首次绘制黄点 at %s" % (char_pos,))
-                                cx, cy = char_pos
-                                r = 6  # 半径6，常驻显示（去掉闪烁逻辑）
-                                pen = gdi32.CreatePen(0, 2, 0x0080FF)
-                                if pen:
-                                    gdi_objs.append(pen)
-                                brush = gdi32.CreateSolidBrush(0x00FFFF)
-                                if brush:
-                                    gdi_objs.append(brush)
-                                old_pen = gdi32.SelectObject(hdc, pen)
-                                old_brush = gdi32.SelectObject(hdc, brush)
-                                gdi32.Ellipse(hdc, cx - r, cy - r, cx + r + 1, cy + r + 1)
-                                gdi32.SelectObject(hdc, old_pen)
-                                gdi32.SelectObject(hdc, old_brush)
-
                             # 人物特征单独匹配点（黄色小点+数字编号，方便发现哪个特征误判）
+                            # 注：已去掉大的常驻黄点（半径6），只用带编号的小光点显示每个特征的匹配情况
                             for (fx, fy, fid, fconf) in data.get('char_feature_matches', []):
                                 r = 4  # 半径4（原3加大20%）
                                 fpen = gdi32.CreatePen(0, 1, 0x0080FF)  # 橙色边框
@@ -9406,11 +9388,19 @@ class MinimapRouteRecorder:
                                getattr(self, '_char_feature_window', None) is not None or
                                getattr(self, '_monster_feature_window', None) is not None)
                     if has_win:
-                        # 处理所有待处理事件（最多5ms，避免阻塞主循环），提高弹窗输入/移动响应速度
+                        # 处理所有待处理事件（最多10ms，避免阻塞主循环），提高弹窗输入/移动响应速度
+                        # 注意：必须循环调用dooneevent直到没有事件或超时，否则after定时器事件可能不被处理
                         _tk_start = time.time()
-                        while time.time() - _tk_start < 0.005:
+                        _tk_count = 0
+                        while time.time() - _tk_start < 0.010:
                             if not self._tk_root.dooneevent(0):  # 0 = 不等待，有事件就处理
-                                break
+                                # 没有事件时短暂sleep，避免CPU占用过高
+                                time.sleep(0.001)
+                                _tk_count += 1
+                                if _tk_count > 3:  # 连续3次没有事件就退出
+                                    break
+                            else:
+                                _tk_count = 0  # 有事件时重置计数
             except Exception as e:
                 _debug_log("[方案窗口] tk update异常: %s" % e)
 
