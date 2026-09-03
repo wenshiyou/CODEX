@@ -6510,6 +6510,32 @@ class MinimapRouteRecorder:
                                 gdi32.TextOutW(hdc, fx + 7, fy - 11, txt, len(txt))
                                 gdi32.SelectObject(hdc, old_ffont)
 
+                            # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
+                            # 注：放在if char_pos:条件外，确保即使人物位置匹配失败，怪物特征点也能显示
+                            for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
+                                r = 4  # 半径4（原3加大20%）
+                                fpen = gdi32.CreatePen(0, 1, 0x800080)  # 紫色边框
+                                if fpen:
+                                    gdi_objs.append(fpen)
+                                fbrush = gdi32.CreateSolidBrush(0xFF00FF)  # 紫色填充
+                                if fbrush:
+                                    gdi_objs.append(fbrush)
+                                old_fpen = gdi32.SelectObject(hdc, fpen)
+                                old_fbrush = gdi32.SelectObject(hdc, fbrush)
+                                gdi32.Ellipse(hdc, fx - r, fy - r, fx + r + 1, fy + r + 1)
+                                gdi32.SelectObject(hdc, old_fpen)
+                                gdi32.SelectObject(hdc, old_fbrush)
+                                # 数字编号（在点的右边，17号字体，原14加大20%）
+                                txt = str(fid)
+                                ffont = gdi32.CreateFontW(17, 0, 0, 0, 400, 0, 0, 0, 134, 3, 2, 1, 49, "微软雅黑")
+                                if ffont:
+                                    gdi_objs.append(ffont)
+                                old_ffont = gdi32.SelectObject(hdc, ffont)
+                                gdi32.SetTextColor(hdc, 0xFF00FF)  # 紫色文字
+                                gdi32.SetBkMode(hdc, 1)  # 透明背景
+                                gdi32.TextOutW(hdc, fx + 7, fy - 11, txt, len(txt))
+                                gdi32.SelectObject(hdc, old_ffont)
+
                             if char_pos:
                                 green_pen = gdi32.CreatePen(0, 2, 0x00FF00)
                                 if green_pen:
@@ -6534,30 +6560,7 @@ class MinimapRouteRecorder:
                                 # 怪物头顶血条绿色标记（近战挡住怪时凭血条定位）
                                 for (bx, by, bw, bh) in data.get('monster_hp_bars', []):
                                     gdi32.Rectangle(hdc, bx, by, bx + bw, by + bh)
-                                # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
-                                for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
-                                    r = 4  # 半径4（原3加大20%）
-                                    fpen = gdi32.CreatePen(0, 1, 0x800080)  # 紫色边框
-                                    if fpen:
-                                        gdi_objs.append(fpen)
-                                    fbrush = gdi32.CreateSolidBrush(0xFF00FF)  # 紫色填充
-                                    if fbrush:
-                                        gdi_objs.append(fbrush)
-                                    old_fpen = gdi32.SelectObject(hdc, fpen)
-                                    old_fbrush = gdi32.SelectObject(hdc, fbrush)
-                                    gdi32.Ellipse(hdc, fx - r, fy - r, fx + r + 1, fy + r + 1)
-                                    gdi32.SelectObject(hdc, old_fpen)
-                                    gdi32.SelectObject(hdc, old_fbrush)
-                                    # 数字编号（在点的右边，17号字体，原14加大20%）
-                                    txt = str(fid)
-                                    ffont = gdi32.CreateFontW(17, 0, 0, 0, 400, 0, 0, 0, 134, 3, 2, 1, 49, "微软雅黑")
-                                    if ffont:
-                                        gdi_objs.append(ffont)
-                                    old_ffont = gdi32.SelectObject(hdc, ffont)
-                                    gdi32.SetTextColor(hdc, 0xFF00FF)  # 紫色文字
-                                    gdi32.SetBkMode(hdc, 1)  # 透明背景
-                                    gdi32.TextOutW(hdc, fx + 7, fy - 11, txt, len(txt))
-                                    gdi32.SelectObject(hdc, old_ffont)
+
                     except Exception as e:
                         _debug_log("[怪物蒙板] 绘制异常: %s" % e)
                     finally:
