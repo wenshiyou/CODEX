@@ -5775,57 +5775,45 @@ class MinimapRouteRecorder:
                 foot_y = feat_cy + int(tpl.get("offset_y", 0))
                 predictions.append((foot_x, foot_y, max_val, tpl["id"], tpl.get("direction", "right")))
 
-        # === 第二步：按方向分组，分别融合，取置信度高的那组 ===
-        def _fuse_group(preds):
-            """对一组预测进行融合，返回(foot_x, foot_y, confidence)或None"""
-            if len(preds) >= 2:
-                avg_x = sum(p[0] for p in preds) / len(preds)
-                avg_y = sum(p[1] for p in preds) / len(preds)
-                valid = []
-                for px, py, conf, tid, _dir in preds:
-                    dist = ((px - avg_x)**2 + (py - avg_y)**2) ** 0.5
-                    if dist <= 50:
-                        valid.append((px, py, conf, tid))
-                    else:
-                        _debug_log("[人物匹配] 排除异常预测 特征#%d 位置(%d,%d) 距中心%.0fpx" % (tid, px, py, dist))
-                if len(valid) >= 2:
-                    total_conf = sum(p[2] for p in valid)
-                    if total_conf > 0:
-                        fx = int(sum(p[0] * p[2] for p in valid) / total_conf)
-                        fy = int(sum(p[1] * p[2] for p in valid) / total_conf)
-                        return (fx, fy, total_conf / len(valid))
-                elif len(valid) == 1 and valid[0][2] >= 0.75:
-                    return (valid[0][0], valid[0][1], valid[0][2])
-            elif len(preds) == 1 and preds[0][2] >= 0.75:
-                return (preds[0][0], preds[0][1], preds[0][2])
-            return None
-
-        # 按direction分组
-        left_preds = [p for p in predictions if p[4] == "left"]
-        right_preds = [p for p in predictions if p[4] == "right"]
-        left_result = _fuse_group(left_preds)
-        right_result = _fuse_group(right_preds)
-
-        # 取置信度高的那组（自动判断朝向）
-        best = None
-        best_dir = ""
-        if left_result and right_result:
-            if left_result[2] >= right_result[2]:
-                best, best_dir = left_result, "left"
-            else:
-                best, best_dir = right_result, "right"
-        elif left_result:
-            best, best_dir = left_result, "left"
-        elif right_result:
-            best, best_dir = right_result, "right"
-
-        if best:
-            final_x, final_y, avg_conf = best
+        # === 第二步：多特征融合（不区分方向，直接融合所有特征预测，只要位置） ===
+        if len(predictions) >= 2:
+            # 计算所有预测的中心点
+            avg_x = sum(p[0] for p in predictions) / len(predictions)
+            avg_y = sum(p[1] for p in predictions) / len(predictions)
+            # 一致性校验：排除距离中心点>50px的异常值（误判）
+            valid = []
+            for px, py, conf, tid, _dir in predictions:
+                dist = ((px - avg_x)**2 + (py - avg_y)**2) ** 0.5
+                if dist <= 50:
+                    valid.append((px, py, conf, tid))
+                else:
+                    _debug_log("[人物匹配] 排除异常预测 特征#%d 位置(%d,%d) 距中心%.0fpx" % (tid, px, py, dist))
+            # 有效预测>=2个：按置信度加权平均
+            if len(valid) >= 2:
+                total_conf = sum(p[2] for p in valid)
+                if total_conf > 0:
+                    final_x = int(sum(p[0] * p[2] for p in valid) / total_conf)
+                    final_y = int(sum(p[1] * p[2] for p in valid) / total_conf)
+                    avg_conf = total_conf / len(valid)
+                    self._last_char_match_pos = (final_x, final_y)
+                    self._last_char_match_time = time.time() * 1000
+                    _debug_log("[人物匹配] 多特征融合成功 %d/%d特征 置信度%.2f 位置(%d,%d)" % (
+                        len(valid), len(predictions), avg_conf, final_x, final_y))
+                    return (final_x, final_y, avg_conf)
+            # 有效预测只剩1个：用这个，但提高门槛
+            elif len(valid) == 1 and valid[0][2] >= 0.75:
+                final_x, final_y, conf, _ = valid[0]
+                self._last_char_match_pos = (final_x, final_y)
+                self._last_char_match_time = time.time() * 1000
+                _debug_log("[人物匹配] 单特征(融合后剩1个) 置信度%.2f 位置(%d,%d)" % (conf, final_x, final_y))
+                return (final_x, final_y, conf)
+        elif len(predictions) == 1 and predictions[0][2] >= 0.75:
+            # 只有1个特征匹配成功，且置信度高
+            final_x, final_y, conf, _, _ = predictions[0]
             self._last_char_match_pos = (final_x, final_y)
             self._last_char_match_time = time.time() * 1000
-            dir_name = "向左" if best_dir == "left" else "向右"
-            _debug_log("[人物匹配] %s方向融合 置信度%.2f 位置(%d,%d)" % (dir_name, avg_conf, final_x, final_y))
-            return (final_x, final_y, avg_conf)
+            _debug_log("[人物匹配] 单特征 置信度%.2f 位置(%d,%d)" % (conf, final_x, final_y))
+            return (final_x, final_y, conf)
 
         # === 第三步：ROI回退（在上次成功位置附近160x160搜索，阈值0.55）===
         last_pos = getattr(self, '_last_char_match_pos', None)
@@ -5851,31 +5839,25 @@ class MinimapRouteRecorder:
                         foot_x = feat_cx + int(tpl.get("offset_x", 0))
                         foot_y = feat_cy + int(tpl.get("offset_y", 0))
                         roi_predictions.append((foot_x, foot_y, max_val, tpl["id"], tpl.get("direction", "right")))
-                # ROI回退也按方向分组
-                roi_left = [p for p in roi_predictions if p[4] == "left"]
-                roi_right = [p for p in roi_predictions if p[4] == "right"]
-                roi_best = None
-                for group in [roi_left, roi_right]:
-                    if len(group) >= 2:
-                        avg_x = sum(p[0] for p in group) / len(group)
-                        avg_y = sum(p[1] for p in group) / len(group)
-                        valid = [p for p in group if ((p[0]-avg_x)**2 + (p[1]-avg_y)**2)**0.5 <= 50]
-                        if len(valid) >= 2:
-                            total_conf = sum(p[2] for p in valid)
-                            fx = int(sum(p[0] * p[2] for p in valid) / total_conf)
-                            fy = int(sum(p[1] * p[2] for p in valid) / total_conf)
-                            res = (fx, fy, total_conf / len(valid))
-                            if roi_best is None or res[2] > roi_best[2]:
-                                roi_best = res
-                    elif len(group) == 1:
-                        res = (group[0][0], group[0][1], group[0][2])
-                        if roi_best is None or res[2] > roi_best[2]:
-                            roi_best = res
-                if roi_best:
-                    final_x, final_y, conf = roi_best
+                # ROI回退：直接融合所有预测（不区分方向）
+                if len(roi_predictions) >= 2:
+                    avg_x = sum(p[0] for p in roi_predictions) / len(roi_predictions)
+                    avg_y = sum(p[1] for p in roi_predictions) / len(roi_predictions)
+                    valid = [p for p in roi_predictions if ((p[0]-avg_x)**2 + (p[1]-avg_y)**2)**0.5 <= 50]
+                    if len(valid) >= 2:
+                        total_conf = sum(p[2] for p in valid)
+                        final_x = int(sum(p[0] * p[2] for p in valid) / total_conf)
+                        final_y = int(sum(p[1] * p[2] for p in valid) / total_conf)
+                        conf = total_conf / len(valid)
+                        self._last_char_match_pos = (final_x, final_y)
+                        self._last_char_match_time = time.time() * 1000
+                        _debug_log("[人物匹配] ROI多特征融合 %d/%d 置信度%.2f 位置(%d,%d)" % (len(valid), len(roi_predictions), conf, final_x, final_y))
+                        return (final_x, final_y, conf)
+                elif len(roi_predictions) == 1:
+                    final_x, final_y, conf, _, _ = roi_predictions[0]
                     self._last_char_match_pos = (final_x, final_y)
                     self._last_char_match_time = time.time() * 1000
-                    _debug_log("[人物匹配] ROI融合 置信度%.2f 位置(%d,%d)" % (conf, final_x, final_y))
+                    _debug_log("[人物匹配] ROI单特征 置信度%.2f 位置(%d,%d)" % (conf, final_x, final_y))
                     return (final_x, final_y, conf)
 
         # 全图+ROI都失败
