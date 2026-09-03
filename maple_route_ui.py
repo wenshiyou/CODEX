@@ -261,6 +261,19 @@ os.makedirs(CHAR_TEMPLATE_DIR, exist_ok=True)
 CHAR_TEMPLATE_META = os.path.join(CHAR_TEMPLATE_DIR, "meta.json")
 CHAR_MAX_TEMPLATES = 10
 CHAR_MATCH_THRESHOLD = 0.70
+# 人物特征颜色（暖色系，BGR格式，10种不重复）
+CHAR_FEATURE_COLORS = [
+    (0, 0, 255),      # 红
+    (0, 165, 255),    # 橙
+    (0, 255, 255),    # 黄
+    (203, 192, 255),  # 粉
+    (255, 0, 255),    # 紫
+    (128, 0, 128),    # 洋红
+    (0, 0, 139),      # 深红
+    (0, 140, 255),    # 深橙
+    (0, 215, 255),    # 金黄
+    (180, 105, 255),  # 浅粉
+]
 
 # === 怪物特征模板（手动添加怪物特征，和YOLO合并显示小地图紫点） ===
 MONSTER_TEMPLATE_DIR = os.path.join(DATA_DIR, "monster_templates")
@@ -268,6 +281,19 @@ os.makedirs(MONSTER_TEMPLATE_DIR, exist_ok=True)
 MONSTER_TEMPLATE_META = os.path.join(MONSTER_TEMPLATE_DIR, "meta.json")
 MONSTER_MAX_TEMPLATES = 10
 MONSTER_MATCH_THRESHOLD = 0.70
+# 怪物特征颜色（冷色系，BGR格式，10种不重复，和人物颜色分开）
+MONSTER_FEATURE_COLORS = [
+    (255, 0, 0),      # 蓝
+    (0, 255, 0),      # 绿
+    (255, 255, 0),    # 青
+    (255, 255, 128),  # 浅蓝
+    (128, 255, 128),  # 浅绿
+    (139, 0, 0),      # 深蓝
+    (0, 139, 0),      # 深绿
+    (139, 139, 0),    # 深青
+    (255, 128, 0),    # 湖蓝
+    (0, 255, 128),    # 春绿
+]
 
 # === 人物定位框（蒙板绿色大框，以人物黄点为中心） ===
 PLAYER_BOX_W = 150  # 人物定位框宽度（先用大尺寸框住，精准后再改小）
@@ -903,6 +929,8 @@ class MinimapRouteRecorder:
         self._monster_overlay_running = False
         self._overlay_hwnd = None
         self._monster_overlay_data = None  # {char_pos, monsters, hp_marker, mp_marker, blink_until}
+        self._char_feature_matches = []     # 人物特征单独匹配结果 [(x, y, tpl_id, confidence), ...]
+        self._monster_feature_matches = []  # 怪物特征单独匹配结果 [(x, y, tpl_id, confidence), ...]
         self._monster_overlay_thread = None
         # 【模块B】自动校准状态（同屏三点校准：基点+右800+上500）
         self._auto_calib_stage = 0  # 0=空闲, 1=蒙板出三点可拖动定特色位置, 2=已记录绿点小地图位置待记录蓝点, 3=完成
@@ -5496,6 +5524,7 @@ class MinimapRouteRecorder:
                 "offset_x": t.get("offset_x", 0),
                 "offset_y": t.get("offset_y", 0),
                 "direction": t.get("direction", "right"),
+                "color": t.get("color", CHAR_FEATURE_COLORS[t["id"] % len(CHAR_FEATURE_COLORS)]),
                 "created_at": t["created_at"]
             })
         try:
@@ -5559,6 +5588,8 @@ class MinimapRouteRecorder:
             print("[人物特征] 保存失败: cv2.imencode返回False")
 
         ch, cw = captured.shape[:2]  # 兼容3通道图shape=(h,w,3)
+        # 自动分配颜色（按ID取色，保证不重复）
+        feat_color = CHAR_FEATURE_COLORS[new_id % len(CHAR_FEATURE_COLORS)]
         self._char_templates.append({
             "id": new_id,
             "img": captured,
@@ -5566,6 +5597,7 @@ class MinimapRouteRecorder:
             "height": ch,
             "offset_x": 0,   # 默认偏移0，用户在弹窗中校准到人物脚
             "offset_y": 0,
+            "color": feat_color,  # 特征颜色，用于蒙板上显示匹配点
             "direction": direction,  # 朝向: left/right
             "created_at": created_at
         })
@@ -5775,6 +5807,9 @@ class MinimapRouteRecorder:
                 foot_y = feat_cy + int(tpl.get("offset_y", 0))
                 predictions.append((foot_x, foot_y, max_val, tpl["id"], tpl.get("direction", "right")))
 
+        # 记录每个特征的单独匹配结果（用于蒙板上显示每个特征的匹配点+数字，方便发现哪个特征误判）
+        self._char_feature_matches = [(p[0], p[1], p[3], p[2]) for p in predictions]
+
         # === 第二步：多特征融合（不区分方向，直接融合所有特征预测，只要位置） ===
         if len(predictions) >= 2:
             # 计算所有预测的中心点
@@ -5880,6 +5915,7 @@ class MinimapRouteRecorder:
         all_matches = []  # [(cx, cy, score, tpl_w, tpl_h), ...]
 
         # === 全图匹配所有特征，收集所有超过阈值的位置 ===
+        feature_best = {}  # 每个特征的最佳匹配 {tpl_id: (cx, cy, score)}
         for tpl in self._monster_templates:
             timg = tpl["img"]
             th, tw = timg.shape[:2]
@@ -5893,6 +5929,12 @@ class MinimapRouteRecorder:
                 cx = pt[0] + tw // 2 + int(tpl.get("offset_x", 0))
                 cy = pt[1] + th // 2 + int(tpl.get("offset_y", 0))
                 all_matches.append((cx, cy, score, tw, th))
+                # 记录每个特征的最佳匹配位置（用于蒙板显示特征点+数字）
+                tid = tpl["id"]
+                if tid not in feature_best or score > feature_best[tid][2]:
+                    feature_best[tid] = (cx, cy, score)
+        # 记录每个特征的最佳匹配结果到蒙板（显示紫色点+数字编号，方便发现哪个特征误判）
+        self._monster_feature_matches = [(v[0], v[1], k, v[2]) for k, v in feature_best.items()]
 
         # === 非极大值抑制（距离太近的合并，保留置信度最高的） ===
         all_matches.sort(key=lambda x: x[2], reverse=True)  # 按置信度降序
@@ -6336,6 +6378,26 @@ class MinimapRouteRecorder:
                                 gdi32.SelectObject(hdc, old_pen)
                                 gdi32.SelectObject(hdc, old_brush)
 
+                            # 人物特征单独匹配点（黄色小点+数字编号，方便发现哪个特征误判）
+                            for (fx, fy, fid, fconf) in data.get('char_feature_matches', []):
+                                r = 3  # 半径3，是原来黄点的一半
+                                fpen = gdi32.CreatePen(0, 1, 0x0080FF)  # 橙色边框
+                                if fpen:
+                                    gdi_objs.append(fpen)
+                                fbrush = gdi32.CreateSolidBrush(0x00FFFF)  # 黄色填充
+                                if fbrush:
+                                    gdi_objs.append(fbrush)
+                                old_fpen = gdi32.SelectObject(hdc, fpen)
+                                old_fbrush = gdi32.SelectObject(hdc, fbrush)
+                                gdi32.Ellipse(hdc, fx - r, fy - r, fx + r + 1, fy + r + 1)
+                                gdi32.SelectObject(hdc, old_fpen)
+                                gdi32.SelectObject(hdc, old_fbrush)
+                                # 数字编号（在点的右边，刚好能看清）
+                                txt = str(fid)
+                                gdi32.SetTextColor(hdc, 0x00FFFF)  # 黄色文字
+                                gdi32.SetBkMode(hdc, 1)  # 透明背景
+                                gdi32.TextOutW(hdc, fx + 5, fy - 7, txt, len(txt))
+
                             if char_pos:
                                 green_pen = gdi32.CreatePen(0, 2, 0x00FF00)
                                 if green_pen:
@@ -6360,6 +6422,25 @@ class MinimapRouteRecorder:
                                 # 怪物头顶血条绿色标记（近战挡住怪时凭血条定位）
                                 for (bx, by, bw, bh) in data.get('monster_hp_bars', []):
                                     gdi32.Rectangle(hdc, bx, by, bx + bw, by + bh)
+                                # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
+                                for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
+                                    r = 3  # 半径3
+                                    fpen = gdi32.CreatePen(0, 1, 0x800080)  # 紫色边框
+                                    if fpen:
+                                        gdi_objs.append(fpen)
+                                    fbrush = gdi32.CreateSolidBrush(0xFF00FF)  # 紫色填充
+                                    if fbrush:
+                                        gdi_objs.append(fbrush)
+                                    old_fpen = gdi32.SelectObject(hdc, fpen)
+                                    old_fbrush = gdi32.SelectObject(hdc, fbrush)
+                                    gdi32.Ellipse(hdc, fx - r, fy - r, fx + r + 1, fy + r + 1)
+                                    gdi32.SelectObject(hdc, old_fpen)
+                                    gdi32.SelectObject(hdc, old_fbrush)
+                                    # 数字编号（在点的右边）
+                                    txt = str(fid)
+                                    gdi32.SetTextColor(hdc, 0xFF00FF)  # 紫色文字
+                                    gdi32.SetBkMode(hdc, 1)  # 透明背景
+                                    gdi32.TextOutW(hdc, fx + 5, fy - 7, txt, len(txt))
                     except Exception as e:
                         _debug_log("[怪物蒙板] 绘制异常: %s" % e)
                     finally:
@@ -9209,6 +9290,9 @@ class MinimapRouteRecorder:
                 self._monster_overlay_data = {}
             if self._player_screen_pos:
                 self._monster_overlay_data["char_pos"] = self._player_screen_pos
+            # 同步特征单独匹配结果到蒙板（显示每个特征的匹配点+数字，方便发现误判）
+            self._monster_overlay_data["char_feature_matches"] = self._char_feature_matches
+            self._monster_overlay_data["monster_feature_matches"] = self._monster_feature_matches
             if self._running:
                 try:
                     if self._monster_overlay_data is None:
