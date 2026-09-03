@@ -1875,8 +1875,11 @@ class MinimapRouteRecorder:
         """打开保存方案窗口：有地图则列表选择，无地图则输入新地图名"""
         import tkinter as tk
         from tkinter import messagebox
+        print('[怪物特征弹窗] 步骤1: 开始创建弹窗')
         if not self._ensure_tk_root():
+            print('[怪物特征弹窗] 步骤1失败: tk_root创建失败')
             return
+        print('[怪物特征弹窗] 步骤2: tk_root已就绪')
         if self._save_window is not None:
             try:
                 self._save_window.destroy()
@@ -2301,11 +2304,13 @@ class MinimapRouteRecorder:
             except Exception:
                 pass
             self._monster_feature_window = None
+        print('[怪物特征弹窗] 步骤3: 创建Toplevel窗口')
         win = tk.Toplevel(self._tk_root)
         self._monster_feature_window = win
         win.title("怪物特征管理")
         win.resizable(False, False)
         win.attributes("-topmost", True)
+        print('[怪物特征弹窗] 步骤4: 设置X关闭按钮回调')
         def on_close_monster_win():
             """关闭怪物特征弹窗（确保X按钮有效）"""
             try:
@@ -2314,7 +2319,9 @@ class MinimapRouteRecorder:
                 pass
             self._monster_feature_window = None
         win.protocol("WM_DELETE_WINDOW", on_close_monster_win)
+        print('[怪物特征弹窗] 步骤5: 定位窗口')
         self._position_window(win, 520, 420)
+        print('[怪物特征弹窗] 步骤6: 创建左边特征列表')
 
         # === 左边：特征列表（滚动区域）===
         left_frame = tk.Frame(win, width=340, height=380)
@@ -2420,6 +2427,7 @@ class MinimapRouteRecorder:
         info = tk.Label(right_frame, text='说明：\n左=怪物朝左\n右=怪物朝右\n每方向最多5个\n偏移=特征中心到怪心和YOLO合并显示紫点', font=('微软雅黑', 8), fg='gray', justify='left', wraplength=140)
         info.pack(pady=10, anchor="n")
 
+        print('[怪物特征弹窗] 步骤7: 弹窗创建完成')
         win.update()
 
     def _open_clear_window(self):
@@ -9301,7 +9309,8 @@ class MinimapRouteRecorder:
                     has_win = (getattr(self, '_save_window', None) is not None or
                                getattr(self, '_plan_window', None) is not None or
                                getattr(self, '_clear_window', None) is not None or
-                               getattr(self, '_char_feature_window', None) is not None)
+                               getattr(self, '_char_feature_window', None) is not None or
+                               getattr(self, '_monster_feature_window', None) is not None)
                     if has_win:
                         self._tk_root.update()
             except Exception as e:
