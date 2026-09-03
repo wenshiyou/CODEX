@@ -9229,8 +9229,8 @@ class MinimapRouteRecorder:
                                 self._match_monster(_frame)
                             except Exception as _e:
                                 print("[主循环] 怪物特征匹配异常:", _e)
-                        # 不运行时也检测怪物（每2帧一次，约20ms，跟手不卡，确保紫色点不运行也显示）
-                        if not self._running and self.frame_count % 2 == 0:
+                        # 不运行时也检测怪物（每帧一次，确保紫色点不运行也显示且跟手不闪烁）
+                        if not self._running:
                             yolo_monsters = self._detect_monsters(_frame)
                             # 怪物特征匹配（手动添加的怪物模板，和YOLO合并显示小地图紫点）
                             feature_monsters = self._match_monster(_frame) if self._monster_templates else []
