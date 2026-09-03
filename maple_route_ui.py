@@ -2156,7 +2156,21 @@ class MinimapRouteRecorder:
         win.title("人物特征管理")
         win.resizable(False, False)
         win.attributes("-topmost", True)
-        win.protocol("WM_DELETE_WINDOW", lambda: self._close_window("_char_feature_window"))
+        def _on_char_win_close():
+            """X关闭：恢复原始偏移值，取消所有防抖定时器"""
+            for _tid, _after_id in list(_char_offset_timers.items()):
+                try:
+                    win.after_cancel(_after_id)
+                except Exception:
+                    pass
+            _char_offset_timers.clear()
+            for _t in self._char_templates:
+                if _t["id"] in _char_orig_offsets:
+                    _ox, _oy = _char_orig_offsets[_t["id"]]
+                    _t["offset_x"] = _ox
+                    _t["offset_y"] = _oy
+            self._close_window("_char_feature_window")
+        win.protocol("WM_DELETE_WINDOW", _on_char_win_close)
         self._position_window(win, 520, 420)
 
         # === 左边：特征列表（滚动区域）===
@@ -2179,6 +2193,33 @@ class MinimapRouteRecorder:
 
         # 保存输入框引用，关闭时读取
         self._char_offset_entries = {}  # tpl_id -> (entry_x, entry_y)
+        _char_orig_offsets = {}  # 原始偏移值，X关闭时恢复 {tpl_id: (ox, oy)}
+        _char_offset_timers = {}  # 防抖定时器 {tpl_id: after_id}
+        for _t in self._char_templates:
+            _char_orig_offsets[_t["id"]] = (_t.get("offset_x", 0), _t.get("offset_y", 0))
+
+        def _apply_char_offset(tid):
+            """防抖到期后应用偏移值"""
+            if tid not in self._char_offset_entries:
+                return
+            ex, ey = self._char_offset_entries[tid]
+            try:
+                ox = int(ex.get() or "0")
+                oy = int(ey.get() or "0")
+            except ValueError:
+                ox, oy = 0, 0
+            for _t in self._char_templates:
+                if _t["id"] == tid:
+                    _t["offset_x"] = ox
+                    _t["offset_y"] = oy
+                    break
+            _char_offset_timers.pop(tid, None)
+
+        def _on_char_offset_key(tid):
+            """偏移输入框按键事件：2秒防抖后生效"""
+            if tid in _char_offset_timers:
+                win.after_cancel(_char_offset_timers[tid])
+            _char_offset_timers[tid] = win.after(2000, lambda: _apply_char_offset(tid))
 
         def refresh_list():
             """刷新特征列表"""
@@ -2206,12 +2247,14 @@ class MinimapRouteRecorder:
                 entry_x = tk.Entry(row, width=5, font=("微软雅黑", 9))
                 entry_x.insert(0, str(tpl.get("offset_x", 0)))
                 entry_x.pack(side="left", padx=2)
+                entry_x.bind("<KeyRelease>", lambda e, tid=tpl["id"]: _on_char_offset_key(tid))
 
                 # 偏移Y
                 tk.Label(row, text="Y:", font=("微软雅黑", 9)).pack(side="left")
                 entry_y = tk.Entry(row, width=5, font=("微软雅黑", 9))
                 entry_y.insert(0, str(tpl.get("offset_y", 0)))
                 entry_y.pack(side="left", padx=2)
+                entry_y.bind("<KeyRelease>", lambda e, tid=tpl["id"]: _on_char_offset_key(tid))
 
                 self._char_offset_entries[tpl["id"]] = (entry_x, entry_y)
 
@@ -2312,7 +2355,18 @@ class MinimapRouteRecorder:
         win.attributes("-topmost", True)
         print('[怪物特征弹窗] 步骤4: 设置X关闭按钮回调')
         def on_close_monster_win():
-            """关闭怪物特征弹窗（确保X按钮有效）"""
+            """关闭怪物特征弹窗（确保X按钮有效）：恢复原始偏移值，取消所有防抖定时器"""
+            for _tid, _after_id in list(_monster_offset_timers.items()):
+                try:
+                    win.after_cancel(_after_id)
+                except Exception:
+                    pass
+            _monster_offset_timers.clear()
+            for _t in self._monster_templates:
+                if _t["id"] in _monster_orig_offsets:
+                    _ox, _oy = _monster_orig_offsets[_t["id"]]
+                    _t["offset_x"] = _ox
+                    _t["offset_y"] = _oy
             try:
                 win.destroy()
             except Exception:
@@ -2340,6 +2394,33 @@ class MinimapRouteRecorder:
         canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
 
         self._monster_offset_entries = {}
+        _monster_orig_offsets = {}  # 原始偏移值，X关闭时恢复 {tpl_id: (ox, oy)}
+        _monster_offset_timers = {}  # 防抖定时器 {tpl_id: after_id}
+        for _t in self._monster_templates:
+            _monster_orig_offsets[_t["id"]] = (_t.get("offset_x", 0), _t.get("offset_y", 0))
+
+        def _apply_monster_offset(tid):
+            """防抖到期后应用偏移值"""
+            if tid not in self._monster_offset_entries:
+                return
+            ex, ey = self._monster_offset_entries[tid]
+            try:
+                ox = int(ex.get() or "0")
+                oy = int(ey.get() or "0")
+            except ValueError:
+                ox, oy = 0, 0
+            for _t in self._monster_templates:
+                if _t["id"] == tid:
+                    _t["offset_x"] = ox
+                    _t["offset_y"] = oy
+                    break
+            _monster_offset_timers.pop(tid, None)
+
+        def _on_monster_offset_key(tid):
+            """偏移输入框按键事件：2秒防抖后生效"""
+            if tid in _monster_offset_timers:
+                win.after_cancel(_monster_offset_timers[tid])
+            _monster_offset_timers[tid] = win.after(2000, lambda: _apply_monster_offset(tid))
 
         def refresh_list():
             """刷新特征列表"""
@@ -2361,10 +2442,12 @@ class MinimapRouteRecorder:
                 entry_x = tk.Entry(row, width=5, font=("微软雅黑", 9))
                 entry_x.insert(0, str(tpl.get("offset_x", 0)))
                 entry_x.pack(side="left", padx=2)
+                entry_x.bind("<KeyRelease>", lambda e, tid=tpl["id"]: _on_monster_offset_key(tid))
                 tk.Label(row, text="Y:", font=("微软雅黑", 9)).pack(side="left")
                 entry_y = tk.Entry(row, width=5, font=("微软雅黑", 9))
                 entry_y.insert(0, str(tpl.get("offset_y", 0)))
                 entry_y.pack(side="left", padx=2)
+                entry_y.bind("<KeyRelease>", lambda e, tid=tpl["id"]: _on_monster_offset_key(tid))
                 self._monster_offset_entries[tpl["id"]] = (entry_x, entry_y)
                 tk.Label(row, text="%dx%d" % (tpl["width"], tpl["height"]), font=("微软雅黑", 8), fg="gray").pack(side="left", padx=5)
                 def make_delete(tid):
