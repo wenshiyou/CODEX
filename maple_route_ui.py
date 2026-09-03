@@ -5332,11 +5332,11 @@ class MinimapRouteRecorder:
 
         # === 怪物特征按钮（用UI图片，盖住原来的X/Y偏移输入框，点击打开怪物特征管理弹窗）===
         _mbfx, _mbfy, _mbfw, _mbfh = BTN_MONSTER_FEATURE
-        # 加载怪物特征按钮UI图片（懒加载，只加载一次）
+        # 加载怪物特征按钮UI图片（懒加载，只加载一次，用IMREAD_UNCHANGED保留alpha通道做透明混合）
         if not hasattr(self, '_monster_btn_img') or self._monster_btn_img is None:
             _btn_img_path = os.path.join(DATA_DIR, "monster_feature_btn.png")
             if os.path.exists(_btn_img_path):
-                self._monster_btn_img = cv2.imdecode(np.fromfile(_btn_img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+                self._monster_btn_img = cv2.imdecode(np.fromfile(_btn_img_path, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
             else:
                 self._monster_btn_img = None
         if self._monster_btn_img is not None:
@@ -5344,7 +5344,16 @@ class MinimapRouteRecorder:
             _img_h, _img_w = self._monster_btn_img.shape[:2]
             _draw_w = min(_img_w, _mbfw)
             _draw_h = min(_img_h, _mbfh)
-            frame[_mbfy:_mbfy+_draw_h, _mbfx:_mbfx+_draw_w] = self._monster_btn_img[:_draw_h, :_draw_w]
+            _roi = frame[_mbfy:_mbfy+_draw_h, _mbfx:_mbfx+_draw_w]
+            _btn_roi = self._monster_btn_img[:_draw_h, :_draw_w]
+            # 透明混合：如果有alpha通道（4通道），按alpha值混合；否则直接覆盖
+            if _btn_roi.shape[2] == 4:
+                _alpha = _btn_roi[:, :, 3:4].astype(np.float32) / 255.0
+                _bg = _roi.astype(np.float32)
+                _fg = _btn_roi[:, :, :3].astype(np.float32)
+                frame[_mbfy:_mbfy+_draw_h, _mbfx:_mbfx+_draw_w] = (_fg * _alpha + _bg * (1 - _alpha)).astype(np.uint8)
+            else:
+                frame[_mbfy:_mbfy+_draw_h, _mbfx:_mbfx+_draw_w] = _btn_roi
         else:
             # 图片加载失败，用代码绘制兜底
             draw_rounded_rect(frame, _mbfx, _mbfy, _mbfw, _mbfh, 8, (46, 125, 50), -1)
