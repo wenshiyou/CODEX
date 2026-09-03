@@ -9250,6 +9250,13 @@ class MinimapRouteRecorder:
                         # 每帧触发蒙板重绘（人物框/怪物框实时跟随，不依赖100ms定时器）
                         if getattr(self, '_overlay_hwnd', None):
                             user32.InvalidateRect(self._overlay_hwnd, None, True)
+                        # 怪物特征匹配（每2帧一次，不管运行还是不运行都调用，确保怪物特征显示点总是能出来）
+                        # 注意：这里只更新_monster_feature_matches用于显示特征点，不合并到怪物列表
+                        if self._monster_templates and self.frame_count % 2 == 0:
+                            try:
+                                self._match_monster(_frame)
+                            except Exception as _e:
+                                print("[主循环] 怪物特征匹配异常:", _e)
                         # 不运行时也检测怪物（每2帧一次，约20ms，跟手不卡，确保紫色点不运行也显示）
                         if not self._running and self.frame_count % 2 == 0:
                             yolo_monsters = self._detect_monsters(_frame)
