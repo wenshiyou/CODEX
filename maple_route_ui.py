@@ -9314,7 +9314,11 @@ class MinimapRouteRecorder:
                                getattr(self, '_char_feature_window', None) is not None or
                                getattr(self, '_monster_feature_window', None) is not None)
                     if has_win:
-                        self._tk_root.update()
+                        # 处理所有待处理事件（最多5ms，避免阻塞主循环），提高弹窗输入/移动响应速度
+                        _tk_start = time.time()
+                        while time.time() - _tk_start < 0.005:
+                            if not self._tk_root.dooneevent(0):  # 0 = 不等待，有事件就处理
+                                break
             except Exception as e:
                 _debug_log("[方案窗口] tk update异常: %s" % e)
 
