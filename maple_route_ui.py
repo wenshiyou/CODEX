@@ -280,7 +280,7 @@ MONSTER_TEMPLATE_DIR = os.path.join(DATA_DIR, "monster_templates")
 os.makedirs(MONSTER_TEMPLATE_DIR, exist_ok=True)
 MONSTER_TEMPLATE_META = os.path.join(MONSTER_TEMPLATE_DIR, "meta.json")
 MONSTER_MAX_TEMPLATES = 10
-MONSTER_MATCH_THRESHOLD = 0.75  # 阈值0.75，平衡误判和匹配率（0.80太高一个都匹配不到，0.70太低到处是）
+MONSTER_MATCH_THRESHOLD = 0.70  # 阈值0.70（和人物一样），匹配更稳定减少闪烁，移动时跟手不延迟
 # 怪物特征颜色（冷色系，BGR格式，10种不重复，和人物颜色分开）
 MONSTER_FEATURE_COLORS = [
     (255, 0, 0),      # 蓝
