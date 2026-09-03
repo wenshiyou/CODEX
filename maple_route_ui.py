@@ -2306,7 +2306,14 @@ class MinimapRouteRecorder:
         win.title("怪物特征管理")
         win.resizable(False, False)
         win.attributes("-topmost", True)
-        win.protocol("WM_DELETE_WINDOW", lambda: self._close_window("_monster_feature_window"))
+        def on_close_monster_win():
+            """关闭怪物特征弹窗（确保X按钮有效）"""
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self._monster_feature_window = None
+        win.protocol("WM_DELETE_WINDOW", on_close_monster_win)
         self._position_window(win, 520, 420)
 
         # === 左边：特征列表（滚动区域）===
@@ -5232,15 +5239,29 @@ class MinimapRouteRecorder:
         # === 路线页输入框（X/Y偏移，标签下方）===
         self._draw_input_fields(frame)
 
-        # === 怪物特征按钮（盖住原来的X/Y偏移输入框，点击打开怪物特征管理弹窗）===
+        # === 怪物特征按钮（用UI图片，盖住原来的X/Y偏移输入框，点击打开怪物特征管理弹窗）===
         _mbfx, _mbfy, _mbfw, _mbfh = BTN_MONSTER_FEATURE
-        draw_rounded_rect(frame, _mbfx, _mbfy, _mbfw, _mbfh, 8, (46, 125, 50), -1)
-        draw_rounded_rect(frame, _mbfx, _mbfy, _mbfw, _mbfh, 8, (76, 175, 80), 2)
-        _mbtn_text = "怪物特征"
-        (_mtw, _mth), _ = cv2.getTextSize(_mbtn_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        _mtx = _mbfx + (_mbfw - _mtw) // 2
-        _mty = _mbfy + (_mbfh + _mth) // 2
-        cv2.putText(frame, _mbtn_text, (_mtx, _mty), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        # 加载怪物特征按钮UI图片（懒加载，只加载一次）
+        if not hasattr(self, '_monster_btn_img') or self._monster_btn_img is None:
+            _btn_img_path = os.path.join(DATA_DIR, "monster_feature_btn.png")
+            if os.path.exists(_btn_img_path):
+                self._monster_btn_img = cv2.imdecode(np.fromfile(_btn_img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+            else:
+                self._monster_btn_img = None
+        if self._monster_btn_img is not None:
+            # 缩放到按钮大小并绘制
+            _btn_resized = cv2.resize(self._monster_btn_img, (_mbfw, _mbfh))
+            frame[_mbfy:_mbfy+_mbfh, _mbfx:_mbfx+_mbfw] = _btn_resized
+        else:
+            # 图片加载失败，用代码绘制兜底
+            draw_rounded_rect(frame, _mbfx, _mbfy, _mbfw, _mbfh, 8, (46, 125, 50), -1)
+            draw_rounded_rect(frame, _mbfx, _mbfy, _mbfw, _mbfh, 8, (76, 175, 80), 2)
+            _mbtn_text = "怪物特征"
+            (_mtw, _mth), _ = cv2.getTextSize(_mbtn_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            _mtx = _mbfx + (_mbfw - _mtw) // 2
+            _mty = _mbfy + (_mbfh + _mth) // 2
+            cv2.putText(frame, _mbtn_text, (_mtx, _mty), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        # 右上角显示特征数量
         _mcount = len(self._monster_templates)
         if _mcount > 0:
             cv2.putText(frame, "%d套" % _mcount, (_mbfx + _mbfw - 35, _mbfy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 255, 200), 1)
