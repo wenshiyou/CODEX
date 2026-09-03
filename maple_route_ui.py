@@ -180,7 +180,7 @@ BTN_CHAR    = (54, 629, 152, 50)
 BTN_OFFSET  = (210, 628, 215, 52)
 BTN_MONSTER = (61, 694, 344, 46)
 # 怪物特征按钮（盖住原来的X/Y偏移输入框，点击打开怪物特征管理弹窗）
-BTN_MONSTER_FEATURE = (210, 628, 215, 52)
+BTN_MONSTER_FEATURE = (215, 624, 190, 60)  # 和UI图片大小一致(190x60)，直接用原图不缩放
 
 # === 偏移输入框 ===
 # 数字实际绘制区域（小框）
@@ -5249,9 +5249,11 @@ class MinimapRouteRecorder:
             else:
                 self._monster_btn_img = None
         if self._monster_btn_img is not None:
-            # 缩放到按钮大小并绘制
-            _btn_resized = cv2.resize(self._monster_btn_img, (_mbfw, _mbfh))
-            frame[_mbfy:_mbfy+_mbfh, _mbfx:_mbfx+_mbfw] = _btn_resized
+            # 直接用原图大小绘制，不缩放（图片尺寸190x60，和按钮尺寸一致）
+            _img_h, _img_w = self._monster_btn_img.shape[:2]
+            _draw_w = min(_img_w, _mbfw)
+            _draw_h = min(_img_h, _mbfh)
+            frame[_mbfy:_mbfy+_draw_h, _mbfx:_mbfx+_draw_w] = self._monster_btn_img[:_draw_h, :_draw_w]
         else:
             # 图片加载失败，用代码绘制兜底
             draw_rounded_rect(frame, _mbfx, _mbfy, _mbfw, _mbfh, 8, (46, 125, 50), -1)
