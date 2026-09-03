@@ -280,7 +280,7 @@ MONSTER_TEMPLATE_DIR = os.path.join(DATA_DIR, "monster_templates")
 os.makedirs(MONSTER_TEMPLATE_DIR, exist_ok=True)
 MONSTER_TEMPLATE_META = os.path.join(MONSTER_TEMPLATE_DIR, "meta.json")
 MONSTER_MAX_TEMPLATES = 10
-MONSTER_MATCH_THRESHOLD = 0.80  # 提高阈值减少误判（原0.70太低，截一个紫色部分就到处是怪）
+MONSTER_MATCH_THRESHOLD = 0.75  # 阈值0.75，平衡误判和匹配率（0.80太高一个都匹配不到，0.70太低到处是）
 # 怪物特征颜色（冷色系，BGR格式，10种不重复，和人物颜色分开）
 MONSTER_FEATURE_COLORS = [
     (255, 0, 0),      # 蓝
@@ -5961,15 +5961,15 @@ class MinimapRouteRecorder:
                     _debug_log("[人物匹配] 多特征融合成功 %d/%d特征 置信度%.2f 位置(%d,%d)" % (
                         len(valid), len(predictions), avg_conf, final_x, final_y))
                     return (final_x, final_y, avg_conf)
-            # 有效预测只剩1个：用这个，但提高门槛
-            elif len(valid) == 1 and valid[0][2] >= 0.75:
+            # 有效预测只剩1个：用这个（去掉0.75门槛，只要>=0.70就返回，避免光点间歇性消失）
+            elif len(valid) == 1 and valid[0][2] >= CHAR_MATCH_THRESHOLD:
                 final_x, final_y, conf, _ = valid[0]
                 self._last_char_match_pos = (final_x, final_y)
                 self._last_char_match_time = time.time() * 1000
                 _debug_log("[人物匹配] 单特征(融合后剩1个) 置信度%.2f 位置(%d,%d)" % (conf, final_x, final_y))
                 return (final_x, final_y, conf)
-        elif len(predictions) == 1 and predictions[0][2] >= 0.75:
-            # 只有1个特征匹配成功，且置信度高
+        elif len(predictions) == 1 and predictions[0][2] >= CHAR_MATCH_THRESHOLD:
+            # 只有1个特征匹配成功（去掉0.75门槛，只要>=0.70就返回，避免光点间歇性消失）
             final_x, final_y, conf, _, _ = predictions[0]
             self._last_char_match_pos = (final_x, final_y)
             self._last_char_match_time = time.time() * 1000
@@ -6521,15 +6521,16 @@ class MinimapRouteRecorder:
                             # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
                             # 注：放在if char_pos:条件外，确保即使人物位置匹配失败，怪物特征点也能显示
                             for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
-                                r = 4  # 半径4（原3加大20%）
-                                fpen = gdi32.CreatePen(0, 1, 0xFFFFFF)  # 白色边框（更显眼，不会和背景混在一起）
-                                if fpen:
-                                    gdi_objs.append(fpen)
-                                fbrush = gdi32.CreateSolidBrush(0xFF00FF)  # 亮紫色填充（实心点）
+                                r = 5  # 半径5，确保能看清
+                                # 紫色实心点：先选入紫色brush，再画Ellipse，确保是实心不是空心
+                                fbrush = gdi32.CreateSolidBrush(0xFF00FF)  # 亮紫色填充
+                                fpen = gdi32.CreatePen(0, 1, 0x800080)  # 深紫色边框
                                 if fbrush:
                                     gdi_objs.append(fbrush)
-                                old_fpen = gdi32.SelectObject(hdc, fpen)
+                                if fpen:
+                                    gdi_objs.append(fpen)
                                 old_fbrush = gdi32.SelectObject(hdc, fbrush)
+                                old_fpen = gdi32.SelectObject(hdc, fpen)
                                 gdi32.Ellipse(hdc, fx - r, fy - r, fx + r + 1, fy + r + 1)
                                 gdi32.SelectObject(hdc, old_fpen)
                                 gdi32.SelectObject(hdc, old_fbrush)
