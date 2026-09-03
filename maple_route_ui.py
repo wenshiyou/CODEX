@@ -9251,9 +9251,25 @@ class MinimapRouteRecorder:
         while True:
             if self.frame_count <= 3: print("[冷启动] %.2fs 第%d帧开始" % (time.time()-self._boot_t, self.frame_count))
             try:
-                map_area = self._capture_map()
+                # 只截一次整个窗口（共用截图，减少一次mss.grab调用，提高速度）
+                _t0_cap = time.time()
+                _full_frame = self._capture_window()
+                _t1_cap = time.time()
+                # 从整图里裁剪小地图区域（以前就是这样共用截图的）
+                if _full_frame is not None and self.map_area_rect:
+                    _mar = self.map_area_rect
+                    _mx1, _my1 = int(_mar["left"]), int(_mar["top"])
+                    _mx2, _my2 = int(_mar["left"] + _mar["width"]), int(_mar["top"] + _mar["height"])
+                    _fh, _fw = _full_frame.shape[:2]
+                    _mx1 = max(0, min(_mx1, _fw-1))
+                    _my1 = max(0, min(_my1, _fh-1))
+                    _mx2 = max(_mx1+1, min(_mx2, _fw))
+                    _my2 = max(_my1+1, min(_my2, _fh))
+                    map_area = _full_frame[_my1:_my2, _mx1:_mx2].copy()
+                else:
+                    map_area = self._capture_map()
             except Exception as _e:
-                print("[主循环] _capture_map异常: %s" % _e)
+                print("[主循环] 截图异常: %s" % _e)
                 time.sleep(0.05)
                 continue
 
@@ -9304,10 +9320,9 @@ class MinimapRouteRecorder:
             # 【模块B】独立检测人物屏幕位置+怪物（不依赖运行状态，脚本启动就工作）
             if self.hwnd:  # 人物屏幕位置每帧检测（绿框跟随人物实时刷新）
                 try:
-                    _t0 = time.time()
-                    _frame = self._capture_window()
-                    _t1 = time.time()
-                    self._fps_capture_time += (_t1 - _t0)
+                    # 共用前面截的整图（不再重复截图）
+                    _frame = _full_frame
+                    self._fps_capture_time += (_t1_cap - _t0_cap)
                     if _frame is not None:
                         _t2 = time.time()
                         self._player_screen_pos = self._get_player_screen_pos(_frame)
