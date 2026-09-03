@@ -6005,7 +6005,9 @@ class MinimapRouteRecorder:
                 predictions.append((foot_x, foot_y, max_val, tpl["id"], tpl.get("direction", "right")))
 
         # 记录每个特征的单独匹配结果（用于蒙板上显示每个特征的匹配点+数字，方便发现哪个特征误判）
-        self._char_feature_matches = [(p[0], p[1], p[3], p[2]) for p in predictions]
+        # 匹配失败时保留上一帧结果，常驻显示不闪烁（和怪物特征点一样）
+        if predictions:
+            self._char_feature_matches = [(p[0], p[1], p[3], p[2]) for p in predictions]
 
         # === 第二步：多特征融合（不区分方向，直接融合所有特征预测，只要位置） ===
         if len(predictions) >= 2:
