@@ -5592,6 +5592,7 @@ class MinimapRouteRecorder:
         # 设置窗口位置和游戏窗口对齐（避免OpenCV默认位置错开）
         cv2.namedWindow("Select Character", cv2.WINDOW_NORMAL)
         cv2.moveWindow("Select Character", self.window_rect["left"], self.window_rect["top"])
+        cv2.resizeWindow("Select Character", fw, fh)  # 显式设置窗口大小为截图大小，避免OpenCV记住上次变小的尺寸
         # cv2.selectROI 返回 (x, y, w, h)，取消返回全0
         roi = cv2.selectROI("Select Character", frame, showCrosshair=False, fromCenter=False)
         cv2.destroyWindow("Select Character")
@@ -5747,6 +5748,7 @@ class MinimapRouteRecorder:
         print("[怪物特征] 弹出框选窗口，拖拽框选怪物身体，回车确认，ESC取消")
         cv2.namedWindow("Select Monster", cv2.WINDOW_NORMAL)
         cv2.moveWindow("Select Monster", self.window_rect["left"], self.window_rect["top"])
+        cv2.resizeWindow("Select Monster", fw, fh)  # 显式设置窗口大小为截图大小，避免OpenCV记住上次变小的尺寸
         roi = cv2.selectROI("Select Monster", frame, showCrosshair=False, fromCenter=False)
         cv2.destroyWindow("Select Monster")
         x, y, w, h = roi
