@@ -9269,6 +9269,21 @@ class MinimapRouteRecorder:
                 print("Captured map_area:", map_area.shape[1], "x", map_area.shape[0])
 
             self.frame_count += 1
+            # FPS统计（每秒打印一次，定位检测慢的原因）
+            if not hasattr(self, '_fps_last_time'):
+                self._fps_last_time = time.time()
+                self._fps_count = 0
+                self._fps_capture_time = 0
+                self._fps_match_time = 0
+            self._fps_count += 1
+            _now_fps = time.time()
+            if _now_fps - self._fps_last_time >= 1.0:
+                _fps = self._fps_count / (_now_fps - self._fps_last_time)
+                print(f"[FPS统计] 帧率={_fps:.1f} 截图总耗时={self._fps_capture_time*1000:.0f}ms 匹配总耗时={self._fps_match_time*1000:.0f}ms")
+                self._fps_last_time = _now_fps
+                self._fps_count = 0
+                self._fps_capture_time = 0
+                self._fps_match_time = 0
             if self._auto_refresh and self.frame_count % 30 == 0:
                 self._detect_minimap(debug=False)
             # 窗口大小固定：每30帧检测一次，变动则拉回
@@ -9287,9 +9302,15 @@ class MinimapRouteRecorder:
             # 【模块B】独立检测人物屏幕位置+怪物（不依赖运行状态，脚本启动就工作）
             if self.hwnd:  # 人物屏幕位置每帧检测（绿框跟随人物实时刷新）
                 try:
+                    _t0 = time.time()
                     _frame = self._capture_window()
+                    _t1 = time.time()
+                    self._fps_capture_time += (_t1 - _t0)
                     if _frame is not None:
+                        _t2 = time.time()
                         self._player_screen_pos = self._get_player_screen_pos(_frame)
+                        _t3 = time.time()
+                        self._fps_match_time += (_t3 - _t2)
                         # 每帧触发蒙板重绘（人物框/怪物框实时跟随，不依赖100ms定时器）
                         if getattr(self, '_overlay_hwnd', None):
                             user32.InvalidateRect(self._overlay_hwnd, None, True)
