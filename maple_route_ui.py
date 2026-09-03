@@ -9250,9 +9250,10 @@ class MinimapRouteRecorder:
                         # 每帧触发蒙板重绘（人物框/怪物框实时跟随，不依赖100ms定时器）
                         if getattr(self, '_overlay_hwnd', None):
                             user32.InvalidateRect(self._overlay_hwnd, None, True)
-                        # 怪物特征匹配（每2帧一次，不管运行还是不运行都调用，确保怪物特征显示点总是能出来）
+                        # 怪物特征匹配（每帧调用，不管运行还是不运行都调用，确保怪物特征显示点总是能出来且流利）
                         # 注意：这里只更新_monster_feature_matches用于显示特征点，不合并到怪物列表
-                        if self._monster_templates and self.frame_count % 2 == 0:
+                        # 有条件if self._monster_templates，只有保存了怪物特征模板才调用，不会空枪也不会卡
+                        if self._monster_templates:
                             try:
                                 self._match_monster(_frame)
                             except Exception as _e:
