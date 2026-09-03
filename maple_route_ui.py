@@ -612,6 +612,7 @@ class MinimapRouteRecorder:
         self._dropdown = None  # 当前展开的下拉菜单: None/"save"/"route"/"mode"/"clear_route"
         # 独立窗口引用
         self._plan_window = None  # 方案管理窗口
+        self._char_feature_window = None  # 人物特征管理弹窗
         self._save_window = None  # 保存方案窗口
         self._clear_window = None  # 删除方案窗口
         # 原地打怪归位相关
@@ -1183,6 +1184,7 @@ class MinimapRouteRecorder:
         # X范围固定100-400（不管地图多宽都能检测到，避免宽地图时超出范围）
         roi_b_x1 = 100
         roi_b_x2 = 400
+        roi_b = frame[0:120, roi_b_x1:roi_b_x2]
         res_b = cv2.matchTemplate(roi_b, tpl_b, cv2.TM_CCOEFF_NORMED)
         _, val_b, _, loc_b = cv2.minMaxLoc(res_b)
         big_x = roi_b_x1 + loc_b[0]
@@ -2090,6 +2092,160 @@ class MinimapRouteRecorder:
         # 关闭按钮
         tk.Button(win, text="关闭", width=10, command=lambda: self._close_window("_plan_window")).pack(pady=8)
         win.update()
+
+
+    def _open_char_feature_window(self):
+        """打开人物特征管理弹窗：左右分栏，左边特征列表(含偏移X/Y)，右边操作区"""
+        import tkinter as tk
+        from tkinter import messagebox
+        if not self._ensure_tk_root():
+            return
+        if getattr(self, '_char_feature_window', None) is not None:
+            try:
+                self._char_feature_window.destroy()
+            except Exception:
+                pass
+            self._char_feature_window = None
+        win = tk.Toplevel(self._tk_root)
+        self._char_feature_window = win
+        win.title("人物特征管理")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_window("_char_feature_window"))
+        self._position_window(win, 520, 420)
+
+        # === 左边：特征列表（滚动区域）===
+        left_frame = tk.Frame(win, width=340, height=380)
+        left_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        left_frame.pack_propagate(False)
+
+        tk.Label(left_frame, text="特征列表（每个特征独立偏移到人物脚）", font=("微软雅黑", 9, "bold")).pack(anchor="w")
+
+        # 滚动区域
+        canvas = tk.Canvas(left_frame, highlightthickness=0)
+        scrollbar = tk.Scrollbar(left_frame, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas)
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+        # 保存输入框引用，关闭时读取
+        self._char_offset_entries = {}  # tpl_id -> (entry_x, entry_y)
+
+        def refresh_list():
+            """刷新特征列表"""
+            for w in scroll_frame.winfo_children():
+                w.destroy()
+            self._char_offset_entries.clear()
+            if not self._char_templates:
+                tk.Label(scroll_frame, text="暂无特征，点击右边'添加特征'按钮",
+                         font=("微软雅黑", 9), fg="gray").pack(pady=20)
+                return
+            for idx, tpl in enumerate(self._char_templates):
+                row = tk.Frame(scroll_frame, relief="solid", borderwidth=1)
+                row.pack(fill="x", pady=2, padx=2)
+
+                # 特征ID + 方向
+                dir_text = "左" if tpl.get("direction", "right") == "left" else "右"
+                dir_color = "#FF9800" if tpl.get("direction", "right") == "left" else "#2196F3"
+                tk.Label(row, text="#%d" % tpl["id"], font=("微软雅黑", 9, "bold"),
+                         width=3).pack(side="left")
+                tk.Label(row, text=dir_text, font=("微软雅黑", 8, "bold"),
+                         fg="white", bg=dir_color, width=2).pack(side="left", padx=2)
+
+                # 偏移X
+                tk.Label(row, text="X:", font=("微软雅黑", 9)).pack(side="left")
+                entry_x = tk.Entry(row, width=5, font=("微软雅黑", 9))
+                entry_x.insert(0, str(tpl.get("offset_x", 0)))
+                entry_x.pack(side="left", padx=2)
+
+                # 偏移Y
+                tk.Label(row, text="Y:", font=("微软雅黑", 9)).pack(side="left")
+                entry_y = tk.Entry(row, width=5, font=("微软雅黑", 9))
+                entry_y.insert(0, str(tpl.get("offset_y", 0)))
+                entry_y.pack(side="left", padx=2)
+
+                self._char_offset_entries[tpl["id"]] = (entry_x, entry_y)
+
+                # 尺寸显示
+                tk.Label(row, text="%dx%d" % (tpl["width"], tpl["height"]),
+                         font=("微软雅黑", 8), fg="gray").pack(side="left", padx=5)
+
+                # 删除按钮
+                def make_delete(tid):
+                    def on_delete():
+                        if messagebox.askyesno("确认", "删除特征#%d？" % tid):
+                            for i, t in enumerate(self._char_templates):
+                                if t["id"] == tid:
+                                    self._delete_char_template(i)
+                                    break
+                            refresh_list()
+                    return on_delete
+                tk.Button(row, text="删", width=3, command=make_delete(tpl["id"]),
+                          bg="#FF6666", fg="white").pack(side="right", padx=2)
+
+        refresh_list()
+
+        # === 右边：操作区 ===
+        right_frame = tk.Frame(win, width=160, height=380)
+        right_frame.pack(side="right", fill="y", padx=5, pady=5)
+        right_frame.pack_propagate(False)
+
+        def on_add(direction):
+            # 先关闭弹窗，避免cv2.selectROI和tkinter冲突导致闪退
+            try:
+                win.withdraw()
+            except:
+                pass
+            self._capture_character_feature(direction=direction)
+            try:
+                win.deiconify()
+                win.lift()
+            except:
+                pass
+            refresh_list()
+
+        tk.Button(right_frame, text="添加向左特征", width=14, height=1,
+                  command=lambda: on_add("left"), bg="#FF9800", fg="white").pack(pady=2)
+        tk.Button(right_frame, text="添加向右特征", width=14, height=1,
+                  command=lambda: on_add("right"), bg="#2196F3", fg="white").pack(pady=2)
+
+        def on_clear_all():
+            if messagebox.askyesno("确认", "清除全部特征？"):
+                self._clear_character_features()
+                refresh_list()
+        tk.Button(right_frame, text="全部删除", width=14, height=2,
+                  command=on_clear_all, bg="#FF6666", fg="white").pack(pady=5)
+
+        def on_save_and_close():
+            """保存所有偏移和方向并关闭"""
+            for tid, (ex, ey) in self._char_offset_entries.items():
+                try:
+                    ox = int(ex.get() or "0")
+                    oy = int(ey.get() or "0")
+                except ValueError:
+                    ox, oy = 0, 0
+                for t in self._char_templates:
+                    if t["id"] == tid:
+                        t["offset_x"] = ox
+                        t["offset_y"] = oy
+                        break
+            self._save_char_meta()
+            self._add_log("人物特征偏移已保存")
+            self._close_window("_char_feature_window")
+        tk.Button(right_frame, text="保存并关闭", width=14, height=2,
+                  command=on_save_and_close, bg="#2196F3", fg="white").pack(pady=5)
+
+        # 说明
+        info = tk.Label(right_frame, text='说明：\n左=人物向左走\n右=人物向右走\n每方向最多5个\n偏移=特征中心到脚\n匹配时自动选朝向',
+                        font=('微软雅黑', 8), fg='gray', justify='left', wraplength=140)
+        info.pack(pady=10, anchor="n")
+
+        win.update()
+
 
     def _open_clear_window(self):
         """打开删除方案窗口：双击方案删方案，双击地图删地图（Listbox布局）"""
@@ -4390,12 +4546,10 @@ class MinimapRouteRecorder:
                 _debug_log("[停止] 手动模式已停止")
             return
 
-        # 8. 子标签页（人物特征下拉/怪物数据，偏移框已由输入框处理）
+        # 8. 子标签页（人物特征弹窗/怪物数据）
         if _in(BTN_CHAR, x, y):
-            self._char_dropdown = not self._char_dropdown
-            self._bound_dropdown = False
-            self._char_scroll = 0
-            print("[鼠标] 人物特征下拉:", "展开" if self._char_dropdown else "收起")
+            self._open_char_feature_window()
+            print("[鼠标] 打开人物特征管理弹窗")
             return
         if _in(BTN_MONSTER, x, y):
             _debug_log("[鼠标] 点击怪物数据按钮")
@@ -5127,6 +5281,14 @@ class MinimapRouteRecorder:
         if not os.path.exists(tpl_dir):
             print("[人物特征] 无保存的特征模板，为空")
             return
+        # 先加载元数据（含偏移）
+        meta_list = []
+        try:
+            if os.path.exists(CHAR_TEMPLATE_META):
+                with open(CHAR_TEMPLATE_META, "r", encoding="utf-8") as _mf:
+                    meta_list = json.load(_mf)
+        except Exception:
+            meta_list = []
         try:
             # 扫描 char_<id>.png，按文件名排序加载（ID小的在前）
             for fname in sorted(os.listdir(tpl_dir)):
@@ -5140,11 +5302,24 @@ class MinimapRouteRecorder:
                     img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
                     if img is not None:
                         h, w = img.shape[:2]  # 3通道图shape=(h,w,3)，取前2维避免解包失败
+                        # 从元数据加载偏移（默认0，兼容旧模板）
+                        _off_x = 0
+                        _off_y = 0
+                        _direction = "right"  # 默认向右，兼容旧模板
+                        for _m in meta_list:
+                            if _m.get("id") == tid:
+                                _off_x = int(_m.get("offset_x", 0))
+                                _off_y = int(_m.get("offset_y", 0))
+                                _direction = _m.get("direction", "right")
+                                break
                         self._char_templates.append({
                             "id": tid,
                             "img": img,
                             "width": w,
                             "height": h,
+                            "offset_x": _off_x,   # 特征匹配点→人物脚的X偏移
+                            "offset_y": _off_y,   # 特征匹配点→人物脚的Y偏移
+                            "direction": _direction,  # 朝向: left/right
                             "created_at": ""
                         })
             print("[人物特征] 已加载 %d 套模板" % len(self._char_templates))
@@ -5158,6 +5333,9 @@ class MinimapRouteRecorder:
                 "id": t["id"],
                 "width": t["width"],
                 "height": t["height"],
+                "offset_x": t.get("offset_x", 0),
+                "offset_y": t.get("offset_y", 0),
+                "direction": t.get("direction", "right"),
                 "created_at": t["created_at"]
             })
         try:
@@ -5166,8 +5344,9 @@ class MinimapRouteRecorder:
         except Exception as e:
             print("[人物特征] 保存元数据失败:", e)
 
-    def _capture_character_feature(self):
+    def _capture_character_feature(self, direction="right"):
         """人物特征截图：在游戏窗口框选人物身体，保存为特征模板（最多10套）
+        direction: "left"=向左的特征, "right"=向右的特征
         使用 cv2.selectROI 内置框选，坐标可靠，无最小尺寸限制（越小越精确）"""
         if self.hwnd is None:
             self._add_log("请先绑定游戏窗口")
@@ -5225,11 +5404,15 @@ class MinimapRouteRecorder:
             "img": captured,
             "width": cw,
             "height": ch,
+            "offset_x": 0,   # 默认偏移0，用户在弹窗中校准到人物脚
+            "offset_y": 0,
+            "direction": direction,  # 朝向: left/right
             "created_at": created_at
         })
         self._save_char_meta()
 
-        msg = "人物特征#%d已保存 (%dx%d) 共%d套" % (new_id, cw, ch, len(self._char_templates))
+        dir_name = "向左" if direction == "left" else "向右"
+        msg = "人物特征#%d已保存(%s) (%dx%d) 共%d套" % (new_id, dir_name, cw, ch, len(self._char_templates))
         self._add_log(msg)
         print("[人物特征]", msg)
     def _clear_character_features(self):
@@ -5261,23 +5444,25 @@ class MinimapRouteRecorder:
         print("[人物特征] 已删除 #%d" % t["id"])
 
     def _match_character(self, frame):
-        """在游戏画面中用模板匹配查找人物位置
-        1. 全图搜索（阈值0.70）
-        2. 全图失败时在上次位置附近ROI搜索（阈值0.55），避免战斗中短暂丢人物
+        """【多特征融合】在游戏画面中用多个特征模板匹配查找人物脚位置
+        1. 遍历所有特征，每个特征匹配到位置后 + 该特征offset → 人物脚位置预测
+        2. 有效预测>=2个：一致性校验（排除距中心点>50px的异常值）→ 按置信度加权平均
+        3. 只有1个有效预测：置信度>=0.75才返回（提高门槛，减少误判）
+        4. 全图失败 → ROI回退（上次位置附近，阈值0.55）
         Returns:
-            (center_x, center_y, confidence) 或 None
+            (foot_x, foot_y, confidence) 或 None
         """
         if not self._char_templates or frame is None:
             if not self._char_templates:
                 _now = time.time()
                 if not hasattr(self, '_last_no_tpl_log') or _now - self._last_no_tpl_log > 5:
                     self._last_no_tpl_log = _now
-                    print("[人物匹配] 没有人物特征模板，请先在'人物特征'下拉中添加")
+                    print("[人物匹配] 没有人物特征模板，请先在人物特征弹窗中添加")
             return None
         fh, fw = frame.shape[:2]
-        best_score = 0
-        best_loc = None
-        best_tpl = None
+
+        # === 第一步：全图匹配所有特征，收集预测 ===
+        predictions = []  # [(foot_x, foot_y, confidence, tpl_id), ...]
         for tpl in self._char_templates:
             timg = tpl["img"]
             th, tw = timg.shape[:2]
@@ -5285,18 +5470,67 @@ class MinimapRouteRecorder:
                 continue
             result = cv2.matchTemplate(frame, timg, cv2.TM_CCOEFF_NORMED)
             _, max_val, _, max_loc = cv2.minMaxLoc(result)
-            if max_val > best_score:
-                best_score = max_val
-                best_loc = max_loc
-                best_tpl = tpl
-        if best_score >= CHAR_MATCH_THRESHOLD and best_loc is not None:
-            cx = best_loc[0] + best_tpl["width"] // 2
-            cy = best_loc[1] + best_tpl["height"] // 2
-            self._last_char_match_pos = (cx, cy)
-            self._last_char_match_time = time.time() * 1000
-            return (cx, cy, best_score)
+            if max_val >= CHAR_MATCH_THRESHOLD:
+                # 特征中心点 + 该特征offset → 人物脚位置
+                feat_cx = max_loc[0] + tw // 2
+                feat_cy = max_loc[1] + th // 2
+                foot_x = feat_cx + int(tpl.get("offset_x", 0))
+                foot_y = feat_cy + int(tpl.get("offset_y", 0))
+                predictions.append((foot_x, foot_y, max_val, tpl["id"], tpl.get("direction", "right")))
 
-        # === ROI回退：在上次成功位置附近160x160范围搜索，阈值降到0.55 ===
+        # === 第二步：按方向分组，分别融合，取置信度高的那组 ===
+        def _fuse_group(preds):
+            """对一组预测进行融合，返回(foot_x, foot_y, confidence)或None"""
+            if len(preds) >= 2:
+                avg_x = sum(p[0] for p in preds) / len(preds)
+                avg_y = sum(p[1] for p in preds) / len(preds)
+                valid = []
+                for px, py, conf, tid, _dir in preds:
+                    dist = ((px - avg_x)**2 + (py - avg_y)**2) ** 0.5
+                    if dist <= 50:
+                        valid.append((px, py, conf, tid))
+                    else:
+                        _debug_log("[人物匹配] 排除异常预测 特征#%d 位置(%d,%d) 距中心%.0fpx" % (tid, px, py, dist))
+                if len(valid) >= 2:
+                    total_conf = sum(p[2] for p in valid)
+                    if total_conf > 0:
+                        fx = int(sum(p[0] * p[2] for p in valid) / total_conf)
+                        fy = int(sum(p[1] * p[2] for p in valid) / total_conf)
+                        return (fx, fy, total_conf / len(valid))
+                elif len(valid) == 1 and valid[0][2] >= 0.75:
+                    return (valid[0][0], valid[0][1], valid[0][2])
+            elif len(preds) == 1 and preds[0][2] >= 0.75:
+                return (preds[0][0], preds[0][1], preds[0][2])
+            return None
+
+        # 按direction分组
+        left_preds = [p for p in predictions if p[4] == "left"]
+        right_preds = [p for p in predictions if p[4] == "right"]
+        left_result = _fuse_group(left_preds)
+        right_result = _fuse_group(right_preds)
+
+        # 取置信度高的那组（自动判断朝向）
+        best = None
+        best_dir = ""
+        if left_result and right_result:
+            if left_result[2] >= right_result[2]:
+                best, best_dir = left_result, "left"
+            else:
+                best, best_dir = right_result, "right"
+        elif left_result:
+            best, best_dir = left_result, "left"
+        elif right_result:
+            best, best_dir = right_result, "right"
+
+        if best:
+            final_x, final_y, avg_conf = best
+            self._last_char_match_pos = (final_x, final_y)
+            self._last_char_match_time = time.time() * 1000
+            dir_name = "向左" if best_dir == "left" else "向右"
+            _debug_log("[人物匹配] %s方向融合 置信度%.2f 位置(%d,%d)" % (dir_name, avg_conf, final_x, final_y))
+            return (final_x, final_y, avg_conf)
+
+        # === 第三步：ROI回退（在上次成功位置附近160x160搜索，阈值0.55）===
         last_pos = getattr(self, '_last_char_match_pos', None)
         if last_pos:
             lx, ly = last_pos
@@ -5306,9 +5540,7 @@ class MinimapRouteRecorder:
             roi_y2 = min(fh, ly + 80)
             roi = frame[roi_y1:roi_y2, roi_x1:roi_x2]
             if roi.shape[0] > 20 and roi.shape[1] > 20:
-                roi_best = 0
-                roi_loc = None
-                roi_tpl = None
+                roi_predictions = []
                 for tpl in self._char_templates:
                     timg = tpl["img"]
                     th, tw = timg.shape[:2]
@@ -5316,23 +5548,44 @@ class MinimapRouteRecorder:
                         continue
                     result = cv2.matchTemplate(roi, timg, cv2.TM_CCOEFF_NORMED)
                     _, max_val, _, max_loc = cv2.minMaxLoc(result)
-                    if max_val > roi_best:
-                        roi_best = max_val
-                        roi_loc = max_loc
-                        roi_tpl = tpl
-                if roi_best >= 0.55 and roi_loc is not None:
-                    cx = roi_x1 + roi_loc[0] + roi_tpl["width"] // 2
-                    cy = roi_y1 + roi_loc[1] + roi_tpl["height"] // 2
-                    self._last_char_match_pos = (cx, cy)
+                    if max_val >= 0.55:
+                        feat_cx = roi_x1 + max_loc[0] + tw // 2
+                        feat_cy = roi_y1 + max_loc[1] + th // 2
+                        foot_x = feat_cx + int(tpl.get("offset_x", 0))
+                        foot_y = feat_cy + int(tpl.get("offset_y", 0))
+                        roi_predictions.append((foot_x, foot_y, max_val, tpl["id"], tpl.get("direction", "right")))
+                # ROI回退也按方向分组
+                roi_left = [p for p in roi_predictions if p[4] == "left"]
+                roi_right = [p for p in roi_predictions if p[4] == "right"]
+                roi_best = None
+                for group in [roi_left, roi_right]:
+                    if len(group) >= 2:
+                        avg_x = sum(p[0] for p in group) / len(group)
+                        avg_y = sum(p[1] for p in group) / len(group)
+                        valid = [p for p in group if ((p[0]-avg_x)**2 + (p[1]-avg_y)**2)**0.5 <= 50]
+                        if len(valid) >= 2:
+                            total_conf = sum(p[2] for p in valid)
+                            fx = int(sum(p[0] * p[2] for p in valid) / total_conf)
+                            fy = int(sum(p[1] * p[2] for p in valid) / total_conf)
+                            res = (fx, fy, total_conf / len(valid))
+                            if roi_best is None or res[2] > roi_best[2]:
+                                roi_best = res
+                    elif len(group) == 1:
+                        res = (group[0][0], group[0][1], group[0][2])
+                        if roi_best is None or res[2] > roi_best[2]:
+                            roi_best = res
+                if roi_best:
+                    final_x, final_y, conf = roi_best
+                    self._last_char_match_pos = (final_x, final_y)
                     self._last_char_match_time = time.time() * 1000
-                    _debug_log("[人物匹配] ROI回退成功 %.2f (全图%.2f) 位置(%d,%d)" % (roi_best, best_score, cx, cy))
-                    return (cx, cy, roi_best)
+                    _debug_log("[人物匹配] ROI融合 置信度%.2f 位置(%d,%d)" % (conf, final_x, final_y))
+                    return (final_x, final_y, conf)
 
-        # 全图+ROI都失败：节流日志
+        # 全图+ROI都失败
         _now = time.time()
         if not hasattr(self, '_last_lowscore_log') or _now - self._last_lowscore_log > 5:
             self._last_lowscore_log = _now
-            _debug_log("[人物匹配] 全图%.2f ROI失败，低于阈值%.2f" % (best_score, CHAR_MATCH_THRESHOLD))
+            _debug_log("[人物匹配] 全图+ROI都失败，特征%d套" % len(self._char_templates))
         return None
 
     def _show_offset_feedback(self):
@@ -7641,15 +7894,12 @@ class MinimapRouteRecorder:
         return (map_x, map_y)
 
     def _get_player_screen_pos(self, frame):
-        """获取人物在游戏画面中的坐标: 只用模板匹配(人物头上特征点), 失败宽限期用上次位置.
-        光点锁定(lock_screen_from_dot)只用于人物定位绿框(_player_lock_pos), 不用于黄点, 两条路径独立."""
-        # 1) 模板匹配(人物头上特征点, 人在哪点就在哪)
+        """获取人物在游戏画面中的坐标: 多特征融合模板匹配(已含每特征offset到脚), 失败宽限期用上次位置."""
+        # 1) 多特征融合匹配(每个特征独立offset到人物脚，一致性校验+加权平均)
         match = self._match_character(frame)
         if match:
             mx, my, _ = match
-            x_off = int(self._field_values.get("char_x_offset", "0") or "0")
-            y_off = int(self._field_values.get("char_y_offset", "0") or "0")
-            return (mx + x_off, my + y_off)
+            return (mx, my)  # 已含特征偏移，不再加全局偏移
         # 3) 稳远期: 宽限用上次成功位置
         last_pos = getattr(self, '_last_char_match_pos', None)
         last_time = getattr(self, '_last_char_match_time', 0)
@@ -8417,7 +8667,7 @@ class MinimapRouteRecorder:
             # 窗口大小固定：每30帧检测一次，变动则拉回
             if self.frame_count % 30 == 0:
                 self._ensure_window_size()
-            player_pos = self.find_player_dot(map_area)  # 每帧都检测光点，不用隔帧缓存，提高录制轨迹点密度
+            player_pos = self.find_player_dot(map_area)  # 每帧都检测光点
             # 光点不做EMA平滑（保证轻微移动也能反映到比例上），检测失败时用上一帧位置
             if player_pos is not None:
                 self._player_map_pos = player_pos
@@ -8549,7 +8799,8 @@ class MinimapRouteRecorder:
                 if hasattr(self, '_tk_root') and self._tk_root is not None:
                     has_win = (getattr(self, '_save_window', None) is not None or
                                getattr(self, '_plan_window', None) is not None or
-                               getattr(self, '_clear_window', None) is not None)
+                               getattr(self, '_clear_window', None) is not None or
+                               getattr(self, '_char_feature_window', None) is not None)
                     if has_win:
                         self._tk_root.update()
             except Exception as e:
@@ -8681,11 +8932,17 @@ class MinimapRouteRecorder:
         print("Final:", len(self.platforms), "platforms,", len(self.ladders), "ladders")
 
 
+
 if __name__ == "__main__":
     # === 管理员权限检查 ===
     # 游戏(冒险岛怀旧服)以管理员权限运行，UIPI会阻止普通权限进程向管理员进程发送模拟输入
     # 必须以管理员权限启动bot，否则按键/加药全部无效
     import ctypes as _ctypes, sys as _sys
+    # 启动时自动修正工作目录（防止管理员重启后工作目录变为System32）
+    if getattr(_sys, "frozen", False):
+        _exe_dir = os.path.dirname(os.path.abspath(_sys.executable))
+        if os.getcwd() != _exe_dir:
+            os.chdir(_exe_dir)
     def _is_admin():
         try:
             return _ctypes.windll.shell32.IsUserAnAdmin()
@@ -8696,7 +8953,8 @@ if __name__ == "__main__":
         print("[权限] 正在自动以管理员权限重启...")
         try:
             _params = " ".join(['"%s"' % a for a in _sys.argv[1:]]) if len(_sys.argv) > 1 else ""
-            _ctypes.windll.shell32.ShellExecuteW(None, "runas", _sys.executable, _params, None, 1)
+            _workdir = os.path.dirname(os.path.abspath(_sys.executable)) if getattr(_sys, "frozen", False) else os.getcwd()
+            _ctypes.windll.shell32.ShellExecuteW(None, "runas", _sys.executable, _params, _workdir, 1)
         except Exception as _e:
             print("[权限] 自动提升失败: %s" % _e)
             print("[权限] 请右键 MapleBot.exe 选择'以管理员身份运行'")
@@ -8706,5 +8964,15 @@ if __name__ == "__main__":
                 pass
         _sys.exit()
     print("[权限] 已以管理员权限运行，模拟输入可正常发送到游戏")
-    MinimapRouteRecorder().run()
+    try:
+        MinimapRouteRecorder().run()
+    except Exception as _e:
+        import traceback
+        _err = traceback.format_exc()
+        print("[全局异常] %s" % _e)
+        _debug_log("[全局异常] %s" % _err)
+        _debug_log(_err)
+        # 异常后等待3秒让用户看到错误，然后退出（避免input卡住表现为未响应）
+        import time
+        time.sleep(3)
 
