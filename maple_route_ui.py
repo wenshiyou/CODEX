@@ -5894,8 +5894,9 @@ class MinimapRouteRecorder:
         if os.path.exists(img_path):
             os.remove(img_path)
         self._save_monster_meta()
+        self._monster_feature_matches = []  # 删除特征后清空匹配结果，避免旧点继续显示
         self._add_log("已删除怪物特征#%d" % t["id"])
-        print("[怪物特征] 已删除 #%d" % t["id"])
+        print("[怪物特征] 已删除 #%d")
 
     def _match_character(self, frame):
         """【多特征融合】在游戏画面中用多个特征模板匹配查找人物脚位置
@@ -6521,10 +6522,10 @@ class MinimapRouteRecorder:
                             # 注：放在if char_pos:条件外，确保即使人物位置匹配失败，怪物特征点也能显示
                             for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
                                 r = 4  # 半径4（原3加大20%）
-                                fpen = gdi32.CreatePen(0, 1, 0x800080)  # 紫色边框
+                                fpen = gdi32.CreatePen(0, 1, 0xFFFFFF)  # 白色边框（更显眼，不会和背景混在一起）
                                 if fpen:
                                     gdi_objs.append(fpen)
-                                fbrush = gdi32.CreateSolidBrush(0xFF00FF)  # 紫色填充
+                                fbrush = gdi32.CreateSolidBrush(0xFF00FF)  # 亮紫色填充（实心点）
                                 if fbrush:
                                     gdi_objs.append(fbrush)
                                 old_fpen = gdi32.SelectObject(hdc, fpen)
