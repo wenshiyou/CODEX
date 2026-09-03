@@ -280,7 +280,7 @@ MONSTER_TEMPLATE_DIR = os.path.join(DATA_DIR, "monster_templates")
 os.makedirs(MONSTER_TEMPLATE_DIR, exist_ok=True)
 MONSTER_TEMPLATE_META = os.path.join(MONSTER_TEMPLATE_DIR, "meta.json")
 MONSTER_MAX_TEMPLATES = 10
-MONSTER_MATCH_THRESHOLD = 0.70
+MONSTER_MATCH_THRESHOLD = 0.80  # 提高阈值减少误判（原0.70太低，截一个紫色部分就到处是怪）
 # 怪物特征颜色（冷色系，BGR格式，10种不重复，和人物颜色分开）
 MONSTER_FEATURE_COLORS = [
     (255, 0, 0),      # 蓝
@@ -6060,6 +6060,13 @@ class MinimapRouteRecorder:
                     feature_best[tid] = (cx, cy, score)
         # 记录每个特征的最佳匹配结果到蒙板（显示紫色点+数字编号，方便发现哪个特征误判）
         self._monster_feature_matches = [(v[0], v[1], k, v[2]) for k, v in feature_best.items()]
+        # 调试日志：查看怪物特征匹配结果
+        _now_dbg = time.time()
+        if not hasattr(self, '_last_monster_dbg_log') or _now_dbg - self._last_monster_dbg_log > 2:
+            self._last_monster_dbg_log = _now_dbg
+            _debug_log("[怪物特征匹配] 模板%d套 匹配到%d个特征点: %s" % (
+                len(self._monster_templates), len(self._monster_feature_matches),
+                str([(f[0], f[1], f[2], round(f[3], 2)) for f in self._monster_feature_matches[:5]])))
 
         # === 非极大值抑制（距离太近的合并，保留置信度最高的） ===
         all_matches.sort(key=lambda x: x[2], reverse=True)  # 按置信度降序
