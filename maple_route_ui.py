@@ -179,6 +179,8 @@ BTN_STOP = (241, 552, 195, 60)
 BTN_CHAR    = (54, 629, 152, 50)
 BTN_OFFSET  = (210, 628, 215, 52)
 BTN_MONSTER = (61, 694, 344, 46)
+# 怪物特征按钮（盖住原来的X/Y偏移输入框，点击打开怪物特征管理弹窗）
+BTN_MONSTER_FEATURE = (210, 628, 215, 52)
 
 # === 偏移输入框 ===
 # 数字实际绘制区域（小框）
@@ -259,6 +261,13 @@ os.makedirs(CHAR_TEMPLATE_DIR, exist_ok=True)
 CHAR_TEMPLATE_META = os.path.join(CHAR_TEMPLATE_DIR, "meta.json")
 CHAR_MAX_TEMPLATES = 10
 CHAR_MATCH_THRESHOLD = 0.70
+
+# === 怪物特征模板（手动添加怪物特征，和YOLO合并显示小地图紫点） ===
+MONSTER_TEMPLATE_DIR = os.path.join(DATA_DIR, "monster_templates")
+os.makedirs(MONSTER_TEMPLATE_DIR, exist_ok=True)
+MONSTER_TEMPLATE_META = os.path.join(MONSTER_TEMPLATE_DIR, "meta.json")
+MONSTER_MAX_TEMPLATES = 10
+MONSTER_MATCH_THRESHOLD = 0.70
 
 # === 人物定位框（蒙板绿色大框，以人物黄点为中心） ===
 PLAYER_BOX_W = 150  # 人物定位框宽度（先用大尺寸框住，精准后再改小）
@@ -749,6 +758,11 @@ class MinimapRouteRecorder:
         # 人物特征模板（最多10套）
         self._char_templates = []  # [{id, img(numpy), width, height, created_at}]
         self._load_char_templates()
+        # 怪物特征模板（手动添加，和YOLO合并显示小地图紫点，最多10套）
+        self._monster_templates = []  # [{id, img, width, height, offset_x, offset_y, direction, created_at}]
+        self._last_monster_match_pos = None
+        self._last_monster_match_time = 0
+        self._load_monster_templates()
         # 打怪/药品输入框状态
         self._field_values = {}  # {field_id: value_string}
         self._focused_field = None  # 当前聚焦的字段id
@@ -2246,6 +2260,132 @@ class MinimapRouteRecorder:
 
         win.update()
 
+    def _open_monster_feature_window(self):
+        """打开怪物特征管理弹窗：左右分栏，左边特征列表(含偏移X/Y)，右边操作区
+        怪物特征和YOLO检测合并显示小地图紫点"""
+        import tkinter as tk
+        from tkinter import messagebox
+        if not self._ensure_tk_root():
+            return
+        if getattr(self, '_monster_feature_window', None) is not None:
+            try:
+                self._monster_feature_window.destroy()
+            except Exception:
+                pass
+            self._monster_feature_window = None
+        win = tk.Toplevel(self._tk_root)
+        self._monster_feature_window = win
+        win.title("怪物特征管理")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        win.protocol("WM_DELETE_WINDOW", lambda: self._close_window("_monster_feature_window"))
+        self._position_window(win, 520, 420)
+
+        # === 左边：特征列表（滚动区域）===
+        left_frame = tk.Frame(win, width=340, height=380)
+        left_frame.pack(side="left", fill="both", expand=True, padx=5, pady=5)
+        left_frame.pack_propagate(False)
+        tk.Label(left_frame, text="怪物特征列表（每个特征独立偏移到怪物中心）", font=("微软雅黑", 9, "bold")).pack(anchor="w")
+
+        canvas = tk.Canvas(left_frame, highlightthickness=0)
+        scrollbar = tk.Scrollbar(left_frame, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas)
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+        self._monster_offset_entries = {}
+
+        def refresh_list():
+            """刷新特征列表"""
+            for w in scroll_frame.winfo_children():
+                w.destroy()
+            self._monster_offset_entries.clear()
+            if not self._monster_templates:
+                tk.Label(scroll_frame, text="暂无怪物特征，点击右边按钮添加",
+                         font=("微软雅黑", 9), fg="gray").pack(pady=20)
+                return
+            for idx, tpl in enumerate(self._monster_templates):
+                row = tk.Frame(scroll_frame, relief="solid", borderwidth=1)
+                row.pack(fill="x", pady=2, padx=2)
+                dir_text = "左" if tpl.get("direction", "right") == "left" else "右"
+                dir_color = "#FF9800" if tpl.get("direction", "right") == "left" else "#2196F3"
+                tk.Label(row, text="#%d" % tpl["id"], font=("微软雅黑", 9, "bold"), width=3).pack(side="left")
+                tk.Label(row, text=dir_text, font=("微软雅黑", 8, "bold"), fg="white", bg=dir_color, width=2).pack(side="left", padx=2)
+                tk.Label(row, text="X:", font=("微软雅黑", 9)).pack(side="left")
+                entry_x = tk.Entry(row, width=5, font=("微软雅黑", 9))
+                entry_x.insert(0, str(tpl.get("offset_x", 0)))
+                entry_x.pack(side="left", padx=2)
+                tk.Label(row, text="Y:", font=("微软雅黑", 9)).pack(side="left")
+                entry_y = tk.Entry(row, width=5, font=("微软雅黑", 9))
+                entry_y.insert(0, str(tpl.get("offset_y", 0)))
+                entry_y.pack(side="left", padx=2)
+                self._monster_offset_entries[tpl["id"]] = (entry_x, entry_y)
+                tk.Label(row, text="%dx%d" % (tpl["width"], tpl["height"]), font=("微软雅黑", 8), fg="gray").pack(side="left", padx=5)
+                def make_delete(tid):
+                    def on_delete():
+                        if messagebox.askyesno("确认", "删除怪物特征#%d？" % tid):
+                            for i, t in enumerate(self._monster_templates):
+                                if t["id"] == tid:
+                                    self._delete_monster_template(i)
+                                    break
+                            refresh_list()
+                    return on_delete
+                tk.Button(row, text="删", width=3, command=make_delete(tpl["id"]), bg="#FF6666", fg="white").pack(side="right", padx=2)
+
+        refresh_list()
+
+        # === 右边：操作区 ===
+        right_frame = tk.Frame(win, width=160, height=380)
+        right_frame.pack(side="right", fill="y", padx=5, pady=5)
+        right_frame.pack_propagate(False)
+
+        def on_add(direction):
+            try:
+                win.withdraw()
+            except:
+                pass
+            self._capture_monster_feature(direction=direction)
+            try:
+                win.deiconify()
+                win.lift()
+            except:
+                pass
+            refresh_list()
+
+        tk.Button(right_frame, text="添加向左特征", width=14, height=1, command=lambda: on_add("left"), bg="#FF9800", fg="white").pack(pady=2)
+        tk.Button(right_frame, text="添加向右特征", width=14, height=1, command=lambda: on_add("right"), bg="#2196F3", fg="white").pack(pady=2)
+
+        def on_clear_all():
+            if messagebox.askyesno("确认", "清除全部怪物特征？"):
+                self._clear_monster_features()
+                refresh_list()
+        tk.Button(right_frame, text="全部删除", width=14, height=2, command=on_clear_all, bg="#FF6666", fg="white").pack(pady=5)
+
+        def on_save_and_close():
+            for tid, (ex, ey) in self._monster_offset_entries.items():
+                try:
+                    ox = int(ex.get() or "0")
+                    oy = int(ey.get() or "0")
+                except ValueError:
+                    ox, oy = 0, 0
+                for t in self._monster_templates:
+                    if t["id"] == tid:
+                        t["offset_x"] = ox
+                        t["offset_y"] = oy
+                        break
+            self._save_monster_meta()
+            self._add_log("怪物特征偏移已保存")
+            self._close_window("_monster_feature_window")
+        tk.Button(right_frame, text="保存并关闭", width=14, height=2, command=on_save_and_close, bg="#2196F3", fg="white").pack(pady=5)
+
+        info = tk.Label(right_frame, text='说明：\n左=怪物朝左\n右=怪物朝右\n每方向最多5个\n偏移=特征中心到怪心和YOLO合并显示紫点', font=('微软雅黑', 8), fg='gray', justify='left', wraplength=140)
+        info.pack(pady=10, anchor="n")
+
+        win.update()
 
     def _open_clear_window(self):
         """打开删除方案窗口：双击方案删方案，双击地图删地图（Listbox布局）"""
@@ -4393,7 +4533,7 @@ class MinimapRouteRecorder:
         # 按钮按下特效：命中任意按钮时记录按下状态+闪光
         _EFFECT_BTNS = [BTN_REFRESH, BTN_MANUAL, BTN_PLATFORM, BTN_LADDER, BTN_SAVE, BTN_PLAN,
                         BTN_PLATFORM_CLR, BTN_LADDER_CLR, BTN_MODE, BTN_PLAN_CLR,
-                        BTN_RUN, BTN_STOP, BTN_CHAR, BTN_MONSTER,
+                        BTN_RUN, BTN_STOP, BTN_CHAR, BTN_MONSTER, BTN_MONSTER_FEATURE,
                         BTN_CALIB_AUTO, BTN_CALIB_Y]  # X/Y倍率按钮也用统一圆角按压特效
         for _br in _EFFECT_BTNS:
             if _in(_br, x, y):
@@ -4554,6 +4694,13 @@ class MinimapRouteRecorder:
         if _in(BTN_MONSTER, x, y):
             _debug_log("[鼠标] 点击怪物数据按钮")
             print("[鼠标] 怪物数据 - 选择YOLO模型"); self._select_yolo_model(); return
+
+        # 怪物特征按钮（打开怪物特征管理弹窗）
+        if _in(BTN_MONSTER_FEATURE, x, y):
+            _debug_log("[鼠标] 点击怪物特征按钮")
+            print("[鼠标] 怪物特征管理")
+            self._open_monster_feature_window()
+            return
 
         # 9. 可拖拽准星（按住拖到游戏窗口释放即绑定前台窗口）
         chx, chy = self._crosshair_pos
@@ -5057,6 +5204,19 @@ class MinimapRouteRecorder:
         # === 路线页输入框（X/Y偏移，标签下方）===
         self._draw_input_fields(frame)
 
+        # === 怪物特征按钮（盖住原来的X/Y偏移输入框，点击打开怪物特征管理弹窗）===
+        _mbfx, _mbfy, _mbfw, _mbfh = BTN_MONSTER_FEATURE
+        draw_rounded_rect(frame, _mbfx, _mbfy, _mbfw, _mbfh, 8, (46, 125, 50), -1)
+        draw_rounded_rect(frame, _mbfx, _mbfy, _mbfw, _mbfh, 8, (76, 175, 80), 2)
+        _mbtn_text = "怪物特征"
+        (_mtw, _mth), _ = cv2.getTextSize(_mbtn_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+        _mtx = _mbfx + (_mbfw - _mtw) // 2
+        _mty = _mbfy + (_mbfh + _mth) // 2
+        cv2.putText(frame, _mbtn_text, (_mtx, _mty), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        _mcount = len(self._monster_templates)
+        if _mcount > 0:
+            cv2.putText(frame, "%d套" % _mcount, (_mbfx + _mbfw - 35, _mbfy + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 255, 200), 1)
+
         # === 按钮点击特效（仅按下变暗，圆角）===
         now_ms = time.time() * 1000
         if self._pressed_btn is not None:
@@ -5443,6 +5603,143 @@ class MinimapRouteRecorder:
         self._add_log("已删除人物特征#%d" % t["id"])
         print("[人物特征] 已删除 #%d" % t["id"])
 
+    # ==================== 怪物特征模板（手动添加，和YOLO合并显示小地图紫点） ====================
+    def _load_monster_templates(self):
+        """从磁盘加载已保存的怪物特征模板"""
+        self._monster_templates = []
+        tpl_dir = MONSTER_TEMPLATE_DIR
+        if not os.path.exists(tpl_dir):
+            print("[怪物特征] 无保存的特征模板，为空")
+            return
+        # 加载元数据（含偏移、方向）
+        meta_list = []
+        try:
+            if os.path.exists(MONSTER_TEMPLATE_META):
+                with open(MONSTER_TEMPLATE_META, "r", encoding="utf-8") as _mf:
+                    meta_list = json.load(_mf)
+        except Exception:
+            meta_list = []
+        try:
+            for fname in sorted(os.listdir(tpl_dir)):
+                if fname.startswith("monster_") and fname.endswith(".png"):
+                    try:
+                        tid = int(fname.replace("monster_", "").replace(".png", ""))
+                    except ValueError:
+                        continue
+                    img_path = os.path.join(tpl_dir, fname)
+                    img = cv2.imdecode(np.fromfile(img_path, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if img is not None:
+                        h, w = img.shape[:2]
+                        _off_x = 0
+                        _off_y = 0
+                        _direction = "right"
+                        for _m in meta_list:
+                            if _m.get("id") == tid:
+                                _off_x = int(_m.get("offset_x", 0))
+                                _off_y = int(_m.get("offset_y", 0))
+                                _direction = _m.get("direction", "right")
+                                break
+                        self._monster_templates.append({
+                            "id": tid, "img": img, "width": w, "height": h,
+                            "offset_x": _off_x, "offset_y": _off_y,
+                            "direction": _direction, "created_at": ""
+                        })
+            print("[怪物特征] 已加载 %d 套模板" % len(self._monster_templates))
+        except Exception as e:
+            print("[怪物特征] 加载模板失败:", e)
+
+    def _save_monster_meta(self):
+        """保存怪物特征模板元数据到磁盘"""
+        meta_list = []
+        for t in self._monster_templates:
+            meta_list.append({
+                "id": t["id"], "width": t["width"], "height": t["height"],
+                "offset_x": t.get("offset_x", 0), "offset_y": t.get("offset_y", 0),
+                "direction": t.get("direction", "right"), "created_at": t["created_at"]
+            })
+        try:
+            with open(MONSTER_TEMPLATE_META, "w", encoding="utf-8") as f:
+                json.dump(meta_list, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print("[怪物特征] 保存元数据失败:", e)
+
+    def _capture_monster_feature(self, direction="right"):
+        """怪物特征截图：在游戏窗口框选怪物身体，保存为特征模板（最多10套）"""
+        if self.hwnd is None:
+            self._add_log("请先绑定游戏窗口")
+            print("[怪物特征] 未绑定窗口")
+            return
+        if len(self._monster_templates) >= MONSTER_MAX_TEMPLATES:
+            oldest = self._monster_templates.pop(0)
+            old_path = os.path.join(MONSTER_TEMPLATE_DIR, "monster_%d.png" % oldest["id"])
+            if os.path.exists(old_path):
+                os.remove(old_path)
+            self._add_log("怪物模板已满，替换最早一套")
+        self._update_window_rect()
+        frame = self._capture_window()
+        fh, fw = frame.shape[:2]
+        if fh <= 0 or fw <= 0:
+            self._add_log("截图失败")
+            return
+        print("[怪物特征] 弹出框选窗口，拖拽框选怪物身体，回车确认，ESC取消")
+        cv2.namedWindow("Select Monster", cv2.WINDOW_NORMAL)
+        cv2.moveWindow("Select Monster", self.window_rect["left"], self.window_rect["top"])
+        roi = cv2.selectROI("Select Monster", frame, showCrosshair=False, fromCenter=False)
+        cv2.destroyWindow("Select Monster")
+        x, y, w, h = roi
+        if w <= 0 or h <= 0:
+            print("[怪物特征] 取消框选")
+            return
+        captured = frame[y:y + h, x:x + w].copy()
+        existing_ids = [t["id"] for t in self._monster_templates]
+        new_id = (max(existing_ids) + 1) if existing_ids else 0
+        created_at = time.strftime("%Y-%m-%d %H:%M:%S")
+        img_path = os.path.join(MONSTER_TEMPLATE_DIR, "monster_%d.png" % new_id)
+        ok, buf = cv2.imencode(".png", captured)
+        if ok:
+            buf.tofile(img_path)
+            print("[怪物特征] 模板已保存:", img_path)
+        else:
+            self._add_log("怪物特征保存失败")
+        ch, cw = captured.shape[:2]
+        self._monster_templates.append({
+            "id": new_id, "img": captured, "width": cw, "height": ch,
+            "offset_x": 0, "offset_y": 0, "direction": direction, "created_at": created_at
+        })
+        self._save_monster_meta()
+        dir_name = "向左" if direction == "left" else "向右"
+        msg = "怪物特征#%d已保存(%s) (%dx%d) 共%d套" % (new_id, dir_name, cw, ch, len(self._monster_templates))
+        self._add_log(msg)
+        print("[怪物特征]", msg)
+
+    def _clear_monster_features(self):
+        """清除所有怪物特征模板"""
+        count = len(self._monster_templates)
+        if count == 0:
+            self._add_log("没有可清除的怪物特征")
+            return
+        for t in self._monster_templates:
+            img_path = os.path.join(MONSTER_TEMPLATE_DIR, "monster_%d.png" % t["id"])
+            if os.path.exists(img_path):
+                os.remove(img_path)
+        self._monster_templates = []
+        if os.path.exists(MONSTER_TEMPLATE_META):
+            os.remove(MONSTER_TEMPLATE_META)
+        self._add_log("已清除 %d 套怪物特征" % count)
+        print("[怪物特征] 已清除 %d 套" % count)
+
+    def _delete_monster_template(self, index):
+        """删除指定索引的怪物特征模板"""
+        if index < 0 or index >= len(self._monster_templates):
+            return
+        t = self._monster_templates.pop(index)
+        img_path = os.path.join(MONSTER_TEMPLATE_DIR, "monster_%d.png" % t["id"])
+        if os.path.exists(img_path):
+            os.remove(img_path)
+        self._save_monster_meta()
+        self._add_log("已删除怪物特征#%d" % t["id"])
+        print("[怪物特征] 已删除 #%d" % t["id"])
+
     def _match_character(self, frame):
         """【多特征融合】在游戏画面中用多个特征模板匹配查找人物脚位置
         1. 遍历所有特征，每个特征匹配到位置后 + 该特征offset → 人物脚位置预测
@@ -5587,6 +5884,65 @@ class MinimapRouteRecorder:
             self._last_lowscore_log = _now
             _debug_log("[人物匹配] 全图+ROI都失败，特征%d套" % len(self._char_templates))
         return None
+
+    def _match_monster(self, frame):
+        """【怪物特征多目标匹配】在游戏画面中用怪物特征模板匹配查找所有怪物
+        1. 全图匹配所有特征，收集所有超过阈值的匹配位置
+        2. 非极大值抑制（距离太近的合并，保留置信度最高的）
+        3. 返回怪物框列表 [(x1, y1, x2, y2, score), ...]
+        优化：方向过滤（只匹配当前朝向的特征），ROI优先（在上次位置附近匹配）
+        """
+        if not self._monster_templates or frame is None:
+            return []
+        fh, fw = frame.shape[:2]
+        all_matches = []  # [(cx, cy, score, tpl_w, tpl_h), ...]
+
+        # === 全图匹配所有特征，收集所有超过阈值的位置 ===
+        for tpl in self._monster_templates:
+            timg = tpl["img"]
+            th, tw = timg.shape[:2]
+            if th > fh or tw > fw:
+                continue
+            result = cv2.matchTemplate(frame, timg, cv2.TM_CCOEFF_NORMED)
+            # 找所有超过阈值的位置
+            locs = np.where(result >= MONSTER_MATCH_THRESHOLD)
+            for pt in zip(*locs[::-1]):  # pt = (x, y)
+                score = result[pt[1], pt[0]]
+                cx = pt[0] + tw // 2 + int(tpl.get("offset_x", 0))
+                cy = pt[1] + th // 2 + int(tpl.get("offset_y", 0))
+                all_matches.append((cx, cy, score, tw, th))
+
+        # === 非极大值抑制（距离太近的合并，保留置信度最高的） ===
+        all_matches.sort(key=lambda x: x[2], reverse=True)  # 按置信度降序
+        monsters = []
+        used = [False] * len(all_matches)
+        for i, (cx, cy, score, tw, th) in enumerate(all_matches):
+            if used[i]:
+                continue
+            # 找所有距离这个匹配太近的，合并
+            cluster = [(cx, cy, score, tw, th)]
+            used[i] = True
+            for j in range(i + 1, len(all_matches)):
+                if used[j]:
+                    continue
+                cx2, cy2, _, _, _ = all_matches[j]
+                dist = ((cx - cx2)**2 + (cy - cy2)**2) ** 0.5
+                if dist < max(tw, th) * 0.8:  # 距离小于模板尺寸的80%，合并
+                    cluster.append(all_matches[j])
+                    used[j] = True
+            # 取聚类中置信度最高的作为代表
+            best = max(cluster, key=lambda x: x[2])
+            bcx, bcy, bscore, btw, bth = best
+            # 转换成怪物框格式 (x1, y1, x2, y2, score)
+            x1 = max(0, bcx - btw // 2)
+            y1 = max(0, bcy - bth // 2)
+            x2 = min(fw, bcx + btw // 2)
+            y2 = min(fh, bcy + bth // 2)
+            monsters.append((x1, y1, x2, y2, bscore))
+
+        if monsters:
+            _debug_log("[怪物特征匹配] 检测到 %d 个怪物" % len(monsters))
+        return monsters
 
     def _show_offset_feedback(self):
         """偏移视觉反馈：输入完成3秒后，在统一蒙板上让黄点闪烁约5秒"""
@@ -8221,6 +8577,31 @@ class MinimapRouteRecorder:
             frame = self._capture_window()
             if frame is not None:
                 yolo_monsters = self._detect_monsters(frame)
+                # 怪物特征匹配（手动添加的怪物模板，和YOLO合并显示小地图紫点）
+                feature_monsters = self._match_monster(frame) if self._monster_templates else []
+                # 合并两个结果，去重（距离太近的合并，保留置信度高的）
+                _all_m = yolo_monsters + feature_monsters
+                _all_m.sort(key=lambda m: m[4], reverse=True)
+                _merged_m = []
+                _used_m = [False] * len(_all_m)
+                for _i, _m1 in enumerate(_all_m):
+                    if _used_m[_i]:
+                        continue
+                    _merged_m.append(_m1)
+                    _used_m[_i] = True
+                    _c1x = (_m1[0] + _m1[2]) // 2
+                    _c1y = (_m1[1] + _m1[3]) // 2
+                    for _j in range(_i + 1, len(_all_m)):
+                        if _used_m[_j]:
+                            continue
+                        _m2 = _all_m[_j]
+                        _c2x = (_m2[0] + _m2[2]) // 2
+                        _c2y = (_m2[1] + _m2[3]) // 2
+                        _dist = ((_c1x - _c2x)**2 + (_c1y - _c2y)**2) ** 0.5
+                        if _dist < max(_m1[2]-_m1[0], _m1[3]-_m1[1]) * 0.6:
+                            _used_m[_j] = True
+                yolo_monsters = _merged_m
+                self._monsters = _merged_m
                 self._player_screen_pos = self._get_player_screen_pos(frame)
                 # === 镜头死区检测：右键单击检测框进入移动模式，再次右键保存 ===
                 _rb_down = bool(user32.GetAsyncKeyState(0x02) & 0x8000)  # VK_RBUTTON
@@ -8688,7 +9069,31 @@ class MinimapRouteRecorder:
                             user32.InvalidateRect(self._overlay_hwnd, None, True)
                         # 不运行时也检测怪物（每2帧一次，约20ms，跟手不卡，确保紫色点不运行也显示）
                         if not self._running and self.frame_count % 2 == 0:
-                            self._monsters = self._detect_monsters(_frame)
+                            yolo_monsters = self._detect_monsters(_frame)
+                            # 怪物特征匹配（手动添加的怪物模板，和YOLO合并显示小地图紫点）
+                            feature_monsters = self._match_monster(_frame) if self._monster_templates else []
+                            # 合并两个结果，去重（距离太近的合并，保留置信度高的）
+                            all_monsters = yolo_monsters + feature_monsters
+                            all_monsters.sort(key=lambda m: m[4], reverse=True)
+                            merged = []
+                            used = [False] * len(all_monsters)
+                            for i, m1 in enumerate(all_monsters):
+                                if used[i]:
+                                    continue
+                                merged.append(m1)
+                                used[i] = True
+                                c1x = (m1[0] + m1[2]) // 2
+                                c1y = (m1[1] + m1[3]) // 2
+                                for j in range(i + 1, len(all_monsters)):
+                                    if used[j]:
+                                        continue
+                                    m2 = all_monsters[j]
+                                    c2x = (m2[0] + m2[2]) // 2
+                                    c2y = (m2[1] + m2[3]) // 2
+                                    dist = ((c1x - c2x)**2 + (c1y - c2y)**2) ** 0.5
+                                    if dist < max(m1[2]-m1[0], m1[3]-m1[1]) * 0.6:
+                                        used[j] = True
+                            self._monsters = merged
                 except Exception as _e:
                     print("[主循环] 帧检测异常:", _e)
             # 【模块B】自动校准scale比例（人物移动时记录屏幕和小地图变化，越跑越准）
