@@ -4898,6 +4898,9 @@ class MinimapRouteRecorder:
         # 【模块B】在缩放后的map_display上画怪物紫色点（半径6，清晰可见）
         scale_x = render_w / w if w > 0 else 1.0  # X缩放比例=渲染宽度/原始宽度
         scale_y = render_h / h if h > 0 else 1.0  # Y缩放比例=渲染高度/原始高度
+        # 诊断日志：确认小地图怪物点绘制的三个条件
+        if self.frame_count % 60 == 0:
+            print(f"[小地图怪物点诊断] monsters={len(self._monsters) if self._monsters else 0}, player_map_pos={self._player_map_pos is not None}, player_screen_pos={self._player_screen_pos is not None}")
         if self._monsters and self._player_map_pos and self._player_screen_pos:
             COLOR_MONSTER_MAP = (255, 0, 255)  # 紫色BGR
             for (x1, y1, x2, y2, score) in self._monsters:
