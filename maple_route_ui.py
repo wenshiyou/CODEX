@@ -6521,20 +6521,19 @@ class MinimapRouteRecorder:
                             # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
                             # 注：放在if char_pos:条件外，确保即使人物位置匹配失败，怪物特征点也能显示
                             for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
-                                r = 5  # 半径5，确保能看清
-                                # 紫色实心点：先选入紫色brush，再画Ellipse，确保是实心不是空心
-                                fbrush = gdi32.CreateSolidBrush(0xFF00FF)  # 亮紫色填充
+                                r = 4  # 半径4（和人物特征点一样）
                                 fpen = gdi32.CreatePen(0, 1, 0x800080)  # 深紫色边框
-                                if fbrush:
-                                    gdi_objs.append(fbrush)
                                 if fpen:
                                     gdi_objs.append(fpen)
-                                old_fbrush = gdi32.SelectObject(hdc, fbrush)
+                                fbrush = gdi32.CreateSolidBrush(0xFF00FF)  # 亮紫色填充
+                                if fbrush:
+                                    gdi_objs.append(fbrush)
                                 old_fpen = gdi32.SelectObject(hdc, fpen)
+                                old_fbrush = gdi32.SelectObject(hdc, fbrush)
                                 gdi32.Ellipse(hdc, fx - r, fy - r, fx + r + 1, fy + r + 1)
                                 gdi32.SelectObject(hdc, old_fpen)
                                 gdi32.SelectObject(hdc, old_fbrush)
-                                # 数字编号（在点的右边，17号字体，原14加大20%）
+                                # 数字编号（在点的右边，17号字体）
                                 txt = str(fid)
                                 ffont = gdi32.CreateFontW(17, 0, 0, 0, 400, 0, 0, 0, 134, 3, 2, 1, 49, "微软雅黑")
                                 if ffont:
@@ -9443,6 +9442,13 @@ class MinimapRouteRecorder:
             # 同步特征单独匹配结果到蒙板（显示每个特征的匹配点+数字，方便发现误判）
             self._monster_overlay_data["char_feature_matches"] = self._char_feature_matches
             self._monster_overlay_data["monster_feature_matches"] = self._monster_feature_matches
+            # 调试日志：确认怪物特征匹配结果（每2秒一次）
+            _now_sync = time.time()
+            if not hasattr(self, '_last_monster_sync_log') or _now_sync - self._last_monster_sync_log > 2:
+                self._last_monster_sync_log = _now_sync
+                _debug_log("[蒙板同步] 人物特征点%d个 怪物特征点%d个 怪物匹配值:%s" % (
+                    len(self._char_feature_matches), len(self._monster_feature_matches),
+                    str([(f[0], f[1], f[2]) for f in self._monster_feature_matches[:3]])))
             if self._running:
                 try:
                     if self._monster_overlay_data is None:
