@@ -5911,6 +5911,7 @@ class MinimapRouteRecorder:
         """
         print("[人物跟踪] 线程已启动，每帧截图+匹配")
         last_log = 0
+        _debug_saved = False  # 调试：保存第一张截图，看看线程里截到的图是不是正常的
         while not self._player_track_stop:
             try:
                 # 检查窗口是否绑定
@@ -5922,6 +5923,14 @@ class MinimapRouteRecorder:
                 if frame is None:
                     time.sleep(0.005)
                     continue
+                # 调试：保存第一张截图
+                if not _debug_saved:
+                    _debug_saved = True
+                    try:
+                        cv2.imwrite("debug_thread_capture.png", frame)
+                        print(f"[人物跟踪] 调试：已保存第一张截图，尺寸={frame.shape}, 特征模板数={len(self._char_templates) if self._char_templates else 0}")
+                    except Exception as e:
+                        print(f"[人物跟踪] 调试：保存截图失败: {e}")
                 # 人物特征匹配（每帧一次）
                 pos = self._get_player_screen_pos(frame)
                 # 用锁保护，更新人物位置
