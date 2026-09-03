@@ -6481,16 +6481,8 @@ class MinimapRouteRecorder:
                                 gdi32.SelectObject(hdc, old_ffont)
 
                             # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
-                            # 注：放在if char_pos:条件外，确保即使人物位置匹配失败，怪物特征点也能显示
-                            _monster_pts = data.get('monster_feature_matches', [])
-                            # 调试日志：每100帧输出一次怪物特征点数量，确认循环有没有执行
-                            if not hasattr(self, '_monster_draw_frame_cnt'):
-                                self._monster_draw_frame_cnt = 0
-                            self._monster_draw_frame_cnt += 1
-                            if self._monster_draw_frame_cnt % 100 == 0:
-                                _debug_log("[蒙板绘制] 怪物特征点数量=%d 数据=%s" % (
-                                    len(_monster_pts), str([(p[0], p[1], p[2]) for p in _monster_pts[:3]])))
-                            for (fx, fy, fid, fconf) in _monster_pts:
+                            # 注：和人物特征点写法完全一样，不用self（wnd_proc回调中self会导致异常）
+                            for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
                                 r = 4  # 半径4（和人物特征点一样）
                                 fpen = gdi32.CreatePen(0, 1, 0x800080)  # 深紫色边框
                                 if fpen:
