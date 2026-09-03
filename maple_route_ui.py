@@ -625,8 +625,8 @@ class MinimapRouteRecorder:
                 self._detect_minimap()  # 恢复原来的自动检测，避免显示窗口变小
                 self._save_target_window_size()
                 print("[窗口绑定] 自动绑定成功")
-                # 启动人物坐标跟踪线程
-                self._start_player_track()
+                # 启动人物坐标跟踪线程（暂时注释，排查绑定问题）
+                # self._start_player_track()
             else:
                 print("[警告] 未找到游戏窗口，请用准星拖拽绑定")
                 self.hwnd = None
@@ -9227,8 +9227,8 @@ class MinimapRouteRecorder:
             self._save_target_window_size()
             self._add_log("窗口已绑定")
             print("[窗口绑定] 已绑定")
-            # 启动人物坐标跟踪线程（单独线程，每帧截图+匹配，确保人物点死死咬住位置）
-            self._start_player_track()
+            # 启动人物坐标跟踪线程（暂时注释，排查绑定问题）
+            # self._start_player_track()
         else:
             self._add_log("未找到游戏窗口")
             print("[窗口绑定] 未找到游戏窗口")
