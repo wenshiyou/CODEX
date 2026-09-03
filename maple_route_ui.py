@@ -5895,6 +5895,7 @@ class MinimapRouteRecorder:
             os.remove(img_path)
         self._save_monster_meta()
         self._monster_feature_matches = []  # 删除特征后清空匹配结果，避免旧点继续显示
+        self._monsters = []  # 删除特征后也清空小地图怪物点，避免旧点继续显示
         self._add_log("已删除怪物特征#%d" % t["id"])
         print("[怪物特征] 已删除 #%d")
 
@@ -5976,52 +5977,13 @@ class MinimapRouteRecorder:
             _debug_log("[人物匹配] 单特征 置信度%.2f 位置(%d,%d)" % (conf, final_x, final_y))
             return (final_x, final_y, conf)
 
-        # === 第三步：ROI回退（在上次成功位置附近160x160搜索，阈值0.55）===
-        last_pos = getattr(self, '_last_char_match_pos', None)
-        if last_pos:
-            lx, ly = last_pos
-            roi_x1 = max(0, lx - 80)
-            roi_y1 = max(0, ly - 80)
-            roi_x2 = min(fw, lx + 80)
-            roi_y2 = min(fh, ly + 80)
-            roi = frame[roi_y1:roi_y2, roi_x1:roi_x2]
-            if roi.shape[0] > 20 and roi.shape[1] > 20:
-                roi_predictions = []
-                for tpl in self._char_templates:
-                    timg = tpl["img"]
-                    th, tw = timg.shape[:2]
-                    if th > roi.shape[0] or tw > roi.shape[1]:
-                        continue
-                    result = cv2.matchTemplate(roi, timg, cv2.TM_CCOEFF_NORMED)
-                    _, max_val, _, max_loc = cv2.minMaxLoc(result)
-                    if max_val >= 0.55:
-                        feat_cx = roi_x1 + max_loc[0] + tw // 2
-                        feat_cy = roi_y1 + max_loc[1] + th // 2
-                        foot_x = feat_cx + int(tpl.get("offset_x", 0))
-                        foot_y = feat_cy + int(tpl.get("offset_y", 0))
-                        roi_predictions.append((foot_x, foot_y, max_val, tpl["id"], tpl.get("direction", "right")))
-                # ROI回退：直接融合所有预测（不区分方向）
-                if len(roi_predictions) >= 2:
-                    avg_x = sum(p[0] for p in roi_predictions) / len(roi_predictions)
-                    avg_y = sum(p[1] for p in roi_predictions) / len(roi_predictions)
-                    valid = [p for p in roi_predictions if ((p[0]-avg_x)**2 + (p[1]-avg_y)**2)**0.5 <= 50]
-                    if len(valid) >= 2:
-                        total_conf = sum(p[2] for p in valid)
-                        final_x = int(sum(p[0] * p[2] for p in valid) / total_conf)
-                        final_y = int(sum(p[1] * p[2] for p in valid) / total_conf)
-                        conf = total_conf / len(valid)
-                        self._last_char_match_pos = (final_x, final_y)
-                        self._last_char_match_time = time.time() * 1000
-                        _debug_log("[人物匹配] ROI多特征融合 %d/%d 置信度%.2f 位置(%d,%d)" % (len(valid), len(roi_predictions), conf, final_x, final_y))
-                        return (final_x, final_y, conf)
-                elif len(roi_predictions) == 1:
-                    final_x, final_y, conf, _, _ = roi_predictions[0]
-                    self._last_char_match_pos = (final_x, final_y)
-                    self._last_char_match_time = time.time() * 1000
-                    _debug_log("[人物匹配] ROI单特征 置信度%.2f 位置(%d,%d)" % (conf, final_x, final_y))
-                    return (final_x, final_y, conf)
+        # === 第三步：ROI回退（已注释掉，用户要求恢复原始全图匹配，人一动就准）===
+        # 用户要求：把限制的功能先注释掉，恢复到原始样子，直接检测和跟随
+        # last_pos = getattr(self, '_last_char_match_pos', None)
+        # if last_pos:
+        #     ... (ROI回退逻辑已注释，全图匹配失败直接返回None)
 
-        # 全图+ROI都失败
+        # 全图匹配失败（ROI回退已注释）
         _now = time.time()
         if not hasattr(self, '_last_lowscore_log') or _now - self._last_lowscore_log > 5:
             self._last_lowscore_log = _now
@@ -6520,7 +6482,15 @@ class MinimapRouteRecorder:
 
                             # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
                             # 注：放在if char_pos:条件外，确保即使人物位置匹配失败，怪物特征点也能显示
-                            for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
+                            _monster_pts = data.get('monster_feature_matches', [])
+                            # 调试日志：每100帧输出一次怪物特征点数量，确认循环有没有执行
+                            if not hasattr(self, '_monster_draw_frame_cnt'):
+                                self._monster_draw_frame_cnt = 0
+                            self._monster_draw_frame_cnt += 1
+                            if self._monster_draw_frame_cnt % 100 == 0:
+                                _debug_log("[蒙板绘制] 怪物特征点数量=%d 数据=%s" % (
+                                    len(_monster_pts), str([(p[0], p[1], p[2]) for p in _monster_pts[:3]])))
+                            for (fx, fy, fid, fconf) in _monster_pts:
                                 r = 4  # 半径4（和人物特征点一样）
                                 fpen = gdi32.CreatePen(0, 1, 0x800080)  # 深紫色边框
                                 if fpen:
