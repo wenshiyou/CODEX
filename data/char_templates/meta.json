@@ -1,0 +1,16 @@
+[
+  {
+    "id": 0,
+    "width": 12,
+    "height": 8,
+    "offset_x": 0,
+    "offset_y": 165,
+    "direction": "left",
+    "color": [
+      0,
+      0,
+      255
+    ],
+    "created_at": ""
+  }
+]
