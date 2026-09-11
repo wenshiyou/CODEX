@@ -380,7 +380,25 @@ LADDER_PRECISE_MARK_MS = 30       # 高帧下梯子特征白框扫描节流(在�
 YOLO_FAST_S = 0.20        # YOLO扫描·找怪档(2026-09-09 CPU优化0.15→0.20=5Hz:cv2.dnn CPU推理是最大头,找怪5Hz仍快;原6.7Hz把整机顶到86%)
 YOLO_SLOW_S = 0.30        # YOLO扫描·战斗档(2026-09-09 CPU优化0.22→0.30≈3.3Hz:正打近身怪时3.3Hz够判存活/换目标,配合DNN多线程单次更快)
 BARS_SCAN_S = 0.25        # 怪物血条扫描节流(2026-09-09 CPU优化0.20→0.25=4Hz)：判存活4Hz足够,配合出手后130ms反馈窗口
-# 推理线程/频率不在此写死:运行时按 os.cpu_count() 自适应(留2核给游戏/系统,四核→2线程并自动放慢YOLO帧率,八核→6线程维持跟手),见_init_yolo
+# === CPU性能三档(用户2026-09-11定稿:慢/普通/快,默认普通;控制面板"性能档"弹窗三选一) ===
+# 集中收拢原本分散的检测/YOLO/血条/怪模板/上梯高帧/UI帧/边界轮询周期。档定基准,原"按核数自适应+
+# 高帧过载退避+每轮最少留3ms"安全网继续兜底,四核弱机误选快也会被退避兜住不会硬吃满一个核。
+# 运行中切档:频率类下一轮即时生效;onnx推理线程数重建会话代价大,启动时按档+核数定、下次启动生效。
+PERF_DEFAULT_LEVEL = "normal"
+PERF_LEVEL_ORDER = ["slow", "normal", "fast"]
+PERF_LEVEL_CN = {"slow": "慢", "normal": "普通", "fast": "快"}
+PERF_DIALOG_W = 300        # 性能档三选一弹窗宽(UI坐标)
+PERF_DIALOG_H = 262        # 高(标题50+三选项120+底部说明)
+PERF_PROFILES = {
+    # 检测忙/闲周期ms、YOLO找怪/战斗间隔s、血条s、怪模板s、上梯高帧目标周期ms、UI waitKey ms、边界守护轮询ms
+    "slow":   dict(detect_busy_ms=180, detect_idle_ms=600, yolo_fast_s=0.32, yolo_slow_s=0.45,
+                   bars_s=0.40, feat_s=0.32, precise_ms=34, ui_wait_ms=40, bound_poll_ms=90),
+    "normal": dict(detect_busy_ms=120, detect_idle_ms=400, yolo_fast_s=0.20, yolo_slow_s=0.30,
+                   bars_s=0.25, feat_s=0.20, precise_ms=28, ui_wait_ms=25, bound_poll_ms=60),
+    "fast":   dict(detect_busy_ms=90,  detect_idle_ms=300, yolo_fast_s=0.15, yolo_slow_s=0.22,
+                   bars_s=0.20, feat_s=0.15, precise_ms=22, ui_wait_ms=15, bound_poll_ms=50),
+}
+# 推理线程/频率不在此写死:运行时按性能档+os.cpu_count()定(见_perf_val/_perf_onnx_threads),四核→少线程并自动放慢YOLO帧率,八核→多线程维持跟手
 POST_STRIKE_CHECK_MS = 450 # 攻击后反馈检测窗口(用户2026-09-11:130→450)：首次出手满450ms后才看血条/伤害判"打死没/是不是空怪";怪多/特效/掉帧(实测帧率曾掉到1-3fps)时130ms拿不到出手后稳定帧、真怪被当空怪清掉→一圈怪轮流锁左右抖;另须拿到出手之后的新帧才判,避免用出手前旧帧误丢真怪
 MOVE_STALL_CHECK_MS = 1000 # 位移检测(用户2026-09-07定稿)：下令左/右移动后每这么多ms比对一次是否真移动；1秒还在原地=卡住→按住方向+跳解卡(原5000太慢)
 MOVE_MIN_DX = 10          # (旧屏幕特征判定位移,已弃用保留) 屏幕X像素门槛
@@ -994,6 +1012,16 @@ class MinimapRouteRecorder:
         self._scale_dialog_dragging = False  # 是否正在拖拽弹窗
         self._scale_dialog_drag_offset = [0, 0]  # 拖拽时的偏移量
         self._scale_dialog_backup = {}  # 弹窗打开时备份原始值，取消/关闭时恢复（确认才保存）
+        # === CPU性能三档(用户2026-09-11):慢/普通/快,小地图"打怪区"下方"性能档"按钮弹窗三选一 ===
+        self._perf_level = self._load_perf_level()   # 当前档slow/normal/fast(读data/perf_config.json,缺省normal)
+        self._perf_cache = None                      # 当前档参数缓存(切档清空,热路径直接取、零重复查表)
+        self._btn_perf = None                        # 小地图"性能档"按钮矩形(每帧draw更新供点击命中)
+        self._show_perf_dialog = False               # 是否显示性能档三选一弹窗
+        self._perf_dialog_pos = [70, 210]            # 弹窗位置(可拖标题栏移动)
+        self._perf_dialog_dragging = False
+        self._perf_dialog_drag_offset = [0, 0]
+        self._dlg_perf_close = (0, 0, 0, 0)          # 弹窗右上角X(必须初始化,否则首开点击None解包崩)
+        self._dlg_perf_opt = {"slow": (0, 0, 0, 0), "normal": (0, 0, 0, 0), "fast": (0, 0, 0, 0)}  # 三选项条
         # 弹窗内控件位置（必须初始化，否则点击检测时None会崩溃）
         self._dlg_scale_x_input = (0, 0, 0, 0)  # X偏差输入框位置
         self._dlg_scale_y_input = (0, 0, 0, 0)  # Y偏差输入框位置
@@ -1660,6 +1688,82 @@ class MinimapRouteRecorder:
         user32.GetWindowRect(self.hwnd, rect)
         l, t, r, b = struct.unpack("llll", rect.raw)
         self.window_rect = {"left": l, "top": t, "width": r - l, "height": b - t}
+
+    # ==================== CPU性能三档(慢/普通/快,用户2026-09-11) ====================
+    def _load_perf_level(self):
+        """启动读 data/perf_config.json 的档位;非法/缺失/异常一律回退normal,绝不因配置崩"""
+        try:
+            _p = os.path.join(DATA_DIR, "perf_config.json")
+            if os.path.exists(_p):
+                with open(_p, "r", encoding="utf-8") as fp:
+                    _lv = json.load(fp).get("level", PERF_DEFAULT_LEVEL)
+                if _lv in PERF_PROFILES:
+                    return _lv
+        except Exception as _e:
+            try:
+                _debug_log("[性能档] 读取失败:%s,回退普通" % _e)
+            except Exception:
+                pass
+        return PERF_DEFAULT_LEVEL
+
+    def _save_perf_level(self):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(os.path.join(DATA_DIR, "perf_config.json"), "w", encoding="utf-8") as fp:
+                json.dump({"level": self._perf_level}, fp, ensure_ascii=False, indent=2)
+        except Exception as _e:
+            _debug_log("[性能档] 保存失败:%s" % _e)
+
+    def _perf(self):
+        """当前档参数dict(带缓存,切档才重算)"""
+        if self._perf_cache is None or self._perf_cache[0] != self._perf_level:
+            lv = self._perf_level if self._perf_level in PERF_PROFILES else PERF_DEFAULT_LEVEL
+            self._perf_cache = (lv, PERF_PROFILES[lv])
+        return self._perf_cache[1]
+
+    def _perf_val(self, key):
+        return self._perf()[key]
+
+    def _perf_onnx_threads(self):
+        """onnx推理CPU线程数=档+逻辑核数(启动时定,切档下次启动生效):
+        快=核-2尽量多;普通=max(2,核-3);慢=封顶2条,多留核给游戏/系统(四核弱机也不爆)"""
+        n = os.cpu_count() or 4
+        lv = self._perf_level if self._perf_level in PERF_PROFILES else PERF_DEFAULT_LEVEL
+        if lv == "fast":
+            return max(1, n - 2)
+        if lv == "slow":
+            return max(1, min(2, n - 2))
+        return max(2, n - 3)
+
+    def _set_perf_level(self, lv):
+        if lv not in PERF_PROFILES or lv == self._perf_level:
+            return
+        self._perf_level = lv
+        self._perf_cache = None
+        self._save_perf_level()
+        p = self._perf()
+        _msg = "[性能档] 切换为%s(%s):检测忙%d/闲%dms YOLO找怪%.2f/战斗%.2fs 血条%.2f 高帧%dms UI%dms 边界%dms;推理线程数下次启动生效" % (
+            PERF_LEVEL_CN[lv], lv, p['detect_busy_ms'], p['detect_idle_ms'],
+            p['yolo_fast_s'], p['yolo_slow_s'], p['bars_s'], p['precise_ms'],
+            p['ui_wait_ms'], p['bound_poll_ms'])
+        print(_msg)
+        _debug_log(_msg)
+        try:
+            self._add_log("性能档→%s(频率即时生效)" % PERF_LEVEL_CN[lv])
+        except Exception:
+            pass
+
+    def _open_perf_dialog(self):
+        self._show_perf_dialog = True
+        self._update_perf_dialog_positions()  # 打开即算控件位置(规范:根治首开点击无反应)
+
+    def _update_perf_dialog_positions(self):
+        """性能档弹窗控件位置(打开即算+每帧绘制重算,照弹窗规范,拖拽不偏移)"""
+        x, y = self._perf_dialog_pos[0], self._perf_dialog_pos[1]
+        self._dlg_perf_close = (x + PERF_DIALOG_W - 30, y + 5, 25, 25)
+        _oy = y + 58
+        for i, lv in enumerate(PERF_LEVEL_ORDER):  # 三个选项条纵向排列
+            self._dlg_perf_opt[lv] = (x + 20, _oy + i * 40, PERF_DIALOG_W - 40, 34)
 
     def _update_scale_dialog_positions(self):
         """立即计算弹窗内所有控件的位置（解决第一次打开弹窗点击没反应的问题）"""
@@ -7058,6 +7162,35 @@ class MinimapRouteRecorder:
             print("[倍率差弹窗] 停止拖拽")
             return
 
+        # === 性能档弹窗交互(用户2026-09-11):优先X→标题栏拖拽→点档位切换;照倍率弹窗范式) ===
+        if self._show_perf_dialog and event == cv2.EVENT_LBUTTONDOWN:
+            cx, cy, cw, ch = self._dlg_perf_close
+            if cx <= x < cx+cw and cy <= y < cy+ch:          # 1.右上角X关闭
+                self._show_perf_dialog = False
+                return
+            dlg_x, dlg_y = self._perf_dialog_pos[0], self._perf_dialog_pos[1]
+            if dlg_x <= x < dlg_x+PERF_DIALOG_W and dlg_y <= y < dlg_y+50:  # 2.标题栏拖拽
+                self._perf_dialog_dragging = True
+                self._perf_dialog_drag_offset = [x-dlg_x, y-dlg_y]
+                return
+            for lv in PERF_LEVEL_ORDER:                      # 3.点某档=切换(频率即时生效+存盘)
+                ox, oy, ow, oh = self._dlg_perf_opt[lv]
+                if ox <= x < ox+ow and oy <= y < oy+oh:
+                    self._set_perf_level(lv)
+                    return
+            if not (dlg_x <= x < dlg_x+PERF_DIALOG_W and dlg_y <= y < dlg_y+PERF_DIALOG_H):  # 点外部关闭
+                self._show_perf_dialog = False
+                return
+        if self._show_perf_dialog and self._perf_dialog_dragging and event == cv2.EVENT_MOUSEMOVE:
+            self._perf_dialog_pos[0] = x - self._perf_dialog_drag_offset[0]
+            self._perf_dialog_pos[1] = y - self._perf_dialog_drag_offset[1]
+            self._perf_dialog_pos[0] = max(0, min(UI_W-PERF_DIALOG_W, self._perf_dialog_pos[0]))
+            self._perf_dialog_pos[1] = max(0, min(UI_H-PERF_DIALOG_H, self._perf_dialog_pos[1]))
+            return
+        if self._perf_dialog_dragging and event == cv2.EVENT_LBUTTONUP:
+            self._perf_dialog_dragging = False
+            return
+
         # 路线页输入框（X/Y偏移）聚焦处理
         if event == cv2.EVENT_LBUTTONDOWN:
             self._handle_input_mouse(x, y)
@@ -7342,6 +7475,10 @@ class MinimapRouteRecorder:
             # 【打怪区域·用户2026-09-11】梯删除正下方"打怪区"钮:点一下变绿=可拖左右竖线+点绿线选Y上下限,再点=保存变灰
             if self._btn_bound_area and _in(self._btn_bound_area, x, y):
                 self._bound_toggle_edit()
+                return
+            # 【性能档·用户2026-09-11】打怪区正下方"性能档"钮:点开慢/普通/快三选一弹窗
+            if self._btn_perf and _in(self._btn_perf, x, y):
+                self._open_perf_dialog()
                 return
             # 【打怪区域·Y上下限点选】编辑态下点小地图只服务打怪区域。坐标必须用小地图"实际贴放矩形"_map_disp_*严格逆运算:
             # 固定UI_MAP_Y=131与实际贴放顶143差12px、显示高还是动态值,用公共map_y会Y系统性偏上(用户实锤);竖线拖拽_bound_drag_tick
@@ -7853,6 +7990,15 @@ class MinimapRouteRecorder:
             cv2.rectangle(frame, (btn_ba_x, btn_ba_y), (btn_ba_x+btn_ba_w, btn_ba_y+btn_ba_h), (150, 150, 150), 1)
             self._putcn(frame, "打怪区", btn_ba_x+8, btn_ba_y+14, (190, 190, 190))
 
+        # === 性能档按钮(打怪区正下方,用户2026-09-11):点一下弹"慢/普通/快"三选一弹窗 ===
+        btn_pf_w, btn_pf_h = 60, 20                    # 与梯删除/打怪区等宽,竖排对齐
+        btn_pf_x = btn_ba_x + btn_ba_w - btn_pf_w
+        btn_pf_y = btn_ba_y + btn_ba_h + 3            # 紧贴打怪区下方3px
+        self._btn_perf = (btn_pf_x, btn_pf_y, btn_pf_w, btn_pf_h)
+        cv2.rectangle(frame, (btn_pf_x, btn_pf_y), (btn_pf_x+btn_pf_w, btn_pf_y+btn_pf_h), (60, 60, 60), -1)
+        cv2.rectangle(frame, (btn_pf_x, btn_pf_y), (btn_pf_x+btn_pf_w, btn_pf_y+btn_pf_h), (150, 150, 150), 1)
+        self._putcn(frame, "性能档", btn_pf_x+8, btn_pf_y+14, (190, 190, 190))
+
         # === 【模块B】台子选择面板（点击"台子选择"后弹出）===
         if self._show_platform_selector and self.platforms:
             # 面板位置：小地图内部，覆盖在小地图上
@@ -8250,6 +8396,32 @@ class MinimapRouteRecorder:
             cancel_x, cancel_y, cancel_w, cancel_h = self._dlg_scale_cancel_btn
             cv2.rectangle(frame, (cancel_x, cancel_y), (cancel_x+cancel_w-1, cancel_y+cancel_h-1), (128, 0, 0), -1)
             self._draw_cn_mixed(frame, "取消", cancel_x+20, cancel_y+20, 0.5, (255, 255, 255))  # 原cv2字号，只中文换字体
+
+        # === 性能档三选一弹窗(灰底白字/右上X/可拖标题栏/最上层,照弹窗组件规范;用户2026-09-11) ===
+        if self._show_perf_dialog:
+            self._update_perf_dialog_positions()  # 每帧重算,拖拽不偏移
+            px, py = self._perf_dialog_pos[0], self._perf_dialog_pos[1]
+            pw, ph = PERF_DIALOG_W, PERF_DIALOG_H
+            cv2.rectangle(frame, (px, py), (px+pw-1, py+ph-1), (60, 60, 60), -1)
+            cv2.rectangle(frame, (px, py), (px+pw-1, py+ph-1), (100, 100, 100), 1)
+            cv2.rectangle(frame, (px, py), (px+pw-1, py+50), (80, 80, 80), -1)  # 标题栏(可拖拽区)
+            self._draw_cn_mixed(frame, "性能档选择", px+15, py+32, 0.6, (255, 255, 255))
+            cx, cy, cw, ch = self._dlg_perf_close
+            cv2.rectangle(frame, (cx, cy), (cx+cw-1, cy+ch-1), (80, 80, 80), -1)
+            cv2.putText(frame, "X", (cx+7, cy+18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
+            _opt_label = {"slow": "慢：四核/配置差·最省CPU",
+                          "normal": "普通：一般电脑·默认推荐",
+                          "fast": "快：八核/配置好·识别最跟手"}
+            for lv in PERF_LEVEL_ORDER:  # 当前档绿底高亮,其余深灰
+                ox, oy, ow, oh = self._dlg_perf_opt[lv]
+                _sel = (lv == self._perf_level)
+                cv2.rectangle(frame, (ox, oy), (ox+ow-1, oy+oh-1), (0, 130, 0) if _sel else (45, 45, 45), -1)
+                cv2.rectangle(frame, (ox, oy), (ox+ow-1, oy+oh-1), (0, 220, 0) if _sel else (150, 150, 150), 1)
+                self._draw_cn_mixed(frame, _opt_label[lv], ox+12, oy+23, 0.5, (255, 255, 255))
+            _ty = py + 58 + 3 * 40 + 6  # 底部建议说明
+            self._draw_cn_mixed(frame, "建议：配置好选快、一般选普通、", px+20, _ty, 0.42, (200, 200, 200))
+            self._draw_cn_mixed(frame, "卡顿或发热选慢。切换即时生效，", px+20, _ty+20, 0.42, (200, 200, 200))
+            self._draw_cn_mixed(frame, "推理线程数下次启动才生效。", px+20, _ty+40, 0.42, (200, 200, 200))
 
         self._seg_sum['rest'] = self._seg_sum.get('rest', 0) + time.time() - self._seg_tp  # [分段]其余控件/弹窗
         return frame
@@ -9195,7 +9367,7 @@ class MinimapRouteRecorder:
                 self._ladder_backend = 'template'
                 return False
             _ncpu = os.cpu_count() or 4
-            self._ladder_yolo_threads = max(1, _ncpu - 2)
+            self._ladder_yolo_threads = self._perf_onnx_threads()  # 同怪物模型,按CPU性能档+核数
             try:
                 import onnxruntime as _ort
                 _so = _ort.SessionOptions()
@@ -12475,7 +12647,7 @@ class MinimapRouteRecorder:
         try:
             # CPU推理线程按逻辑核自适应、留2核给游戏/主线程/系统(用户2026-09-09要适配低配四核)
             _ncpu = os.cpu_count() or 4
-            self._yolo_threads = max(1, _ncpu - 2)
+            self._yolo_threads = self._perf_onnx_threads()  # CPU性能三档+核数定推理线程(慢档封顶2,用户2026-09-11)
             # —— 优先 onnxruntime ——
             # 2026-09-10实测:新版ultralytics(8.4.x)导出的onnx(含C3k2/新NMS算子)在cv2.dnn下会算错
             # (输出score>1、巨型误检框,416/640、换opset/simplify均无效),onnxruntime结果正确且CPU更快;
@@ -12512,17 +12684,10 @@ class MinimapRouteRecorder:
                 self._yolo_input = self._read_onnx_input_size(model_path, 640)
                 self._yolo_backend = 'cv2'
                 print("[YOLO] onnxruntime不可用(%s),回退cv2.dnn后端(仅旧版640模型保证正确)" % _oe)
-            # YOLO帧率按核数自适应:核少(低配)自动放慢保整机流畅,核多维持跟手;基准=8核档常量
-            if _ncpu >= 8:
-                _k = 1.0
-            elif _ncpu >= 6:
-                _k = 1.25
-            elif _ncpu >= 4:
-                _k = 1.5
-            else:
-                _k = 2.0
-            self._yolo_fast_gap = round(YOLO_FAST_S * _k, 3)
-            self._yolo_slow_gap = round(YOLO_SLOW_S * _k, 3)
+            # YOLO帧率间隔由CPU性能三档统一给(慢档=低配放慢、快档=跟手,已替代原按核数_k系数):
+            # 检测线程运行中每轮读_perf_val、切档即时生效,这里两个gap作首次初值/兜底
+            self._yolo_fast_gap = round(self._perf_val('yolo_fast_s'), 3)
+            self._yolo_slow_gap = round(self._perf_val('yolo_slow_s'), 3)
             _bk = 'onnxruntime-CPU' if self._yolo_backend == 'ort' else 'OpenCV-cv2.dnn(兜底)'
             print("[YOLO] 加载成功:%s 输入%dpx CPU线程%d/%d核 后端%s 找怪%.2fHz战斗%.2fHz" % (
                 model_path, self._yolo_input, self._yolo_threads, _ncpu, _bk,
@@ -14113,7 +14278,7 @@ class MinimapRouteRecorder:
                     _debug_log("[打怪区域] 守护循环异常: %s" % e)
                 except Exception:
                     pass
-            time.sleep(BOUND_POLL_MS / 1000.0)
+            time.sleep(self._perf_val('bound_poll_ms') / 1000.0)  # 边界守护轮询按CPU性能档(快50/普通60/慢90ms)
 
     def _bound_check_once(self):
         # 编辑态(正在拖线/选线)不守护。光点直接用主循环每帧算好、倍率校准也在用的现成 self._player_map_pos
@@ -15426,7 +15591,7 @@ class MinimapRouteRecorder:
                         _feat_crop = (_ftx1, _fty1, _ftx2, _fty2)
                         if _feat_crop[2] <= _feat_crop[0] or _feat_crop[3] <= _feat_crop[1]:
                             _feat_crop = (0, _band_y1, _fw, _band_y2)
-                        if (not _precise) and _now_det - self._feat_last_t >= 0.20:  # 高频档跳过怪模板(冻结cache);2026-09-09提效0.33→0.20=5Hz(无怪物模板时此分支直接返回[]零开销)
+                        if (not _precise) and _now_det - self._feat_last_t >= self._perf_val('feat_s'):  # 怪模板节流按CPU性能档(无怪物模板时此分支直接返回[]零开销)
                             _tf0 = time.time()
                             self._feat_cache = self._match_monster(_frame, _feat_crop) if self._monster_templates else []
                             _dt_feat += time.time() - _tf0
@@ -15437,8 +15602,8 @@ class MinimapRouteRecorder:
                         _lk = getattr(self, '_combat_locked_target', None)
                         _locked_in = bool(_lk) and _ch is not None and abs(_lk[0] - _ch[0]) <= _skr \
                             and -_yupr <= (_lk[1] - _ch[1]) <= _ydnr
-                        _yolo_gap = (getattr(self, '_yolo_slow_gap', YOLO_SLOW_S) if _locked_in
-                                     else getattr(self, '_yolo_fast_gap', YOLO_FAST_S))  # 按核数自适应(低配自动放慢)
+                        _yolo_gap = (self._perf_val('yolo_slow_s') if _locked_in
+                                     else self._perf_val('yolo_fast_s'))  # CPU性能三档统一给间隔,切档即时生效
                         if (not _precise) and _now_det - self._yolo_last_t >= _yolo_gap:
                             _ty0 = time.time()
                             self._yolo_cache = self._detect_monsters(_frame, _yolo_crop)
@@ -15461,7 +15626,7 @@ class MinimapRouteRecorder:
                                 _search.append((max(0, _tx - 50), max(0, _ty - 55),
                                                 min(_frame.shape[1], _tx + 50), min(_frame.shape[0], _ty + 10)))
                         # 血条扫描节流到BARS_SCAN_S(和怪表3Hz对齐)：怪表没更新的空轮ROI一样,复用上一次结果,省第二大头
-                        if (not _precise) and _now_det - self._bars_last_t >= BARS_SCAN_S:
+                        if (not _precise) and _now_det - self._bars_last_t >= self._perf_val('bars_s'):  # 血条扫描节流按CPU性能档
                             _tb0 = time.time()
                             self._bars_cache = self._detect_monster_hp_bars(_frame, _search if _search else None)
                             _dt_bars += time.time() - _tb0
@@ -15527,7 +15692,7 @@ class MinimapRouteRecorder:
             else:
                 self._precise_adapt_p = None  # 离开高帧:自适应档位清空,下次进按核数目标重新起步
                 self._precise_ov_n = self._precise_rx_n = 0
-                _period = DETECT_PERIOD_MS if _busy else DETECT_IDLE_MS
+                _period = self._perf_val('detect_busy_ms') if _busy else self._perf_val('detect_idle_ms')  # 忙/闲周期按CPU性能档
             # [CPU诊断2026-09-07] 每约1秒汇总检测线程各阶段耗时(毫秒)，定位检测侧CPU大头
             _dt_rounds += 1
             _dt_now = time.time()
@@ -15547,17 +15712,9 @@ class MinimapRouteRecorder:
                 time.sleep(_slack / 1000.0)
 
     def _precise_target_period(self):
-        """上梯高帧【目标周期】按本机逻辑核数分档(用户2026-09-11:八核尽量快、四核也要带得动):
-        ≥8核22ms(≈45Hz),4~7核28ms(≈36Hz),≤3核34ms(≈29Hz);结果缓存。实际周期再由检测线程自适应监管
-        (跑不完每档+3退避、封顶LADDER_PRECISE_PERIOD_MAX、轻松再升回此目标),保证慢机不吃满核。"""
-        _v = getattr(self, '_precise_tgt_cache', None)
-        if _v is None:
-            _n = os.cpu_count() or 4
-            _v = LADDER_PRECISE_PERIOD_MS if _n >= LADDER_PRECISE_HI_CORES else (
-                LADDER_PRECISE_TARGET_MS_MID if _n >= 4 else LADDER_PRECISE_TARGET_MS_LOW)
-            self._precise_tgt_cache = _v
-            _debug_log("[高帧监管] 本机逻辑核%d→上梯高帧目标周期%dms" % (_n, _v))
-        return _v
+        """上梯高帧【目标周期】由CPU性能三档给(快22/普通28/慢34ms≈45/36/29Hz);实际周期再由检测线程自适应监管
+        (跑不完每档+3退避、封顶LADDER_PRECISE_PERIOD_MAX、轻松再升回此目标),保证慢机不吃满核。读_perf缓存、切档即时变。"""
+        return int(self._perf_val('precise_ms'))
 
     def _start_detection_thread(self):
         if self._detect_thread and self._detect_thread.is_alive():
@@ -17180,7 +17337,7 @@ class MinimapRouteRecorder:
                 print("draw error:", e)
                 cv2.imshow(win, self._ui_bg)
 
-            key = cv2.waitKey(25) & 0xFF  # 2026-09-07 CPU二档降压：10→15→25ms，UI约≤40帧(挂机面板+小地图光点无需高刷)，战斗按键靠内部时间戳节流不受影响
+            key = cv2.waitKey(int(self._perf_val('ui_wait_ms'))) & 0xFF  # UI帧间隔按CPU性能档(快15/普通25/慢40ms);挂机面板无需高刷,战斗按键靠内部时间戳节流不受影响
             if self.frame_count <= 3: print("[冷启动] %.2fs 第%d帧waitKey完成 key=%d" % (time.time()-self._boot_t, self.frame_count, key))
             # 输入框自动失焦：3秒无变化（全局轮询输入不依赖UI前台，故不检查前台窗口）
             if self._focused_field is not None:
