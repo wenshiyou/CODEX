@@ -1,0 +1,55 @@
+{
+  "maps": [
+    {
+      "name": "木面人二",
+      "plans": [
+        {
+          "id": "route_001",
+          "name": "方案一",
+          "selected": false
+        },
+        {
+          "id": "route_002",
+          "name": "方案2",
+          "selected": false
+        },
+        {
+          "id": "route_003",
+          "name": "方案3",
+          "selected": false
+        },
+        {
+          "id": "route_004",
+          "name": "方案4",
+          "selected": false
+        },
+        {
+          "id": "route_005",
+          "name": "方案5",
+          "selected": false
+        },
+        {
+          "id": "route_006",
+          "name": "方案6",
+          "selected": false
+        },
+        {
+          "id": "route_007",
+          "name": "方案7",
+          "selected": false
+        },
+        {
+          "id": "route_008",
+          "name": "方案8",
+          "selected": false
+        },
+        {
+          "id": "route_009",
+          "name": "方案9",
+          "selected": false
+        }
+      ]
+    }
+  ],
+  "current_id": "route_009"
+}

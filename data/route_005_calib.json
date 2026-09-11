@@ -1,0 +1,17 @@
+{
+  "calib_left": null,
+  "calib_right": null,
+  "calib_top": null,
+  "calibrated_scale_x": 0,
+  "calibrated_scale_y": 0,
+  "char_template_b64": "iVBORw0KGgoAAAANSUhEUgAAAA4AAAAHCAIAAAC3JetOAAAA7UlEQVQYGTXBMS8DYRjA8f+jV2noegMW1aESIWXwOWxmGpMv0NxH0IbEjWIQi1juEkaDxCQSZhZNmlxMlyve4vre+7iB30/iI5R/XpX6ErUGLuf7FTPEWkAEVSQ+5E8VHKins3OiBeOEChSoBUFAoj4iFI6xo14DhzhUUI+vHCbMTINSkqiHTGEst3f4PhvreJZCSEY8PdBq0FqBTxQkOkA8UqV3TD6hu4e/gPnh+oqbe/a3aW+iKSWJQ6iQQRgySAh2aLbJPjg94XlI0GFxDTJK0g9AMI7LC95Sgl2aq4wM52c8vtDZYn4Z+w7CL8vYXXbGseTHAAAAAElFTkSuQmCC",
+  "yolo_model_path": "C:\\Users\\wenwen\\Desktop\\MXD\\maple_bot\\best.onnx",
+  "blue_box": {
+    "width": 84,
+    "height": 52,
+    "bl_ox": 1,
+    "bl_oy": 20,
+    "tr_ox": 85,
+    "tr_oy": -32
+  }
+}
