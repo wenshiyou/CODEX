@@ -86,6 +86,8 @@ import win32gui  # Windows GUI API，用于设置窗口置顶和透明
 import win32con  # Windows常量定义
 import win32api  # Windows API，用于RGB颜色转换
 import combat_logic  # 打怪决策核心(纯逻辑)；顶层静态导入保证PyInstaller打进exe，供[新决策]影子日志使用
+from core.action_arbiter import ActionMode, ActionArbiter, RangeGate  # 架构第1块:动作权仲裁/范围迟滞(顶层静态导入,PyInstaller打包)
+from core.world_snapshot import WorldSnapshot, SnapshotStore
 
 # === 必须在创建任何窗口之前设置 DPI 感知，否则高DPI缩放下蒙板坐标错位 ===
 try:
@@ -1549,6 +1551,12 @@ class MinimapRouteRecorder:
         self._raw_monsters = []             # 后台线程算出的原始合并怪列表 [(x1,y1,x2,y2,score)]
         self._raw_hp_bars = []              # 后台线程算出的血条 [(x,y,w,h)]
         self._raw_char_pos = None           # 后台线程算出的人物脚位置
+        # 架构第1块·影子地基:世界快照仓(识别线程唯一出口)+动作权仲裁器+范围迟滞门。
+        # 影子阶段只发布快照、只比对仲裁结果,不接发键回调、不夺权,现有行为完全不变。
+        self._snap_store = SnapshotStore()
+        self._arbiter = ActionArbiter(on_leave=None, on_enter=None)  # 真正收键时再注入松键回调
+        self._range_gate = RangeGate(enter_keep=50, exit_back=25)    # 用户定:走到R-50开打、退到R+25回巡路
+        self._shadow_arb_log_t = 0.0        # 影子仲裁比对日志节流
         self._raw_cached_feature_monsters = []  # 后台线程算出的怪物特征匹配结果
         self._detect_sct = None             # 后台线程自己的 mss 实例（不共用主线程的 self.sct）
         self._detect_last_monsters = None   # 后台线程最近一次非空怪列表（2秒宽限用）
@@ -15652,6 +15660,14 @@ class MinimapRouteRecorder:
                         # 原子引用替换(与_raw_monsters同机制)；帧龄由读取方用 _raw_frame_t 判断，超龄才补截。
                         self._raw_frame = _frame
                         self._raw_frame_t = time.time()
+                        # 架构第1块·影子:同帧把识别结果镜像成一份世界快照原子发布(动作线程以后只读这份,识别线程永不发键);
+                        # 不改动上面_raw_*的现有消费,纯新增一条数据出口
+                        try:
+                            self._snap_store.publish(WorldSnapshot(
+                                player_screen=_ch, monsters=list(_merged),
+                                extra={'hp_bars': list(_bars) if _bars is not None else []}))
+                        except Exception as _se:
+                            _debug_log("[影子快照] 发布异常:%s" % _se)
                         if _merged:
                             self._last_monster_seen = time.time()  # 自适应降频：见到怪→回到战斗快周期
                         # A1修复：_feat是5元组怪物框(x1,y1,x2,y2,score)，绝不能覆盖特征点(蒙板按4元组 x,y,模板号,置信度 解包)。
@@ -17061,6 +17077,24 @@ class MinimapRouteRecorder:
                     self._converge_movement()
                 except Exception as e:
                     _debug_log("[移动收敛] 调用异常: %s" % e)
+            # 架构第1块·影子仲裁(不发键/不夺权/不改任何现有分支):让新ActionArbiter在真实状态流上每帧判owner,
+            # 与旧_converge_movement判出的_move_owner并排打日志比对,验证一致后下一步才让它真正收键
+            try:
+                _sh_bound = self._bound_pull is not None
+                _sh_has = self._combat_locked_target is not None
+                _sh_active = bool(getattr(self, '_combat_active', False))
+                # 第一版in_range用active近似(锁了且在打=True;锁了没在打=False=还在靠近;没锁=None);下一步接RangeGate真实距离
+                _sh_inrange = (True if _sh_active else (False if _sh_has else None))
+                _sh_owner, _sh_ev = self._arbiter.update(bound=_sh_bound, has_target=_sh_has, in_range=_sh_inrange)
+                _sh_now = time.time()
+                if _sh_ev or _sh_now - self._shadow_arb_log_t >= 1.0:
+                    self._shadow_arb_log_t = _sh_now
+                    _debug_log("[影子仲裁] 新owner=%s 旧移动权=%s | bound拉回=%s 锁怪=%s active=%s transit=%s climb=%s 切换=%s" % (
+                        _sh_owner, getattr(self, '_move_owner', None), _sh_bound, _sh_has,
+                        _sh_active, getattr(self, '_combat_transit', False),
+                        getattr(self, '_climb_state', 'none'), _sh_ev))
+            except Exception as _ae:
+                _debug_log("[影子仲裁] 异常:%s" % _ae)
 
             # === 定期维护(启动即跑一次，之后每10分钟)：debug.log只留最近5分钟、清1天前调试缓存；backups全部保留 ===
             try:
