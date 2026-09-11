@@ -1320,6 +1320,7 @@ class MinimapRouteRecorder:
         self._bound_thread = None       # 边界守护线程句柄
         self._bound_running = False     # 边界守护线程运行标志
         self._btn_bound_area = None     # UI小地图区"打怪区域"切换按钮矩形(每帧draw更新供点击命中)
+        self._bound_clear_menu = None   # 右键Y界线→"清除"气泡 {'which':'A'/'B','mx','my'(块坐标),'rect'(显示空间命中框,每帧刷新)}
         # === 掉台归位·独占辅助线(用户2026-09-09)：单平台(只勾一个台)时持续监测光点是否还在该台折线上,
         # 连续离开>防抖时长=掉下去→关主线、用_move_to回原台,光点重新回到原台折线=归位完成→恢复主线 ===
         self._fall_returning = False    # 是否正在掉台归位(归位期间主线锁怪/巡路/打怪暂停)
@@ -5836,6 +5837,7 @@ class MinimapRouteRecorder:
         """UI'打怪区域'按钮:常态灰(守护生效)↔编辑绿(拖左右竖线;点多个相连台子按回车合并成一条界线,共两条,自动按Y定上下);退出编辑即存盘。"""
         self._bound_edit = not self._bound_edit
         self._bound_drag = None
+        self._bound_clear_menu = None   # 进/出编辑都关掉右键清除气泡
         if self._bound_edit:
             # 进入编辑:已存上/下组回填grpA/grpB(顺序无关,退出按Y重排),暂存区清空
             self._bound_grpA = self._valid_pf_group(self._bound_top_grp)
@@ -5930,6 +5932,44 @@ class MinimapRouteRecorder:
         self._bound_reorder()
         _debug_log("[打怪区域] 回车成组 grpA=%s grpB=%s → top=%s bot=%s" % (
             self._bound_grpA, self._bound_grpB, self._bound_top_grp, self._bound_bot_grp))
+
+    def _bound_group_at(self, mx, my):
+        """编辑态右键:块坐标(mx,my)命中哪条【已成形】界线组,返回'A'/'B'/None。
+        组内任一平台折线到光标点≤BOUND_PICK_TOL即算命中该条;两条都中取更近者。暂存区不算(左键可直接再点取消)。"""
+        if not getattr(self, '_bound_edit', False):
+            return None
+
+        def _grp_min_dist(grp):
+            _d = 1e9
+            for _id in grp:
+                _pf = self._bound_pf_by_id(_id)
+                if _pf is not None:
+                    _d = min(_d, self._point_to_polyline_dist(mx, my, self._platform_points(_pf)))
+            return _d
+
+        _da, _db = _grp_min_dist(self._bound_grpA), _grp_min_dist(self._bound_grpB)
+        _best, _bd = None, BOUND_PICK_TOL
+        if _da <= _bd:
+            _best, _bd = 'A', _da
+        if _db < _bd:
+            _best = 'B'
+        return _best
+
+    def _bound_clear_group(self, which):
+        """点'清除'气泡:清空指定的那条已成形界线组(A/B),暂存也清、重排上下;不在此存盘——
+        用户再点'打怪区域'退出编辑时_bound_toggle_edit统一_save_bound_lines,空组即保存为空、可重新录(用户2026-09-12)。"""
+        if which == 'A':
+            self._bound_grpA = []
+        elif which == 'B':
+            self._bound_grpB = []
+        else:
+            return
+        self._bound_staging = []
+        self._bound_reorder()
+        self._bound_clear_menu = None
+        self._add_log("已清空第%s条Y界线,再点'打怪区域'退出即保存为空、可重新录" % which)
+        _debug_log("[打怪区域] 清除界线%s → grpA=%s grpB=%s top=%s bot=%s" % (
+            which, self._bound_grpA, self._bound_grpB, self._bound_top_grp, self._bound_bot_grp))
 
     def _bound_current_pf_id(self):
         """人物当前所在录制平台id(复用_get_current_manual_platform:光点距某绿线≤15即站该台);腾空/梯上判不到返回None。"""
@@ -7501,6 +7541,25 @@ class MinimapRouteRecorder:
                 _bmh = getattr(self, '_last_map_h', MAP_H)
                 _bmx = int((x - _bdx) / _bdw * _bmw) if _bdw else map_x
                 _bmy = int((y - _bdy) / _bdh * _bmh) if _bdh else map_y
+                _mpx, _mpy = x - _bdx, y - _bdy   # map_display显示空间坐标(和气泡绘制同空间,用于命中)
+                # 右键:点中某条已成形Y界线→在该处弹"清除"气泡;点空白=关气泡
+                if event == cv2.EVENT_RBUTTONDOWN:
+                    _w = self._bound_group_at(_bmx, _bmy)
+                    if _w:
+                        self._bound_clear_menu = {'which': _w, 'mx': _bmx, 'my': _bmy, 'rect': None}
+                        self._add_log("选中第%s条Y界线,左键点'清除'清空,再点'打怪区'退出即保存" % _w)
+                    else:
+                        self._bound_clear_menu = None
+                    return
+                # 左键:优先命中"清除"气泡→清空该条界线
+                _cm = getattr(self, '_bound_clear_menu', None)
+                if _cm and _cm.get('rect'):
+                    _cx, _cy, _cw, _ch = _cm['rect']
+                    if _cx <= _mpx < _cx + _cw and _cy <= _mpy < _cy + _ch:
+                        self._bound_clear_group(_cm['which'])
+                        return
+                if _cm:
+                    self._bound_clear_menu = None   # 左键点其它地方=关掉气泡,再走正常选台/拖线
                 if self._bound_hit_line(_bmx, _bmy) is None:
                     self._bound_pick_at(_bmx, _bmy)
                 return
@@ -7878,6 +7937,20 @@ class MinimapRouteRecorder:
                     _spts = [(int(pt[0] * scale_x), int(pt[1] * scale_y)) for pt in _hpts]
                     cv2.polylines(map_display, [np.array(_spts, np.int32).reshape(-1, 1, 2)],
                                   False, _idcol[_pid], 3)
+            # 右键清除Y界线气泡(仅编辑态):右键点中某条已成形界线→命中处弹"清除",左键点中清空该组;退出编辑时统一存盘(用户2026-09-12)
+            _cm = getattr(self, '_bound_clear_menu', None)
+            if _bedit and _cm:
+                _rw = map_display.shape[1]
+                _rh = map_display.shape[0]
+                _ax = int(_cm['mx'] * scale_x)
+                _ay = int(_cm['my'] * scale_y)
+                _cw, _ch = 46, 20
+                _ax = max(2, min(_ax, _rw - _cw - 2))
+                _ay = max(2, min(_ay + 6, _rh - _ch - 2))   # 落在命中点略下方,钳在小地图内
+                cv2.rectangle(map_display, (_ax, _ay), (_ax + _cw, _ay + _ch), (60, 60, 60), -1)
+                cv2.rectangle(map_display, (_ax, _ay), (_ax + _cw, _ay + _ch), (0, 165, 255), 1)
+                self._putcn(map_display, "清除", _ax + 9, _ay + 15, (255, 255, 255))
+                _cm['rect'] = (_ax, _ay, _cw, _ch)         # 回写显示空间命中框供左键判定(每帧随缩放刷新)
         except Exception as _be:
             _debug_log("[UI小地图] 打怪区域画线异常: %s" % _be)
 
