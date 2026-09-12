@@ -1550,7 +1550,12 @@ class MinimapRouteRecorder:
         # 人物跟踪线程已删除（改用主循环共用截图，性能更好）
         # === 后台检测线程：把重活(截图+人物匹配+怪物匹配+YOLO+血条)拆到独立线程，主线程只读结果做移动/蒙板/战斗，
         #     避免主线程被拖累导致 YOLO/蒙板/小地图 几秒才刷一次（用户2026-09-05"主线太厚重要分解"）===
-        self._detect_thread = None          # 后台检测线程
+        self._player_thread = None          # 识别A线程:唯一截图+人物匹配(高频)
+        self._recognize_thread = None       # 识别B线程:怪模板/YOLO/血条(低频,从帧槽取帧,自己不截图)
+        # 物理拆分帧槽:A每周期把最新截图写这里,B永远只取最新一帧;seq单调递增,B按seq只处理新帧不重复算
+        self._latest_frame = None
+        self._latest_frame_t = 0.0
+        self._latest_frame_seq = 0
         self._detect_running = False        # 线程运行标志
         self._detect_lock = threading.Lock()  # 截图/结果写入锁，保证与主线程/蒙板线程不打架
         self._raw_monsters = []             # 后台线程算出的原始合并怪列表 [(x1,y1,x2,y2,score)]
@@ -15579,41 +15584,28 @@ class MinimapRouteRecorder:
                     _used_m[_j] = True
         return _merged_m
 
-    def _detection_loop(self):
-        """后台检测线程：约每 150ms(DETECT_PERIOD_MS) 截一张图，人物+怪+YOLO+血条全部在这张同一帧上算(同帧同步→距离准)。
-        主线程只读结果做战斗/小地图/蒙板，不再做重活；自己建 mss 实例，避免与主线程共用打架。"""
+    def _player_loop(self):
+        """识别A线程(物理拆分·用户2026-09-12):【唯一截图者】+高频人物匹配。自建mss,每周期截一张、
+        只在这帧上跑人物匹配(ROI很轻),把最新帧写进帧槽(_latest_frame/seq)供B取,并发布_raw_frame/_raw_char_pos。
+        重活(怪模板/YOLO/血条)全在_recognize_loop(B),A不做,故人物点不再被重活拖住、跟手。自己建mss避免与主线程共用。"""
         import mss as _mss_mod
         try:
             _sct = _mss_mod.mss()
         except Exception as _e:
-            print("[检测线程] mss初始化失败:", _e)
+            print("[识别A] mss初始化失败:", _e)
             return
         # 窗口矩形(客户区)获取
         self._detect_lock.acquire()
         self._detect_sct = _sct
         self._detect_lock.release()
         last_rect = None
-        _seen_reset_seq = 0   # 已处理到的硬重置版本号(与self._detect_reset_seq比对,见循环顶部自清)
-        # [CPU诊断2026-09-07] 检测线程各阶段耗时统计，每秒汇总一条到debug.log（定位检测线程CPU大头）
-        _dt_grab = _dt_char = _dt_feat = _dt_yolo = _dt_bars = 0.0
+        # [CPU诊断] A线程只统计截图+人物耗时(怪模板/YOLO/血条在B线程各自统计)
+        _dt_grab = _dt_char = 0.0
         _dt_rounds = 0
         _dt_last_report = time.time()
         while self._detect_running:
             _t0 = time.time()
             try:
-                # 硬重置版本号自清(主线_hard_reset_state把_detect_reset_seq+1):检测线程在自己循环里清掉跨帧怪表/
-                # 时序平滑/静止投票缓存并把节流清零,本轮随即全量重扫——保证硬重置后不被1.5~2秒前的旧怪表/2秒宽限带偏。
-                # 必须由检测线程自清(而非主线直接清):这些list本线程正在迭代,跨线程改迭代对象有竞争。
-                if self._detect_reset_seq != _seen_reset_seq:
-                    _seen_reset_seq = self._detect_reset_seq
-                    self._yolo_cache, self._feat_cache, self._bars_cache = [], [], []
-                    self._yolo_last_t = self._feat_last_t = self._bars_last_t = 0.0
-                    self._detect_last_monsters = None
-                    self._detect_last_monsters_time = 0
-                    self._detect_recent = []
-                    self._monster_static_track = {}
-                    self._raw_monsters = []
-                    _debug_log("[检测线程] 收到硬重置seq=%d,清空跨帧缓存并于本轮全量重扫" % _seen_reset_seq)
                 if self.hwnd is not None:
                     # 获取窗口客户区矩形
                     _r = self.window_rect
@@ -15634,140 +15626,35 @@ class MinimapRouteRecorder:
                     else:
                         _frame = None
                     if _frame is not None:
-                        # 上梯屏幕精对齐高频档(方案B):此时只高频出人物+帧,怪已锁定不换→跳过YOLO/血条/怪模板重活,冻结上一次怪表
-                        # 保险:必须确实处在to_ladder/climbing,残留标志不算数(防漏复位导致永久跳过YOLO不刷怪)
-                        _precise = bool(getattr(self, '_ladder_precise_mode', False)) \
-                            and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
-                        # 固定识别带(整窗坐标):只在 y∈[30,H-90] 识别人物/怪,顶去标题栏、底去血蓝/技能UI栏,防UI误检
+                        # 固定识别带(整窗坐标):只在 y∈[30,H-90] 识别人物,顶去标题栏、底去血蓝/技能UI栏,防UI误检
                         _fh, _fw = _frame.shape[:2]
                         _band_y1 = DETECT_TOP_MARGIN
                         _band_y2 = max(_band_y1 + 1, _fh - DETECT_BOTTOM_MARGIN)
-                        # 同一张帧：人物、怪、血条全在这张上算
+                        # A只在这帧上跑人物匹配(ROI很轻);怪/血条由B从帧槽取同一帧另算,上梯高帧时A照常高频出人物
                         _tc0 = time.time()
                         _ch = self._get_player_screen_pos(_frame)  # 人物每周期匹配(ROI很轻,丢失才全图),保证人物点跟手
                         # 人物点落在顶部标题栏/底部UI带=误匹配(人物不可能站UI上),作废,避免拿假人物点算距离/锁怪
                         if _ch is not None and not (_band_y1 <= _ch[1] <= _band_y2):
                             _ch = None
                         _dt_char += time.time() - _tc0
-                        # 怪物模板匹配/YOLO都是重活：统一限到约3Hz(330ms)，中间周期复用上一次结果；
-                        # 怪物另有2秒宽限不会闪没；进一步降CPU(2026-09-07整机80%仍偏高,二档降压)
-                        if not hasattr(self, '_yolo_cache'):
-                            self._yolo_cache, self._yolo_last_t = [], 0.0
-                            self._feat_cache, self._feat_last_t = [], 0.0
-                            self._bars_cache, self._bars_last_t = [], 0.0
-                        _now_det = time.time()
-                        # 战斗配置(技能射程/Y带)提前算：YOLO分档、血条ROI都要用，避免重复取配置
-                        _fc = self._get_fight_config()
-                        _skr = int(_fc.get("atk1_distance", 150) or 150)
-                        _yupr = abs(int(_fc.get("attack_y_up", -ATTACK_Y_UP)))
-                        _ydnr = abs(int(_fc.get("attack_y_down", ATTACK_Y_DOWN)))
-                        # 2026-09-08 检测范围裁剪优化：
-                        # YOLO用寻怪范围(X左右各 + Y上方 + Y下方)限定识别区域→只识别人物周围范围内的怪，范围外不识别(省资源+用户要求)；
-                        # 特征匹配用技能范围限定模板搜索区域→省CPU；
-                        # 人物丢失或范围为空→传None全图检测(兜底)。
-                        _far_x = int(_fc.get("far_range_x", 0) or 0)
-                        _far_y_up = int(_fc.get("far_range_y_up", 0) or 0)
-                        _far_y_down = int(_fc.get("far_range_y_down", 0) or 0)
-                        # 动态寻怪范围(整窗坐标);无人物/范围空→退化为固定识别带全宽(YOLO也不碰上下UI带)
-                        if _ch is not None and _far_x > 0 and (_far_y_up > 0 or _far_y_down > 0):
-                            _dyx1 = max(0, _ch[0] - _far_x)
-                            _dyx2 = min(_fw, _ch[0] + _far_x)
-                            _dyy1 = _ch[1] - _far_y_up if _far_y_up > 0 else _band_y1
-                            _dyy2 = _ch[1] + _far_y_down if _far_y_down > 0 else _band_y2
-                        else:
-                            _dyx1, _dyx2, _dyy1, _dyy2 = 0, _fw, _band_y1, _band_y2
-                        # 统一夹到固定识别带:纵向绝不越界到标题栏/UI栏,横向夹整窗;退化非法时回退整带
-                        _yolo_crop = (max(0, _dyx1), max(_band_y1, _dyy1), min(_fw, _dyx2), min(_band_y2, _dyy2))
-                        if _yolo_crop[2] <= _yolo_crop[0] or _yolo_crop[3] <= _yolo_crop[1]:
-                            _yolo_crop = (0, _band_y1, _fw, _band_y2)
-                        # 特征匹配范围:以人物技能范围为动态区(同样夹进固定带);无人物用固定带全宽
-                        if _ch is not None:
-                            _ftx1, _ftx2 = max(0, _ch[0] - _skr), min(_fw, _ch[0] + _skr)
-                            _fty1, _fty2 = max(_band_y1, _ch[1] - _yupr), min(_band_y2, _ch[1] + _ydnr)
-                        else:
-                            _ftx1, _ftx2, _fty1, _fty2 = 0, _fw, _band_y1, _band_y2
-                        _feat_crop = (_ftx1, _fty1, _ftx2, _fty2)
-                        if _feat_crop[2] <= _feat_crop[0] or _feat_crop[3] <= _feat_crop[1]:
-                            _feat_crop = (0, _band_y1, _fw, _band_y2)
-                        if (not _precise) and _now_det - self._feat_last_t >= self._perf_val('feat_s'):  # 怪模板节流按CPU性能档(无怪物模板时此分支直接返回[]零开销)
-                            _tf0 = time.time()
-                            self._feat_cache = self._match_monster(_frame, _feat_crop) if self._monster_templates else []
-                            _dt_feat += time.time() - _tf0
-                            self._feat_last_t = _now_det
-                        _feat = self._feat_cache
-                        # YOLO全图分档(用户2026-09-07)：正锁着【技能范围内】怪=正在打,降到2Hz省最大头(近身怪由技能范围怪模板维持)；
-                        # 无锁/锁的是范围外怪=正在寻敌,提到4Hz,打完一只/发现新怪更快(治"换锁要等几秒")
-                        _lk = getattr(self, '_combat_locked_target', None)
-                        _locked_in = bool(_lk) and _ch is not None and abs(_lk[0] - _ch[0]) <= _skr \
-                            and -_yupr <= (_lk[1] - _ch[1]) <= _ydnr
-                        _yolo_gap = (self._perf_val('yolo_slow_s') if _locked_in
-                                     else self._perf_val('yolo_fast_s'))  # CPU性能三档统一给间隔,切档即时生效
-                        if (not _precise) and _now_det - self._yolo_last_t >= _yolo_gap:
-                            _ty0 = time.time()
-                            self._yolo_cache = self._detect_monsters(_frame, _yolo_crop)
-                            _dt_yolo += time.time() - _ty0
-                            self._yolo_last_t = _now_det
-                        _yolo = self._yolo_cache
-                        _merged = self._merge_detections(_yolo, _feat)
-                        # 血条搜索区【冒险岛世界2026-09-07】以人物技能范围为主：只检测"技能射程+Y范围"内怪的头顶，
-                        # 范围外的怪不会被打、其血条也不该参与存活判定——既降误判又省算力；人物没定位到时退化为全怪头顶
-                        _search = []
-                        for (x1, y1, x2, y2, _s) in _merged:
-                            _mcx, _mcy = (x1 + x2) // 2, y2  # 怪中心X / 脚Y
-                            if _ch is None or (abs(_mcx - _ch[0]) <= _skr
-                                               and -_yupr <= (_mcy - _ch[1]) <= _ydnr):
-                                _search.append((max(0, x1 - 15), max(0, y1 - 40), x2 + 15, y1 + 5))
-                        # 上次锁定目标头顶：同样限技能范围(略放宽40)，避免换目标瞬间丢血条
-                        if self._combat_last_target_pos and _ch is not None:
-                            _tx, _ty = self._combat_last_target_pos
-                            if abs(_tx - _ch[0]) <= _skr + 40:
-                                _search.append((max(0, _tx - 50), max(0, _ty - 55),
-                                                min(_frame.shape[1], _tx + 50), min(_frame.shape[0], _ty + 10)))
-                        # 血条扫描节流到BARS_SCAN_S(和怪表3Hz对齐)：怪表没更新的空轮ROI一样,复用上一次结果,省第二大头
-                        if (not _precise) and _now_det - self._bars_last_t >= self._perf_val('bars_s'):  # 血条扫描节流按CPU性能档
-                            _tb0 = time.time()
-                            self._bars_cache = self._detect_monster_hp_bars(_frame, _search if _search else None)
-                            _dt_bars += time.time() - _tb0
-                            self._bars_last_t = _now_det
-                        _bars = self._bars_cache
-                        # 发布结果（原子引用替换）
-                        # 怪物2秒宽限：这一轮检测为空但2秒内有怪，保留上次结果，避免偶发漏检导致怪点闪没
-                        if _merged:
-                            self._detect_last_monsters = _merged
-                            self._detect_last_monsters_time = time.time()
-                        elif (time.time() - self._detect_last_monsters_time < 2.0
-                              and self._detect_last_monsters):
-                            _merged = self._detect_last_monsters
-                        # 检测稳定化：YOLO单帧漏检不清目标(用户2026-09-05，闪检的怪能一直被锁定/攻击)
-                        _merged = self._temporal_smooth_detections(_merged)
-                        # 固定识别带兜底:剔除框中心落在顶部标题栏/底部UI带的检测(防时序平滑历史框/cache把UI误当怪)
-                        _merged = [b for b in _merged if _band_y1 <= (b[1] + b[3]) // 2 <= _band_y2]
+                        # —— 物理拆分:怪模板/YOLO/血条/合并等重活全部移到_recognize_loop(B线程,从帧槽取这帧);
+                        #    A只高频出人物点+把最新帧写进帧槽,人物不再被重活拖住(用户2026-09-12) ——
                         self._raw_char_pos = _ch
-                        self._raw_cached_feature_monsters = _feat
-                        self._raw_monsters = _merged
-                        self._raw_hp_bars = _bars
-                        # 2026-09-07 CPU优化·截图共用：把本帧发布给主线程复用(自动吃药/伤害检测/镜头检测不再各自全窗口截图)。
-                        # 原子引用替换(与_raw_monsters同机制)；帧龄由读取方用 _raw_frame_t 判断，超龄才补截。
-                        self._raw_frame = _frame
-                        self._raw_frame_t = time.time()
-                        # 架构第1块·影子:同帧把识别结果镜像成一份世界快照原子发布(动作线程以后只读这份,识别线程永不发键);
-                        # 不改动上面_raw_*的现有消费,纯新增一条数据出口
+                        self._latest_frame = _frame                       # 最新帧槽:原子引用替换,B永远只取最新一帧
+                        self._latest_frame_t = time.time()
+                        self._latest_frame_seq = getattr(self, '_latest_frame_seq', 0) + 1
+                        self._raw_frame = _frame                          # 供吃药/伤害/镜头/上梯对位复用,帧龄用_raw_frame_t判
+                        self._raw_frame_t = self._latest_frame_t
+                        # 物理拆分:A只把人物部件合并进世界快照(怪/血条由B的update_parts合并,互不覆盖)
                         try:
-                            self._snap_store.publish(WorldSnapshot(
-                                player_screen=_ch, monsters=list(_merged),
-                                extra={'hp_bars': list(_bars) if _bars is not None else []}))
+                            self._snap_store.update_parts(player_screen=_ch, player_t=self._raw_frame_t)
                         except Exception as _se:
-                            _debug_log("[影子快照] 发布异常:%s" % _se)
-                        if _merged:
-                            self._last_monster_seen = time.time()  # 自适应降频：见到怪→回到战斗快周期
-                        # A1修复：_feat是5元组怪物框(x1,y1,x2,y2,score)，绝不能覆盖特征点(蒙板按4元组 x,y,模板号,置信度 解包)。
-                        # 有怪物模板时 _match_monster内部(约6886行)已把 self._monster_feature_matches 设为正确4元组，这里不能再覆盖；仅无模板时清空。
-                        if not self._monster_templates:
-                            self._monster_feature_matches = []
+                            _debug_log("[识别A] 人物快照发布异常:%s" % _se)
+                        # 人物特征点(蒙板用)由_match_character内部已设,这里仅保险;怪特征点归B线程,不在此动
                         self._char_feature_matches = getattr(self, '_char_feature_matches', [])
             except Exception as _e:
                 if self._detect_running:
-                    print("[检测线程] 异常:", _e)
+                    print("[识别A] 异常:", _e)
             # 自适应周期(用户2026-09-07 CPU94%)：最近0.4s见到怪、或正锁着怪/在战斗 → 150ms跟手；否则空闲300ms省电降占用
             _precise_now = bool(getattr(self, '_ladder_precise_mode', False)) \
                 and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
@@ -15803,12 +15690,12 @@ class MinimapRouteRecorder:
             _dt_rounds += 1
             _dt_now = time.time()
             if _dt_now - _dt_last_report >= 1.0:
-                _msg = "[检测耗时] %d轮 周期%s 截图%d 人物%d 怪模板%d YOLO%d 血条%d (ms/秒)" % (
+                _msg = "[识别A耗时] %d轮 周期%s 截图%d 人物%d (ms/秒)" % (
                     _dt_rounds, "精" if _precise_now else ("忙" if _busy else "闲"),
-                    _dt_grab * 1000, _dt_char * 1000, _dt_feat * 1000, _dt_yolo * 1000, _dt_bars * 1000)
+                    _dt_grab * 1000, _dt_char * 1000)
                 print(_msg)
                 _debug_log(_msg)
-                _dt_grab = _dt_char = _dt_feat = _dt_yolo = _dt_bars = 0.0
+                _dt_grab = _dt_char = 0.0
                 _dt_rounds = 0
                 _dt_last_report = _dt_now
             _slack = _period - _elapse
@@ -15817,25 +15704,168 @@ class MinimapRouteRecorder:
             if _slack > 0:
                 time.sleep(_slack / 1000.0)
 
+    def _recognize_loop(self):
+        """识别B线程(物理拆分·用户2026-09-12):【自己不截图】,只从A线程发布的最新帧槽取新帧,低频跑重活
+        (怪模板匹配+YOLO+血条+合并/时序平滑/2秒宽限),原子发布_raw_monsters/_raw_hp_bars。
+        人物由A线程高频出,B重活跑多慢都不拖人物。按帧槽seq只处理新帧,重活各自节流,没新帧轻睡10ms,全程try自保护绝不崩。"""
+        _seen_reset_seq = 0
+        _last_seq = -1
+        _dt_feat = _dt_yolo = _dt_bars = 0.0
+        _dt_rounds = 0
+        _dt_last_report = time.time()
+        if not hasattr(self, '_yolo_cache'):   # 重活缓存归B私有
+            self._yolo_cache, self._yolo_last_t = [], 0.0
+            self._feat_cache, self._feat_last_t = [], 0.0
+            self._bars_cache, self._bars_last_t = [], 0.0
+        while self._detect_running:
+            try:
+                # 硬重置版本号自清(清的全是怪/血条跨帧缓存,归B线程;A人物不清)
+                if self._detect_reset_seq != _seen_reset_seq:
+                    _seen_reset_seq = self._detect_reset_seq
+                    self._yolo_cache, self._feat_cache, self._bars_cache = [], [], []
+                    self._yolo_last_t = self._feat_last_t = self._bars_last_t = 0.0
+                    self._detect_last_monsters = None
+                    self._detect_last_monsters_time = 0
+                    self._detect_recent = []
+                    self._monster_static_track = {}
+                    self._raw_monsters = []
+                    _debug_log("[识别B] 硬重置seq=%d,清怪/血条缓存并全量重扫" % _seen_reset_seq)
+                _frame = self._latest_frame                 # A发布的最新帧(原子引用,B只读不改)
+                _seq = getattr(self, '_latest_frame_seq', 0)
+                if _frame is None or _seq == _last_seq:
+                    time.sleep(0.010)                       # 没新帧:轻等不空转
+                    continue
+                _last_seq = _seq
+                # 上梯高帧:只高频出人物(A),B冻结重活、沿用上一次怪表(与拆分前同口径,残留标志不算数)
+                _precise = bool(getattr(self, '_ladder_precise_mode', False)) \
+                    and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+                if not _precise:
+                    _fh, _fw = _frame.shape[:2]
+                    _band_y1 = DETECT_TOP_MARGIN
+                    _band_y2 = max(_band_y1 + 1, _fh - DETECT_BOTTOM_MARGIN)
+                    _ch = self._raw_char_pos   # 用A最新人物点做范围裁剪(差一个A周期,寻怪范围有余量,不影响)
+                    _now_det = time.time()
+                    _fc = self._get_fight_config()
+                    _skr = int(_fc.get("atk1_distance", 150) or 150)
+                    _yupr = abs(int(_fc.get("attack_y_up", -ATTACK_Y_UP)))
+                    _ydnr = abs(int(_fc.get("attack_y_down", ATTACK_Y_DOWN)))
+                    _far_x = int(_fc.get("far_range_x", 0) or 0)
+                    _far_y_up = int(_fc.get("far_range_y_up", 0) or 0)
+                    _far_y_down = int(_fc.get("far_range_y_down", 0) or 0)
+                    if _ch is not None and _far_x > 0 and (_far_y_up > 0 or _far_y_down > 0):
+                        _dyx1 = max(0, _ch[0] - _far_x)
+                        _dyx2 = min(_fw, _ch[0] + _far_x)
+                        _dyy1 = _ch[1] - _far_y_up if _far_y_up > 0 else _band_y1
+                        _dyy2 = _ch[1] + _far_y_down if _far_y_down > 0 else _band_y2
+                    else:
+                        _dyx1, _dyx2, _dyy1, _dyy2 = 0, _fw, _band_y1, _band_y2
+                    _yolo_crop = (max(0, _dyx1), max(_band_y1, _dyy1), min(_fw, _dyx2), min(_band_y2, _dyy2))
+                    if _yolo_crop[2] <= _yolo_crop[0] or _yolo_crop[3] <= _yolo_crop[1]:
+                        _yolo_crop = (0, _band_y1, _fw, _band_y2)
+                    if _ch is not None:
+                        _ftx1, _ftx2 = max(0, _ch[0] - _skr), min(_fw, _ch[0] + _skr)
+                        _fty1, _fty2 = max(_band_y1, _ch[1] - _yupr), min(_band_y2, _ch[1] + _ydnr)
+                    else:
+                        _ftx1, _ftx2, _fty1, _fty2 = 0, _fw, _band_y1, _band_y2
+                    _feat_crop = (_ftx1, _fty1, _ftx2, _fty2)
+                    if _feat_crop[2] <= _feat_crop[0] or _feat_crop[3] <= _feat_crop[1]:
+                        _feat_crop = (0, _band_y1, _fw, _band_y2)
+                    if _now_det - self._feat_last_t >= self._perf_val('feat_s'):  # 怪模板节流按CPU档(无模板直接[]零开销)
+                        _tf0 = time.time()
+                        self._feat_cache = self._match_monster(_frame, _feat_crop) if self._monster_templates else []
+                        _dt_feat += time.time() - _tf0
+                        self._feat_last_t = _now_det
+                    _feat = self._feat_cache
+                    _lk = getattr(self, '_combat_locked_target', None)
+                    _locked_in = bool(_lk) and _ch is not None and abs(_lk[0] - _ch[0]) <= _skr \
+                        and -_yupr <= (_lk[1] - _ch[1]) <= _ydnr
+                    _yolo_gap = (self._perf_val('yolo_slow_s') if _locked_in else self._perf_val('yolo_fast_s'))
+                    if _now_det - self._yolo_last_t >= _yolo_gap:
+                        _ty0 = time.time()
+                        self._yolo_cache = self._detect_monsters(_frame, _yolo_crop)
+                        _dt_yolo += time.time() - _ty0
+                        self._yolo_last_t = _now_det
+                    _yolo = self._yolo_cache
+                    _merged = self._merge_detections(_yolo, _feat)
+                    _search = []
+                    for (x1, y1, x2, y2, _s) in _merged:
+                        _mcx, _mcy = (x1 + x2) // 2, y2
+                        if _ch is None or (abs(_mcx - _ch[0]) <= _skr
+                                           and -_yupr <= (_mcy - _ch[1]) <= _ydnr):
+                            _search.append((max(0, x1 - 15), max(0, y1 - 40), x2 + 15, y1 + 5))
+                    if self._combat_last_target_pos and _ch is not None:
+                        _tx, _ty = self._combat_last_target_pos
+                        if abs(_tx - _ch[0]) <= _skr + 40:
+                            _search.append((max(0, _tx - 50), max(0, _ty - 55),
+                                            min(_frame.shape[1], _tx + 50), min(_frame.shape[0], _ty + 10)))
+                    if _now_det - self._bars_last_t >= self._perf_val('bars_s'):
+                        _tb0 = time.time()
+                        self._bars_cache = self._detect_monster_hp_bars(_frame, _search if _search else None)
+                        _dt_bars += time.time() - _tb0
+                        self._bars_last_t = _now_det
+                    _bars = self._bars_cache
+                    if _merged:   # 怪2秒宽限:本轮空但2秒内有怪则保留,防偶发漏检闪没
+                        self._detect_last_monsters = _merged
+                        self._detect_last_monsters_time = time.time()
+                    elif (time.time() - self._detect_last_monsters_time < 2.0
+                          and self._detect_last_monsters):
+                        _merged = self._detect_last_monsters
+                    _merged = self._temporal_smooth_detections(_merged)  # 单帧漏检不清目标
+                    _merged = [b for b in _merged if _band_y1 <= (b[1] + b[3]) // 2 <= _band_y2]  # 识别带兜底剔UI误检
+                    self._raw_cached_feature_monsters = _feat
+                    self._raw_monsters = _merged
+                    self._raw_hp_bars = _bars
+                    if not self._monster_templates:
+                        self._monster_feature_matches = []
+                    if _merged:
+                        self._last_monster_seen = time.time()
+                    try:
+                        _bt = time.time()
+                        self._snap_store.update_parts(monsters=list(_merged), monsters_t=_bt,
+                                                      extra={'hp_bars': list(_bars) if _bars is not None else []},
+                                                      hp_bars_t=_bt)
+                    except Exception as _se:
+                        _debug_log("[识别B] 怪/血条快照发布异常:%s" % _se)
+                    _dt_rounds += 1
+                _rn = time.time()   # B耗时统计每秒一条
+                if _rn - _dt_last_report >= 1.0:
+                    _debug_log("[识别B耗时] %d新帧 怪模板%d YOLO%d 血条%d (ms/秒)" % (
+                        _dt_rounds, _dt_feat * 1000, _dt_yolo * 1000, _dt_bars * 1000))
+                    _dt_feat = _dt_yolo = _dt_bars = 0.0
+                    _dt_rounds = 0
+                    _dt_last_report = _rn
+            except Exception as _e:
+                if self._detect_running:
+                    print("[识别B] 异常:", _e)
+                    _debug_log("[识别B] 异常:%s" % _e)
+            time.sleep(0.010)
+
     def _precise_target_period(self):
         """上梯高帧【目标周期】由CPU性能三档给(快22/普通28/慢34ms≈45/36/29Hz);实际周期再由检测线程自适应监管
         (跑不完每档+3退避、封顶LADDER_PRECISE_PERIOD_MAX、轻松再升回此目标),保证慢机不吃满核。读_perf缓存、切档即时变。"""
         return int(self._perf_val('precise_ms'))
 
     def _start_detection_thread(self):
-        if self._detect_thread and self._detect_thread.is_alive():
+        if self._player_thread and self._player_thread.is_alive():
             return
         self._detect_running = True
-        self._detect_thread = threading.Thread(target=self._detection_loop, daemon=True)
-        self._detect_thread.start()
+        self._latest_frame = None           # 帧槽清空,B等A出新帧再算
+        self._latest_frame_seq = 0
+        self._player_thread = threading.Thread(target=self._player_loop, daemon=True, name="detect_player")
+        self._recognize_thread = threading.Thread(target=self._recognize_loop, daemon=True, name="detect_recognize")
+        self._player_thread.start()
+        self._recognize_thread.start()
         self._start_move_watchdog()  # 移动监管线(独立线程,v1只监测打日志)
         self._start_bound_guard()    # 打怪区域·四线边界守护(独立线程,小地图光点判越线)
-        print("[检测线程] 已启动(同一帧检人物+怪)")
+        print("[识别线程] 已启动 A=截图+人物(高频) / B=怪模板+YOLO+血条(低频)")
 
     def _stop_detection_thread(self):
         self._detect_running = False
-        if self._detect_thread and self._detect_thread.is_alive():
-            self._detect_thread.join(timeout=1.0)
+        for _th in (self._player_thread, self._recognize_thread):  # A/B都join,先停截图B自然拿不到新帧退出
+            if _th and _th.is_alive():
+                _th.join(timeout=1.0)
+        self._player_thread = None
+        self._recognize_thread = None
         self._stop_move_watchdog()  # 一并停移动监管线
         self._stop_bound_guard()    # 一并停打怪区域边界守护
 
