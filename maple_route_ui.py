@@ -16333,6 +16333,27 @@ class MinimapRouteRecorder:
                     else:
                         _frame = None
                     if _frame is not None:
+                        # === 临时·真机全屏抓帧(验证仿YOLO全屏投票可行性):检测 data/_grab_real.flag(内容=张数)即连续存原始全屏帧 ===
+                        try:
+                            _gfp = os.path.join(DATA_DIR, "_grab_real.flag")
+                            if os.path.exists(_gfp) and getattr(self, '_grab_real_left', 0) <= 0:
+                                try: _gn = int(open(_gfp, encoding="utf-8").read().strip() or "40")
+                                except Exception: _gn = 40
+                                try: os.remove(_gfp)
+                                except Exception: pass
+                                self._grab_real_left = _gn
+                                self._grab_real_i = 0
+                                self._grab_real_dir = os.path.join(DATA_DIR, "real_capture", "real_" + time.strftime("%Y%m%d_%H%M%S"))
+                                os.makedirs(self._grab_real_dir, exist_ok=True)
+                                _debug_log("[真机抓帧] 开始抓%d张全屏 -> %s" % (_gn, self._grab_real_dir))
+                            if getattr(self, '_grab_real_left', 0) > 0:
+                                _gi = getattr(self, '_grab_real_i', 0); self._grab_real_i = _gi + 1
+                                self._grab_real_left -= 1
+                                cv2.imwrite(os.path.join(self._grab_real_dir, "real_%03d.png" % _gi), _frame)
+                                if self._grab_real_left <= 0:
+                                    _debug_log("[真机抓帧] 完成 共%d张 -> %s" % (_gi + 1, self._grab_real_dir))
+                        except Exception as _ge:
+                            _debug_log("[真机抓帧] 异常:%s" % _ge)
                         # 固定识别带(整窗坐标):只在 y∈[30,H-90] 识别人物,顶去标题栏、底去血蓝/技能UI栏,防UI误检
                         _fh, _fw = _frame.shape[:2]
                         _band_y1 = DETECT_TOP_MARGIN

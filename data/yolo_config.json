@@ -1,1 +1,3 @@
-﻿{  "model_path": "C:\\Users\\wenwen\\Desktop\\MXD\\maple_bot_v2\\best.onnx",  "_note": "新架构子项目:锁定旧640模型(best_640_backup),用户实测640与416无差别" }
+{
+  "model_path": "C:\\Users\\wenwen\\Desktop\\MXD\\maple_bot\\best.onnx"
+}
