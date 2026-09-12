@@ -310,6 +310,7 @@ YELLOW_H_HIGH = 35  # 黄色H上限（收紧，排除偏橙/偏绿的噪声）
 YELLOW_S_LOW = 100  # 饱和度下限（从80提高到100，排除淡黄噪声）
 YELLOW_V_LOW = 180  # 亮度下限（从150提高到180，人物光点很亮，排除偏暗黄色）
 
+VK_F3 = 0x72  # 架构B:动作权仲裁器"实控/影子"一键切换(只切内部开关,不发键给游戏)
 VK_F4 = 0x73
 VK_F5 = 0x74
 VK_F6 = 0x75
@@ -448,6 +449,7 @@ BOUND_POLL_MS = 60          # 守护线程轮询周期(ms):约16帧/s盯光点,�
 BOUND_PULL_MIN_MS = 1000    # 左右越线后朝画面内拉回的持续时长·随机下限(用户2026-09-11定1000~1500ms)
 BOUND_PULL_MAX_MS = 1500    # 上限:走够这一段才恢复打怪,天然不会在边上来回碎步
 BOUND_RELEASE_MS = 50       # 拉回前清场间隙:停主线后先把左右/攻击键全松这么久,再压朝内键(防松/压同帧被游戏吞=相抵碎步)
+BOUND_TP_COOLDOWN_MS = 2000 # 拉回结束后,禁止再朝"刚越线那一侧"水平瞬移的冷却:这期间改走路靠近(走路在R-50站定不会越线;瞬移落点不可控会一步闪回线上→再拉回死循环,用户2026-09-12实锤)
 BOUND_DRAG_HIT = 12         # 编辑态鼠标点中左右竖线的命中半径(小地图块像素,放大好按中、治时灵时不灵)
 BOUND_PICK_TOL = 8          # 编辑态点选平台绿线的命中容差(点到折线最近距离≤此值=选中该平台,小地图块像素)
 BOUND_LINE_W = 3            # 左右竖线粗细基准(px,用户:线粗一点点);UI小地图常态2/编辑3
@@ -1317,6 +1319,8 @@ class MinimapRouteRecorder:
         self._bound_drag = None         # UI小地图上正在拖动哪条竖线 'l'/'r'/None
         self._bound_guard_side = None   # 守护线程→主线·左右越线令:None/'left'(越左竖线,需朝右拉回)/'right'(越右竖线,需朝左拉回)
         self._bound_pull = None         # 主线左右拉回进行中 {dir,until}/None:触发后固定朝内走1000~1500ms,到时恢复打怪(不碎步)
+        self._bound_last_side = None    # 最近一次越线拉回的侧 'left'/'right'/None(冷却期内禁朝这侧水平瞬移)
+        self._bound_tp_block_until = 0  # 朝_bound_last_side水平瞬移的冷却截止ms(拉回结束起BOUND_TP_COOLDOWN_MS)
         self._bound_thread = None       # 边界守护线程句柄
         self._bound_running = False     # 边界守护线程运行标志
         self._btn_bound_area = None     # UI小地图区"打怪区域"切换按钮矩形(每帧draw更新供点击命中)
@@ -1558,6 +1562,7 @@ class MinimapRouteRecorder:
         self._arbiter = ActionArbiter(on_leave=None, on_enter=None)  # 真正收键时再注入松键回调
         self._range_gate = RangeGate(enter_keep=50, exit_back=25)    # 用户定:走到R-50开打、退到R+25回巡路
         self._shadow_arb_log_t = 0.0        # 影子仲裁比对日志节流
+        self._arbiter_live = True           # 架构B总开关:True=仲裁器实控平地打怪开打/停打;False=完全回老stop_range逻辑(F3一键切)
         self._raw_cached_feature_monsters = []  # 后台线程算出的怪物特征匹配结果
         self._detect_sct = None             # 后台线程自己的 mss 实例（不共用主线程的 self.sct）
         self._detect_last_monsters = None   # 后台线程最近一次非空怪列表（2秒宽限用）
@@ -6970,7 +6975,7 @@ class MinimapRouteRecorder:
 
     def _check_hotkeys(self):
         """GetAsyncKeyState 轮询，按下瞬间触发一次"""
-        for vk in [VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12]:
+        for vk in [VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12]:
             pressed = bool(user32.GetAsyncKeyState(vk) & 0x8000)
             if pressed and not self._key_state[vk]:
                 _debug_log("[热键] 检测到按键 VK=0x%X" % vk)
@@ -6978,6 +6983,15 @@ class MinimapRouteRecorder:
             self._key_state[vk] = pressed
 
     def _handle_hotkey(self, vk):
+        if vk == VK_F3:
+            # 架构B:仲裁器实控↔老逻辑一键切换(实控=RangeGate按R-50进/R+25出迟滞接管平地开打;关=完全回stop_range单阈值老逻辑)
+            self._arbiter_live = not getattr(self, '_arbiter_live', True)
+            self._range_gate.reset()   # 切换瞬间清迟滞状态,不沿用上一套判定
+            _msg = "动作权仲裁→实控(新)" if self._arbiter_live else "动作权仲裁→老逻辑(退回)"
+            print("[F3]", _msg)
+            self._add_log(_msg)
+            _debug_log("[F3] _arbiter_live=%s" % self._arbiter_live)
+            return
         if vk == VK_F5:
             if self.recording_ladder:
                 print("Stop ladder first (F6)")
@@ -14459,6 +14473,9 @@ class MinimapRouteRecorder:
             self._combat_move_dir = pull['dir']
             return True
         # 阶段3·时长走完:立马松朝内键、清拉回令(下一检测窗口重新看光点),恢复主线打怪
+        # 同时落一道"朝刚越线侧水平瞬移冷却":防主线一恢复就瞬移闪回边上→再越线→再拉回的死循环(用户2026-09-12)
+        self._bound_last_side = side
+        self._bound_tp_block_until = now + BOUND_TP_COOLDOWN_MS
         self._bound_pull = None
         self._bound_guard_side = None
         self._release_combat_move()
@@ -16253,6 +16270,7 @@ class MinimapRouteRecorder:
             _oldlk = self._combat_locked_target
             _is_new_target = (_oldlk is None) or (abs(_oldlk[0]-t_cx) > 40 or abs(_oldlk[1]-t_cy) > 50)
             if _is_new_target:
+                self._range_gate.reset()   # 架构B:每锁一只新怪,迟滞门从"未开打"重新走(走近到R-50才站定)
                 # 改打身边能直打的怪(cast)=不再去上层,清掉可能残留的锁定梯,防下帧又被拉回cross拉扯(用户2026-09-11)
                 if _dl['state'] == 'cast' and getattr(self, '_locked_ladder', None) is not None:
                     self._clear_locked_ladder('改打技能范围内近身怪')
@@ -16399,7 +16417,14 @@ class MinimapRouteRecorder:
         # 面向判断：怪在右按右键，怪在左按左键。
         # 【用户2026-09-08】追怪(范围外)时不转身，一直按住方向键连续走；进入攻击范围后才松方向键→决定要不要转向→攻击
         needed_facing = 1 if t_cx > px else -1
-        in_attack_range = t_dist <= stop_range
+        if getattr(self, '_arbiter_live', False):
+            # 架构B·实控:平地"站定开打/走近"统一由迟滞门+动作权仲裁器定(R-50进/R+25出,用户2026-09-12)。
+            # y_ok先传True=只管X距离迟滞;Y够不够得到仍由下方主攻Y带/跳高打分支把,不在这里拦。
+            _in_fight = self._range_gate.update(t_dist, True, skill_range)
+            _o_arb, _ = self._arbiter.update(has_target=True, in_range=_in_fight)
+            in_attack_range = (_o_arb == ActionMode.FIGHT)
+        else:
+            in_attack_range = t_dist <= stop_range
         # 【用户2026-09-10·治碎步过冲】进停步线后脸朝错,只发40ms极短方向点掰脸(不位移/不sleep/不return当帧继续站定出手,主攻前还会再点一次双保险);
         # |X差|≤15死区(怪几乎正对不掰,治几px抖动让朝向左右翻)+同目标300ms迟滞(不重复点)。
         # 旧"松键+sleep50+按住新方向120~150ms+return"会真位移跨过怪→下帧怪到另一侧再反向按=原地左右抖,已删。
@@ -16426,7 +16451,7 @@ class MinimapRouteRecorder:
         # 【用户2026-09-10】一直按住方向走到停步线(技能射程4/5)才站定;(stop_range,skill_range]这段也要持续走,
         # 旧用满技能距离当停步线→这段被判cast站定、只靠转身短按蹭=碎步不走
         effective_range = stop_range
-        if t_dist > effective_range:
+        if not in_attack_range:   # 架构B:走近还是站定统一听仲裁(实控=R-50进/R+25出迟滞;关时in_attack_range=t_dist<=stop_range,等价原t_dist>stop_range走近)
             move_dir = "right" if t_cx > px else "left"
             # 平台硬边界(用户2026-09-07锁单平台)：勾了平台就按勾选绿线X范围,到边缘停住不走下去(半空/斜坡也稳)；没勾按当前所在平台
             if self._combat_at_locked_edge(move_dir):
@@ -16446,8 +16471,16 @@ class MinimapRouteRecorder:
                          and getattr(self, '_locked_ladder', None) is None
                          and not _tp_blk and now - self._combat_last_h_teleport > 850)
             _dyv = t_cy - py_layer                                        # 正=怪在人物下方,负=在上方(用落地基线,腾空不误触发竖直瞬移)
+            # 打怪区域:刚从某侧越线被拉回后的冷却内,禁再朝那一侧水平瞬移(瞬移落点不可控会一步闪回竖线→再越线→再拉回死循环);
+            # 冷却期落到③走路靠近,走到R-50站定距离自然停住、够不到竖线(用户2026-09-12实锤)。竖直瞬移不拦(不造成X越线)。
+            _tp_bound_block = (move_dir == getattr(self, '_bound_last_side', None)
+                               and now < getattr(self, '_bound_tp_block_until', 0))
+            if _tp_bound_block:
+                self._rlog_throttle('bound_tp_block',
+                                    "打怪区域:刚从%s侧拉回,冷却内不水平瞬移、改走路靠近(防闪回线上死循环)" % move_dir,
+                                    800, log='behavior')
             # ①水平优先:配了X且水平差≥X阈值→按住水平方向+瞬移(不管Y差)
-            if _tp_ready and _tp_x > 0 and t_dist >= _tp_x:
+            if _tp_ready and _tp_x > 0 and t_dist >= _tp_x and not _tp_bound_block:
                 # 用户2026-09-05：追怪稳稳按住方向键连续走，不停顿
                 self._set_combat_move(move_dir)
                 # 位移检测：按住方向却没走=卡住→已登记【独占解卡】，本帧停手
@@ -16720,7 +16753,7 @@ class MinimapRouteRecorder:
             _dy_atk = t_cy - py_layer  # 主攻Y门控用落地基线:人腾空瞬时Y不决定出不出手
             _stance_ok = (self._combat_move_dir is None and not self._combat_held_keys)
             _cd_ok = (now - last > atk_cd)
-            if (_stance_ok and t_dist <= stop_range
+            if (_stance_ok and in_attack_range   # 架构B:出手距离与走近/站定分水岭同源(实控=迟滞门;关=原t_dist<=stop_range)
                     and -_atk_y_up <= _dy_atk <= _atk_y_down
                     and _cd_ok):
                 # 【用户2026-09-09·出手前必短点朝怪方向】人物特征无朝向,爬梯/瞬移/被撞/跳后真实朝向会漂,
@@ -17150,24 +17183,28 @@ class MinimapRouteRecorder:
                     self._converge_movement()
                 except Exception as e:
                     _debug_log("[移动收敛] 调用异常: %s" % e)
-            # 架构第1块·影子仲裁(不发键/不夺权/不改任何现有分支):让新ActionArbiter在真实状态流上每帧判owner,
-            # 与旧_converge_movement判出的_move_owner并排打日志比对,验证一致后下一步才让它真正收键
+            # 动作权仲裁:实控时owner已在_combat_tick内按真实距离update,这里只读不重复update(否则会用active近似覆盖真实判定);
+            # 影子模式(F3关)才每帧用active近似update,与旧_converge_movement移动权并排打日志比对
             try:
                 _sh_bound = self._bound_pull is not None
                 _sh_has = self._combat_locked_target is not None
                 _sh_active = bool(getattr(self, '_combat_active', False))
-                # 第一版in_range用active近似(锁了且在打=True;锁了没在打=False=还在靠近;没锁=None);下一步接RangeGate真实距离
-                _sh_inrange = (True if _sh_active else (False if _sh_has else None))
-                _sh_owner, _sh_ev = self._arbiter.update(bound=_sh_bound, has_target=_sh_has, in_range=_sh_inrange)
                 _sh_now = time.time()
+                if getattr(self, '_arbiter_live', False):
+                    _sh_owner, _sh_ev = self._arbiter.owner, None   # 只读,战斗tick内已update
+                else:
+                    # 影子:in_range用active近似(锁了且在打=True;锁了没在打=False;没锁=None)
+                    _sh_inrange = (True if _sh_active else (False if _sh_has else None))
+                    _sh_owner, _sh_ev = self._arbiter.update(bound=_sh_bound, has_target=_sh_has, in_range=_sh_inrange)
                 if _sh_ev or _sh_now - self._shadow_arb_log_t >= 1.0:
                     self._shadow_arb_log_t = _sh_now
-                    _debug_log("[影子仲裁] 新owner=%s 旧移动权=%s | bound拉回=%s 锁怪=%s active=%s transit=%s climb=%s 切换=%s" % (
+                    _debug_log("[%s] owner=%s 旧移动权=%s | bound拉回=%s 锁怪=%s active=%s transit=%s climb=%s 切换=%s" % (
+                        "实控仲裁" if getattr(self, '_arbiter_live', False) else "影子仲裁",
                         _sh_owner, getattr(self, '_move_owner', None), _sh_bound, _sh_has,
                         _sh_active, getattr(self, '_combat_transit', False),
                         getattr(self, '_climb_state', 'none'), _sh_ev))
             except Exception as _ae:
-                _debug_log("[影子仲裁] 异常:%s" % _ae)
+                _debug_log("[仲裁] 异常:%s" % _ae)
 
             # === 定期维护(启动即跑一次，之后每10分钟)：debug.log只留最近5分钟、清1天前调试缓存；backups全部保留 ===
             try:
