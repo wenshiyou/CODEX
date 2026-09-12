@@ -5741,6 +5741,10 @@ class MinimapRouteRecorder:
         原理：人物光点中心颜色 = ffff88 (BGR 136,255,255)，加一点偏色容差, 在map_area(整个小地图块)内找该色像素, 取质心作为光点中心。
         返回：(x, y) 光点中心坐标；找不到返回None"""
         bgr = map_area  # BGR原图(小地图块)
+        # [健壮性2026-09-12] 截图瞬时失败(开关cv2窗口/游戏失焦)会传入None或空数组,
+        # cv2.inRange对空图直接抛异常会闪退整个主程序;空图沿用上一光点、不清空
+        if bgr is None or getattr(bgr, "size", 0) == 0:
+            return getattr(self, "last_player_pos", None)
         # 中心色 ffff88 = BGR(136,255,255)；加偏色±5 -> B 131~141
         mask = cv2.inRange(bgr, np.array([131, 250, 250]), np.array([141, 255, 255]))
         ys, xs = np.where(mask > 0)
@@ -6996,6 +7000,10 @@ class MinimapRouteRecorder:
             print("[F3]", _msg)
             self._add_log(_msg)
             _debug_log("[F3] _arbiter_live=%s" % self._arbiter_live)
+            return
+        if vk == VK_F4:
+            # F4=角色特征采集标注(摆框→3秒倒计时→2秒20张→逐张点特征+脚基点→特征集组落盘)
+            self._char_feature_capture()
             return
         if vk == VK_F5:
             if self.recording_ladder:
@@ -8622,6 +8630,358 @@ class MinimapRouteRecorder:
                 _debug_log("[F9] 蒙板重新定位失败: %s" % _e)
         if getattr(self, '_was_random_running', False) and self.route_mode == "随机":
             self._start_random()
+
+    def _save_char_feature_set(self, batch_dir, frames, labels, patch_r=8):
+        """F4角色特征采集落盘：frame_XX.png(框内小图)+labels.json+patches小块+char_feature_set.json。
+        每个普通点自带相对脚基点(anchor)的dx/dy，供后续小窗多点投票定位，不辨认身体部位。
+        点兼容两种写法：(x,y)老格式=圆形r8；(x,y,shape,hw,hh)=指定形状(圆/矩)与外接半宽半高。"""
+        try:
+            os.makedirs(os.path.join(batch_dir, "patches"), exist_ok=True)
+            rec, entries, e = [], [], 0
+            for i, small in enumerate(frames):
+                lab = labels[i] if i < len(labels) else {"pts": [], "anchor": None}
+                pts, anc = lab.get("pts", []), lab.get("anchor")
+                rec.append({"frame": "frame_%02d.png" % i, "anchor": anc, "points": pts})
+                hh, ww = small.shape[:2]
+                if anc is None:
+                    continue
+                for pp in pts:
+                    if len(pp) >= 5:
+                        px, py, shp, hw, phh = pp[0], pp[1], pp[2], int(pp[3]), int(pp[4])
+                    else:
+                        px, py = pp[0], pp[1]; shp, hw, phh = "circle", patch_r, patch_r
+                    x1, x2, y1, y2 = px-hw, px+hw+1, py-phh, py+phh+1
+                    if x1 < 0 or y1 < 0 or x2 > ww or y2 > hh:
+                        continue   # 贴边小块不入库
+                    patch = small[y1:y2, x1:x2]
+                    if patch.shape[0] != phh*2+1 or patch.shape[1] != hw*2+1:
+                        continue
+                    pf = "patches/p_%02d_%02d.png" % (i, e); e += 1
+                    cv2.imwrite(os.path.join(batch_dir, pf), patch)
+                    entries.append({"patch": pf, "shape": shp, "hw": hw, "hh": phh,
+                                    "dx": int(px-anc[0]), "dy": int(py-anc[1]), "frame": i})
+            with open(os.path.join(batch_dir, "labels.json"), "w", encoding="utf-8") as fp:
+                json.dump(rec, fp, ensure_ascii=False, indent=1)
+            fset = {"n_frames": len(frames), "n_patches": len(entries), "entries": entries}
+            with open(os.path.join(batch_dir, "char_feature_set.json"), "w", encoding="utf-8") as fp:
+                json.dump(fset, fp, ensure_ascii=False, indent=1)
+            print("[F4采集] 保存完成 %s 小块=%d" % (batch_dir, len(entries)))
+            return True
+        except Exception:
+            import traceback; _debug_log("[F4采集] 保存异常: %s" % traceback.format_exc())
+            return False
+
+    def _char_feature_capture(self):
+        """F4角色特征采集标注(模态,阻塞主循环,期间不自动打怪)。
+        窗口策略(对齐F9,稳显不被游戏盖、不递归套娃)：
+          place摆框=截一张静态图、窗口1:1盖游戏(不重截,故不套娃、不闪丢)；
+          countdown/capture=窗口缩小移到游戏矩形外侧,才实时截图(窗不在游戏上,截不到自己)；
+          review/label/done=不再截图,窗口放大可盖游戏。任意阶段全局Esc都能退出,绝不卡死主线程。"""
+        win = "CharFeature F4"
+        try:
+            self._update_window_rect()
+            wr0 = self.window_rect
+            # 游戏最小化时 left/top=-32000,这种状态进采集会把窗口带飞、卡死,直接拦下
+            if not wr0 or wr0.get("left", 0) <= -30000 or wr0.get("width", 0) < 200:
+                self._add_log("F4采集：游戏窗口未正常显示(可能最小化)，请先打开游戏再按F4"); return
+            place_frame = self._capture_window()
+            if place_frame is None:
+                self._add_log("F4采集失败：截图为空，请先绑定游戏窗口"); return
+            fh, fw = place_frame.shape[:2]
+            BW, BH = 950, 260
+            CD_SEC, CAP_SEC, CAP_HZ = 3.0, 2.0, 10
+            N = int(CAP_SEC*CAP_HZ); DT = 1.0/CAP_HZ
+            VK_ESC = 0x1B
+            # ===== 标注器:局部拖框放大/方向键移点/Tab切形态(对齐旧capture_char) =====
+            LW, LH = 1180, 380          # 标注画布(letterbox显示当前视图,可逐级放大)
+            CLICK_PX = 6                # 按下→抬起位移<此=单击加点,否则=拖框放大
+            DEL_TOL = 14                # 右键就近删除容差(原图像素)
+            # 四种形态(形状,半宽hw,半高hh)，Tab循环：小圆/大圆/小矩形/大矩形
+            FORMS = [("circle", 8, 8), ("circle", 14, 14), ("rect", 12, 7), ("rect", 20, 11)]
+            FORM_NAME = ["小圆 r8", "大圆 r14", "小矩 25x15", "大矩 41x23"]
+            _sw, _sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+            gl, gt, gw, gh = wr0["left"], wr0["top"], wr0["width"], wr0["height"]
+
+            def _show_win(w, h, x, y):
+                try:
+                    cv2.resizeWindow(win, int(w), int(h)); cv2.moveWindow(win, int(x), int(y))
+                    cv2.setWindowProperty(win, cv2.WND_PROP_TOPMOST, 1)
+                except Exception:
+                    pass
+
+            def _small_geom():
+                # countdown/capture 用的小窗:塞到游戏左右较宽一侧(外侧),按比例算高,保证不压游戏、不出屏
+                rf, lf = _sw-(gl+gw), gl
+                w2 = min(430, max(140, max(rf, lf)-8)); h2 = int(w2*fh/max(1, fw))
+                if rf >= w2:
+                    xx = gl+gw+6
+                elif lf >= w2:
+                    xx = gl-w2-6
+                else:
+                    xx = gl
+                    if gt+gh+h2+6 <= _sh:
+                        return w2, h2, max(0, xx), gt+gh+6
+                yy = gt if gt+h2 <= _sh else max(0, _sh-h2)
+                return w2, h2, max(0, xx), max(0, yy)
+
+            cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+            _show_win(fw, fh, gl, gt)   # place: 1:1盖游戏(同F9)
+            bx, by = (fw-BW)//2, (fh-BH)//2
+            st = {"phase": "place", "drag": False, "ox": 0, "oy": 0, "t0": 0.0, "next": 0.0,
+                  "frames": [], "labels": [], "idx": 0, "batch": None, "done_t": 0.0, "review_choice": None,
+                  "view": None, "stack": [], "form_idx": 0, "drag0": None, "mmap": None}
+            BTN_RETRY = (24, 46, 214, 104)
+            BTN_SAVE = (234, 46, 424, 104)
+            last_full = place_frame
+
+            def _clamp():
+                nonlocal bx, by
+                bx = int(max(0, min(fw-BW, bx))); by = int(max(0, min(fh-BH, by)))
+
+            def _in_rect(rect, x, y):
+                return rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]
+
+            def d_to_o(xd, yd):
+                # 标注画布显示坐标 -> 小图(原图)坐标；mmap=(缩放s,偏移ox,oy,视图左上a,b)
+                mm = st["mmap"]
+                if not mm: return None
+                s, ox, oy, a, b = mm
+                return (a+(xd-ox)/s, b+(yd-oy)/s)
+
+            def on_mouse(e, x, y, fl, p):
+                nonlocal bx, by
+                if st["phase"] == "place":      # place窗口1:1,鼠标坐标即游戏坐标
+                    if e == cv2.EVENT_LBUTTONDOWN:
+                        st["drag"] = True; st["ox"] = x-bx; st["oy"] = y-by
+                    elif e == cv2.EVENT_MOUSEMOVE and st["drag"]:
+                        bx, by = x-st["ox"], y-st["oy"]; _clamp()
+                    elif e == cv2.EVENT_LBUTTONUP:
+                        st["drag"] = False
+                elif st["phase"] == "review":   # review也是1:1盖游戏
+                    if e == cv2.EVENT_LBUTTONDOWN:
+                        if _in_rect(BTN_RETRY, x, y): st["review_choice"] = "retry"
+                        elif _in_rect(BTN_SAVE, x, y): st["review_choice"] = "save"
+                elif st["phase"] == "label":
+                    cur = st["labels"][st["idx"]]
+                    if e == cv2.EVENT_LBUTTONDOWN:
+                        st["drag0"] = (x, y)
+                    elif e == cv2.EVENT_LBUTTONUP:
+                        d0 = st["drag0"]; st["drag0"] = None
+                        if d0 is None: return
+                        o1, o2 = d_to_o(*d0), d_to_o(x, y)
+                        if o1 is None or o2 is None: return
+                        if abs(x-d0[0])+abs(y-d0[1]) < CLICK_PX:
+                            shp, hw, hh = FORMS[st["form_idx"]]   # 单击=按当前形态加点
+                            cur["pts"].append((int(round(o2[0])), int(round(o2[1])), shp, hw, hh))
+                        else:
+                            ax1, ax2 = sorted([int(o1[0]), int(o2[0])])
+                            ay1, ay2 = sorted([int(o1[1]), int(o2[1])])
+                            ax1, ay1 = max(0, ax1), max(0, ay1)
+                            ax2, ay2 = min(BW, ax2), min(BH, ay2)
+                            if ax2-ax1 >= 10 and ay2-ay1 >= 10:    # 拖框=放大该区域(旧视图压栈)
+                                st["stack"].append(st["view"] if st["view"] is not None else (0, 0, BW, BH))
+                                st["view"] = (ax1, ay1, ax2, ay2)
+                    elif e == cv2.EVENT_RBUTTONDOWN:   # 右键就近删点/基点
+                        o = d_to_o(x, y)
+                        if o is None: return
+                        oxn, oyn = o; best = None; bd = DEL_TOL
+                        for k, q in enumerate(cur["pts"]):
+                            d = abs(q[0]-oxn)+abs(q[1]-oyn)
+                            if d < bd: bd, best = d, k
+                        anc = cur["anchor"]
+                        if anc is not None and abs(anc[0]-oxn)+abs(anc[1]-oyn) < bd:
+                            cur["anchor"] = None
+                        elif best is not None:
+                            cur["pts"].pop(best)
+            cv2.setMouseCallback(win, on_mouse)
+            VK_L, VK_U, VK_R_, VK_D = 0x25, 0x26, 0x27, 0x28
+
+            def _focus_game():
+                try:
+                    if self.hwnd: user32.SetForegroundWindow(self.hwnd)
+                except Exception:
+                    pass
+
+            def _focus_cv():
+                try:
+                    h = user32.FindWindowW(None, win)
+                    if h: user32.SetForegroundWindow(h)
+                except Exception:
+                    pass
+
+            def render_label(idx, view):
+                # 把当前视图(view=小图矩形,None=整张)等比放大铺满标注画布;同时写mmap供鼠标坐标逆算
+                small = st["frames"][idx]
+                a, b, c, d = view if view is not None else (0, 0, BW, BH)
+                sub = small[b:d, a:c]
+                s = min(LW/float(max(1, c-a)), LH/float(max(1, d-b)))
+                rw, rh = int((c-a)*s), int((d-b)*s)
+                ox, oy = (LW-rw)//2, (LH-rh)//2
+                canvas = np.full((LH, LW, 3), 24, np.uint8)
+                if rh > 0 and rw > 0:
+                    canvas[oy:oy+rh, ox:ox+rw] = cv2.resize(sub, (rw, rh), interpolation=cv2.INTER_NEAREST)
+                st["mmap"] = (s, ox, oy, a, b)
+                def _td(px, py): return (int(ox+(px-a)*s), int(oy+(py-b)*s))
+                lab = st["labels"][idx]
+                for q in lab["pts"]:
+                    px, py, shp = q[0], q[1], q[2]
+                    hw, hh = max(2, int(q[3]*s)), max(2, int(q[4]*s))
+                    xd, yd = _td(px, py)
+                    if shp == "rect":
+                        cv2.rectangle(canvas, (xd-hw, yd-hh), (xd+hw, yd+hh), (0, 230, 0), 2)
+                    else:
+                        cv2.circle(canvas, (xd, yd), hw, (0, 230, 0), 2)
+                if lab["anchor"] is not None:
+                    xd, yd = _td(*lab["anchor"])
+                    cv2.circle(canvas, (xd, yd), 9, (255, 120, 0), -1)
+                th = 110; tw = int(BW*th/BH)   # 右下角导航缩略+当前视图框
+                thb = cv2.resize(small, (tw, th))
+                cv2.rectangle(thb, (int(a/BW*tw), int(b/BH*th)), (int(c/BW*tw), int(d/BH*th)), (0, 255, 255), 2)
+                canvas[LH-th-6:LH-6, LW-tw-6:LW-6] = thb
+                return canvas, (c-a)/BW
+
+            while True:
+                ph = st["phase"]; now = time.time(); key = 255
+                # 全局Esc安全绳:任何阶段都能退出模态,不依赖cv窗口焦点,杜绝卡后台
+                if ph != "done" and (user32.GetAsyncKeyState(VK_ESC) & 0x8000):
+                    break
+                if ph == "place":
+                    disp = place_frame.copy()   # 静态底图,不重截
+                    if user32.GetAsyncKeyState(VK_L) & 0x8000: bx -= 3
+                    if user32.GetAsyncKeyState(VK_R_) & 0x8000: bx += 3
+                    if user32.GetAsyncKeyState(VK_U) & 0x8000: by -= 3
+                    if user32.GetAsyncKeyState(VK_D) & 0x8000: by += 3
+                    _clamp()
+                    cv2.rectangle(disp, (bx, by), (bx+BW, by+BH), (0, 200, 255), 2)
+                    self._draw_cn_mixed(disp, "拖动或方向键移动框(950x260)框住角色活动范围  空格=3秒后开始  Esc取消",
+                                       12, 30, 0.7, (0, 0, 255), 2)
+                    cv2.imshow(win, disp); key = cv2.waitKey(15) & 0xFF
+                    if key == ord(' '):
+                        w2, h2, xx, yy = _small_geom(); _show_win(w2, h2, xx, yy)
+                        st["phase"] = "countdown"; st["t0"] = now; _focus_game()
+                elif ph == "countdown":
+                    fr = self._capture_window()
+                    if fr is not None: last_full = fr
+                    disp = last_full.copy()
+                    cv2.rectangle(disp, (bx, by), (bx+BW, by+BH), (0, 200, 255), 2)
+                    el = now-st["t0"]; n = max(1, 3-int(el))
+                    self._draw_cn_mixed(disp, "准备:%d秒后开始,请操控角色/放技能(Esc取消)" % n,
+                                       bx, by-12, 0.85, (0, 0, 255), 2)
+                    cv2.putText(disp, str(n), (bx+BW//2-35, by+BH//2+45),
+                                cv2.FONT_HERSHEY_SIMPLEX, 2.6, (0, 0, 255), 6)
+                    w2, h2, _, _ = _small_geom()
+                    cv2.imshow(win, cv2.resize(disp, (w2, h2))); cv2.waitKey(15)
+                    if el >= CD_SEC:
+                        st["phase"] = "capture"; st["t0"] = now; st["next"] = now; st["frames"] = []
+                elif ph == "capture":
+                    fr = self._capture_window()
+                    if fr is not None: last_full = fr
+                    disp = last_full.copy()
+                    if now >= st["next"] and len(st["frames"]) < N:
+                        crop = last_full[by:by+BH, bx:bx+BW].copy()
+                        if crop.shape[0] == BH and crop.shape[1] == BW: st["frames"].append(crop)
+                        st["next"] += DT
+                    got = len(st["frames"])
+                    cv2.rectangle(disp, (bx, by), (bx+BW, by+BH), (0, 200, 255), 2)
+                    cv2.rectangle(disp, (bx, by-8), (bx+BW, by-2), (255, 255, 255), -1)
+                    cv2.rectangle(disp, (bx, by-8), (bx+int(BW*got/max(1, N)), by-2), (0, 0, 255), -1)
+                    self._draw_cn_mixed(disp, "采集中 %d/%d 持续做动作/放技能(Esc取消)" % (got, N),
+                                       bx, by-16, 0.7, (0, 0, 255), 2)
+                    w2, h2, _, _ = _small_geom()
+                    cv2.imshow(win, cv2.resize(disp, (w2, h2))); cv2.waitKey(5)
+                    if got >= N:
+                        st["batch"] = os.path.join(DATA_DIR, "char_capture",
+                                                   "batch_"+time.strftime("%Y%m%d_%H%M%S"))
+                        os.makedirs(st["batch"], exist_ok=True)
+                        for i, c in enumerate(st["frames"]):
+                            cv2.imwrite(os.path.join(st["batch"], "frame_%02d.png" % i), c)
+                        _show_win(fw, fh, gl, gt)   # review: 放大盖游戏
+                        st["phase"] = "review"; _focus_cv()
+                elif ph == "review":
+                    disp = place_frame.copy()
+                    try:
+                        _f0 = st["frames"][0]
+                        disp[126:126+BH, 24:24+BW] = _f0
+                        cv2.rectangle(disp, (24, 126), (24+BW, 126+BH), (255, 255, 255), 1)
+                    except Exception:
+                        pass
+                    for _rect, _name, _col in ((BTN_RETRY, "重录", (40, 140, 255)),
+                                               (BTN_SAVE, "保存", (40, 180, 60))):
+                        cv2.rectangle(disp, (_rect[0], _rect[1]), (_rect[2], _rect[3]), _col, -1)
+                        cv2.rectangle(disp, (_rect[0], _rect[1]), (_rect[2], _rect[3]), (255, 255, 255), 2)
+                        self._draw_cn_mixed(disp, _name, _rect[0]+58, _rect[1]+41, 1.2, (255, 255, 255), 2)
+                    self._draw_cn_mixed(disp, "已采集%d张  点[保存]开始标注  点[重录]重采(Esc退出)" % N,
+                                       440, 80, 0.78, (0, 0, 255), 2)
+                    cv2.imshow(win, disp); key = cv2.waitKey(15) & 0xFF
+                    _ch = st.get("review_choice")
+                    if _ch == "retry":
+                        try:
+                            import shutil
+                            if st.get("batch") and os.path.isdir(st["batch"]): shutil.rmtree(st["batch"])
+                        except Exception:
+                            pass
+                        st["batch"] = None; st["frames"] = []; st["review_choice"] = None
+                        st["phase"] = "place"; _show_win(fw, fh, gl, gt)
+                    elif _ch == "save" or key == ord(' '):
+                        st["review_choice"] = None
+                        st["labels"] = [{"pts": [], "anchor": None} for _ in st["frames"]]
+                        st["idx"] = 0; st["phase"] = "label"
+                        st["view"] = None; st["stack"] = []; st["form_idx"] = 0
+                        _show_win(LW, LH, 40, 60)
+                elif ph == "label":
+                    i = st["idx"]; lab = st["labels"][i]
+                    canvas, zf = render_label(i, st["view"])
+                    self._draw_cn_mixed(canvas,
+                        "%d/%d 形态[%s](Tab切) 左键加点/按住拖框放大 r退回 方向键移最后点(Shift快) 最后点脚+空格下一张 右键就近删 b上一张 n下一张 Esc退"
+                        % (i+1, N, FORM_NAME[st["form_idx"]]), 8, 20, 0.44, (0, 0, 255), 1)
+                    self._draw_cn_mixed(canvas, "zoom %.1fx  本帧点%d" % (1/max(1e-6, zf), len(lab["pts"])),
+                                       8, LH-122, 0.5, (0, 255, 255), 1)
+                    cv2.imshow(win, canvas); key = cv2.waitKey(15) & 0xFF
+                    if key == ord(' '):
+                        if lab["pts"]:
+                            last = lab["pts"].pop(); lab["anchor"] = (last[0], last[1])
+                            if i < N-1:
+                                st["idx"] += 1; st["view"] = None; st["stack"] = []
+                            else:
+                                self._save_char_feature_set(st["batch"], st["frames"], st["labels"])
+                                st["phase"] = "done"; st["done_t"] = time.time()
+                        else:
+                            self._draw_cn_mixed(canvas, "请先点特征,最后一点为脚基点", 8, 44, 0.6, (0, 0, 255), 2)
+                            cv2.imshow(win, canvas)
+                    elif key == ord('b'):
+                        st["idx"] = max(0, i-1); st["view"] = None; st["stack"] = []
+                    elif key == ord('n'):
+                        st["idx"] = min(N-1, i+1); st["view"] = None; st["stack"] = []
+                    elif key == ord('r'):
+                        st["view"] = st["stack"].pop() if st["stack"] else None
+                    elif key == 9:   # Tab 切换形态
+                        st["form_idx"] = (st["form_idx"]+1) % len(FORMS)
+                    else:
+                        # 方向键微调最后一个点(无点则移基点);Shift=5px,否则1px
+                        step = 5 if (user32.GetAsyncKeyState(0x10) & 0x8000) else 1
+                        dx = (1 if user32.GetAsyncKeyState(0x27) & 0x8000 else 0) - (1 if user32.GetAsyncKeyState(0x25) & 0x8000 else 0)
+                        dy = (1 if user32.GetAsyncKeyState(0x28) & 0x8000 else 0) - (1 if user32.GetAsyncKeyState(0x26) & 0x8000 else 0)
+                        if dx or dy:
+                            def _clamp_pt(x, y): return (min(BW-1, max(0, x)), min(BH-1, max(0, y)))
+                            if lab["pts"]:
+                                q = lab["pts"][-1]; nx, ny = _clamp_pt(q[0]+dx*step, q[1]+dy*step)
+                                lab["pts"][-1] = (nx, ny, q[2], q[3], q[4])
+                            elif lab["anchor"] is not None:
+                                ax, ay = _clamp_pt(lab["anchor"][0]+dx*step, lab["anchor"][1]+dy*step)
+                                lab["anchor"] = (ax, ay)
+                elif ph == "done":
+                    canvas, _ = render_label(N-1, (0, 0, BW, BH))
+                    self._draw_cn_mixed(canvas, "已标记完", LW//2-72, LH//2, 1.6, (0, 255, 0), 3)
+                    cv2.imshow(win, canvas); cv2.waitKey(1)
+                    if time.time()-st["done_t"] >= 1.0: break
+            try: cv2.destroyWindow(win)
+            except Exception: pass
+            if st["batch"] and os.path.exists(os.path.join(st["batch"], "char_feature_set.json")):
+                self._add_log("角色特征已保存：%s" % os.path.basename(st["batch"]))
+        except Exception:
+            import traceback; _debug_log("[F4采集] 异常: %s" % traceback.format_exc())
+            try: cv2.destroyWindow("CharFeature F4")
+            except Exception: pass
 
     def _stop_select_listener(self):
         pass
