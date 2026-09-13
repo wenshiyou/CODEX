@@ -383,6 +383,8 @@ ROLE_TRACK_FIELDS = [  # (参数key,中文标签,是否小数)
     ("research", "全图搜索ms", False), ("hold", "丢失保持", False),
 ]
 ROLE_POLY_CLOSE_DIST = 14  # 描点采集:鼠标靠近顶点/边线的命中距离(px)
+ROLE_MAX_CHARS = 10        # 角色方案最多保存10套(以角色为单位,每套内含该角色全部锚点),满了再建自动删最旧一套
+ROLE_CN_NUM = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]  # 默认命名 角色一..角色十
 ROLE_POLY_AUTO_CLOSE = 4   # 点满几个点自动闭合(长方形点4角即可,不要求直角;闭合后点边线可继续加点)
 ROLE_POLY_MIN_PTS = 3      # 闭合多边形最少点数(删点不得少于此)
 ROLE_ANCHOR_TO_FOOT_Y = 0  # 已废弃(2026-09-13用户定稿):不做到脚补偿,锚点中心即人物坐标;单平台打怪只看X、跨平台走引导线,留常量=0仅为兼容
@@ -3287,54 +3289,214 @@ class MinimapRouteRecorder:
 
 
     # ==================== 角色识别:全局数据读写(对齐心火,2026-09-13) ====================
+    def _role_char_dir(self, cid):
+        """某角色套的锚点图目录 data/role_recognize/<cid>/"""
+        d = os.path.join(ROLE_REC_DIR, str(cid))
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+        return d
+
+    def _role_cur_character(self, rec=None):
+        """当前角色套dict(没有则补一套默认"角色一")"""
+        rec = rec or self._role_rec
+        if not rec:
+            return None
+        chars = rec.setdefault("characters", [])
+        if not chars:
+            chars.append({"id": "c0", "name": "角色一", "anchors": {}})
+            rec["active"] = "c0"; rec.setdefault("_seq", 1)
+        cid = rec.get("active")
+        cur = next((c for c in chars if c.get("id") == cid), None)
+        if cur is None:  # active失效→默认最后一套
+            cur = chars[-1]; rec["active"] = cur.get("id")
+        cur.setdefault("anchors", {})
+        return cur
+
     def _load_role_recognize(self):
-        """加载全局角色识别数据(锚点元数据+跟踪参数);无文件/损坏则给默认空壳。
-        全局数据只跟角色有关、不随地图方案变,启动直接加载,重采才覆盖。
-        锚点模板图存 data/role_recognize/<key>.png,json只记多边形顶点与"锚点中心→脚"偏移。"""
-        rec = {"anchors": {}, "params": dict(ROLE_TRACK_DEFAULT), "blocklist": []}
+        """加载全局角色识别数据(2026-09-13起以角色为单位整套保存,最多10套):
+        {params全局跟踪参数, blocklist全局黑名单, active当前套id, characters:[{id,name,anchors}×≤10]}。
+        内存里把"当前套anchors"挂到顶层rec['anchors'](与该套dict同一引用),现有匹配/采集/UI读顶层即用当前套、零改动。
+        旧单套格式(顶层anchors+平铺<png>)首次加载自动迁移成「角色一」、平铺png移进 c0/ 子目录。"""
+        import shutil
+        rec = {"anchors": {}, "params": dict(ROLE_TRACK_DEFAULT), "blocklist": [],
+               "active": None, "characters": [], "_seq": 0}
+        saved = {}
+        _migrated = False  # 本次是否发生"旧单套→多套"迁移;迁移完落盘一次,json一步转新结构
         try:
             if os.path.exists(ROLE_REC_FILE):
                 with open(ROLE_REC_FILE, "r", encoding="utf-8") as fp:
                     saved = json.load(fp)
-                if isinstance(saved.get("anchors"), dict):
-                    rec["anchors"] = saved["anchors"]
-                p = saved.get("params")
-                if isinstance(p, dict):
-                    for k, dv in ROLE_TRACK_DEFAULT.items():
-                        try:
-                            rec["params"][k] = float(p[k]) if isinstance(dv, float) else int(float(p.get(k, dv)))
-                        except (TypeError, ValueError):
-                            rec["params"][k] = dv
+            p = saved.get("params")  # 跟踪参数=全局共用一套
+            if isinstance(p, dict):
+                for k, dv in ROLE_TRACK_DEFAULT.items():
+                    try:
+                        rec["params"][k] = float(p[k]) if isinstance(dv, float) else int(float(p.get(k, dv)))
+                    except (TypeError, ValueError):
+                        rec["params"][k] = dv
+            _bl = saved.get("blocklist")  # 黑名单=全局共用一套
+            if isinstance(_bl, list):
+                rec["blocklist"] = [list(map(int, r)) for r in _bl
+                                    if isinstance(r, (list, tuple)) and len(r) == 4]
+            try:
+                rec["_seq"] = int(saved.get("_seq", 0))
+            except Exception:
+                rec["_seq"] = 0
+
+            def _clean_anchors(a):
+                return {k: v for k, v in (a or {}).items() if k in ROLE_ANCHOR_KEYS and isinstance(v, dict)}
+
+            if isinstance(saved.get("characters"), list) and saved["characters"]:  # 新多套格式
+                for c in saved["characters"]:
+                    if isinstance(c, dict) and c.get("id"):
+                        rec["characters"].append({"id": str(c["id"]),
+                                                  "name": str(c.get("name") or "角色"),
+                                                  "anchors": _clean_anchors(c.get("anchors"))})
+                rec["active"] = saved.get("active")
+            else:  # 旧单套格式→迁移为「角色一」,平铺锚点png移进 c0/
+                rec["characters"].append({"id": "c0", "name": "角色一",
+                                          "anchors": _clean_anchors(saved.get("anchors"))})
+                rec["active"] = "c0"; rec["_seq"] = max(rec["_seq"], 1)
+                d0 = os.path.join(ROLE_REC_DIR, "c0")
+                try:
+                    os.makedirs(d0, exist_ok=True)
+                    for k in ROLE_ANCHOR_KEYS:
+                        old_png = os.path.join(ROLE_REC_DIR, "%s.png" % k)
+                        new_png = os.path.join(d0, "%s.png" % k)
+                        if os.path.exists(old_png) and not os.path.exists(new_png):
+                            shutil.move(old_png, new_png)
+                except Exception as e:
+                    print("[角色识别] 旧锚点图迁移异常:", e)
+                _migrated = True
+            cur = self._role_cur_character(rec)
+            rec["anchors"] = cur["anchors"]
+            self._role_char_dir(cur["id"])
         except Exception as e:
             print("[角色识别] 加载失败,用默认:", e)
-        _bl = saved.get("blocklist")
-        if isinstance(_bl, list):  # 角色识别黑名单矩形[x,y,w,h](全局游戏窗口坐标),命中点落在框内不采信,防固定UI误检
-            rec["blocklist"] = [list(map(int, r)) for r in _bl
-                                if isinstance(r, (list, tuple)) and len(r) == 4]
-        # 只保留当前锚点定义里存在的key(旧版本残留字段自动丢弃)
-        rec["anchors"] = {k: v for k, v in rec["anchors"].items() if k in ROLE_ANCHOR_KEYS}
+            cur = self._role_cur_character(rec); rec["anchors"] = cur["anchors"]
         self._role_rec = rec
+        if _migrated:  # 旧格式迁移完成→立即落盘新结构(含characters/active),避免图已分目录而json仍旧格式的中间态
+            try:
+                self._save_role_recognize()
+            except Exception:
+                pass
         return rec
 
     def _save_role_recognize(self):
-        """落盘全局角色识别数据(锚点多边形/到脚偏移+跟踪参数)"""
+        """落盘:顶层anchors即当前套引用,先回写当前character,再dump params/blocklist/active/characters(不冗余写顶层anchors)"""
         try:
             if self._role_rec is None:
-                self._role_rec = {"anchors": {}, "params": dict(ROLE_TRACK_DEFAULT)}
+                self._role_rec = self._load_role_recognize()
+            rec = self._role_rec
+            cur = self._role_cur_character(rec)
+            cur["anchors"] = rec.get("anchors", {})  # 顶层与当前套保持同步
+            out = {"params": rec.get("params", dict(ROLE_TRACK_DEFAULT)),
+                   "blocklist": rec.get("blocklist", []),
+                   "active": rec.get("active"),
+                   "_seq": int(rec.get("_seq", 0)),
+                   "characters": rec.get("characters", [])}
             with open(ROLE_REC_FILE, "w", encoding="utf-8") as fp:
-                json.dump(self._role_rec, fp, ensure_ascii=False, indent=2)
+                json.dump(out, fp, ensure_ascii=False, indent=2)
         except Exception as e:
             print("[角色识别] 保存失败:", e)
 
     def _role_anchor_path(self, key):
-        """某锚点模板图的磁盘路径"""
-        return os.path.join(ROLE_REC_DIR, "%s.png" % key)
+        """锚点模板图路径=当前角色套子目录/<key>.png(切套即换目录,各角色互不串图)"""
+        cid = (self._role_rec or {}).get("active") if self._role_rec else None
+        return os.path.join(self._role_char_dir(cid or "c0"), "%s.png" % key)
 
     def _role_has_anchor(self, key):
-        """该锚点是否已采集(元数据在且模板图存在)"""
+        """该锚点在当前套是否已采集(元数据在且模板图存在)"""
         if not self._role_rec or key not in self._role_rec.get("anchors", {}):
             return False
         return os.path.exists(self._role_anchor_path(key))
+
+    # ==================== 角色套管理(以角色为单位整套,最多10套) ====================
+    def _role_next_char_name(self, rec=None):
+        """取 角色一..角色十 中第一个未被占用的名字(删中间再建也不重名)"""
+        rec = rec or self._role_rec
+        used = {c.get("name") for c in rec.get("characters", [])}
+        for w in ROLE_CN_NUM:
+            nm = "角色" + w
+            if nm not in used:
+                return nm
+        return "角色%d" % (len(rec.get("characters", [])) + 1)
+
+    def _role_new_character(self):
+        """新建一套并切为当前;已满10套先删最旧(列表第一套,含其图目录)。返回新套id"""
+        import shutil
+        rec = self._role_rec or self._load_role_recognize()
+        chars = rec.setdefault("characters", [])
+        if len(chars) >= ROLE_MAX_CHARS:  # 用户定:超10删最旧那套
+            old = chars.pop(0)
+            try:
+                shutil.rmtree(os.path.join(ROLE_REC_DIR, str(old.get("id"))), ignore_errors=True)
+            except Exception:
+                pass
+            self._add_log("角色方案已满%d套,已删最旧的「%s」" % (ROLE_MAX_CHARS, old.get("name")))
+        seq = int(rec.get("_seq", 0)) + 1; rec["_seq"] = seq
+        cid = "c%d" % seq
+        chars.append({"id": cid, "name": self._role_next_char_name(rec), "anchors": {}})
+        self._role_select_character(cid)
+        return cid
+
+    def _role_select_character(self, cid, refresh=True):
+        """切当前套:顶层anchors指向该套、换图目录、清模板缓存、落盘、刷新管理窗"""
+        rec = self._role_rec or self._load_role_recognize()
+        cur = next((c for c in rec.get("characters", []) if c.get("id") == cid), None)
+        if cur is None:
+            return False
+        rec["active"] = cid
+        cur.setdefault("anchors", {})
+        rec["anchors"] = cur["anchors"]      # 顶层引用当前套
+        self._role_char_dir(cid)
+        self._role_tpl_c = {}                # 切套清模板缓存,匹配立即读新套图
+        self._role_last_scores = {}
+        self._save_role_recognize()
+        if refresh:  # 管理窗开着时同步下拉选中+锚点列表/缩略图
+            for fn in ("_role_refresh_chars", "_role_refresh_window"):
+                try:
+                    f = getattr(self, fn, None)
+                    if f:
+                        f()
+                except Exception:
+                    pass
+        return True
+
+    def _role_delete_character(self, cid):
+        """删整套;删当前套则切到剩下最新一套;一套不剩自动补一套空的"""
+        import shutil
+        rec = self._role_rec or self._load_role_recognize()
+        chars = rec.setdefault("characters", [])
+        idx = next((i for i, c in enumerate(chars) if c.get("id") == cid), -1)
+        if idx < 0:
+            return
+        gone = chars.pop(idx)
+        try:
+            shutil.rmtree(os.path.join(ROLE_REC_DIR, str(cid)), ignore_errors=True)
+        except Exception:
+            pass
+        if not chars:
+            seq = int(rec.get("_seq", 0)) + 1; rec["_seq"] = seq
+            chars.append({"id": "c%d" % seq, "name": "角色一", "anchors": {}})
+        if rec.get("active") == cid:
+            target = chars[-1]
+        else:
+            target = next((c for c in chars if c.get("id") == rec.get("active")), chars[-1])
+        self._role_select_character(target["id"])
+        self._add_log("已删除角色套「%s」" % gone.get("name"))
+
+    def _role_rename_character(self, cid, name):
+        """给某套改名(管理窗双击/改名按钮用)"""
+        rec = self._role_rec or self._load_role_recognize()
+        name = (name or "").strip()
+        if not name:
+            return
+        cur = next((c for c in rec.get("characters", []) if c.get("id") == cid), None)
+        if cur is not None:
+            cur["name"] = name[:16]
+            self._save_role_recognize()
 
     def _capture_role_anchor(self, key):
         """角色识别·统一多边形描点采集(2026-09-13定稿,对齐心火:不另定基点;角色名/面部/后脑/宠物名全部同一流程)。
@@ -3760,6 +3922,7 @@ class MinimapRouteRecorder:
         """打开「角色识别」管理窗(2026-09-13对齐心火):全局锚点采集/移除+缩略图+8项跟踪参数。
         入口=控制面板"人物特征"按钮BTN_CHAR(替代旧小块人物特征窗)。数据全局长期保存、启动直接加载,不随地图方案变。"""
         import tkinter as tk
+        from tkinter import ttk, simpledialog, messagebox
         from PIL import Image, ImageTk
         if not self._ensure_tk_root():
             return
@@ -3775,7 +3938,7 @@ class MinimapRouteRecorder:
         win.title("角色识别")
         win.resizable(False, False)  # 固定大小不拉伸,文字不变形;标题栏可拖动
         win.attributes("-topmost", True)
-        self._position_window(win, 600, 680)
+        self._position_window(win, 600, 740)
         self._role_thumbs = []  # 持有PhotoImage引用防被GC导致缩略图不显示
 
         tk.Label(win, text="角色识别（小锚点多冗余 · 局部半径跟踪 · 对齐心火）",
@@ -3786,6 +3949,58 @@ class MinimapRouteRecorder:
         self._role_live_lbl.pack(fill="x", padx=8, pady=2)
         tk.Label(win, text="优先顺序：角色名 → 宠物名1/2/3 → 面部/后脑。面部只采朝右一张，朝左由程序水平镜像自动生成。采集：左键点目标中心放大2倍 → 在放大框内点4点自动闭合 → 点白线加点/拖点微调 → 空格确认。",
                  font=("微软雅黑", 8), fg="gray", wraplength=570, justify="left").pack(pady=(0, 4))
+
+        # ===== 角色方案(以角色为单位整套保存,最多10套;切换=换整套锚点;跟踪参数/黑名单全局共用,不随套变) =====
+        char_outer = tk.LabelFrame(win, text="角色方案（整套保存·最多10套·满了新建自动删最旧）", font=("微软雅黑", 9, "bold"))
+        char_outer.pack(fill="x", padx=8, pady=(2, 4))
+        crow = tk.Frame(char_outer); crow.pack(fill="x", padx=6, pady=3)
+        tk.Label(crow, text="当前角色", font=("微软雅黑", 9)).pack(side="left")
+        self._role_char_var = tk.StringVar()
+        self._role_char_combo = ttk.Combobox(crow, textvariable=self._role_char_var, state="readonly",
+                                             width=14, font=("微软雅黑", 9))
+        self._role_char_combo.pack(side="left", padx=4)
+
+        def _on_pick_char(_evt=None):  # 下拉选某套→切为当前(select内部会刷新下拉选中与锚点列表)
+            i = self._role_char_combo.current()
+            chars = self._role_rec.get("characters", [])
+            if 0 <= i < len(chars):
+                self._role_select_character(chars[i]["id"])
+
+        def _do_new():  # 新建空套并切过去(满10套时helper自动删最旧)
+            self._role_new_character()
+
+        def _do_rename():
+            chars = self._role_rec.get("characters", []); i = self._role_char_combo.current()
+            if not (0 <= i < len(chars)):
+                return
+            c = chars[i]
+            nm = simpledialog.askstring("改名", "角色套名称：", initialvalue=c.get("name", ""), parent=win)
+            if nm:
+                self._role_rename_character(c["id"], nm); _rebuild_chars()
+
+        def _do_del():
+            chars = self._role_rec.get("characters", []); i = self._role_char_combo.current()
+            if not (0 <= i < len(chars)):
+                return
+            if len(chars) <= 1:
+                messagebox.showinfo("提示", "至少保留一套，不能删除最后一套", parent=win); return
+            if messagebox.askyesno("删除整套", "确定删除「%s」？该套全部锚点图都会删除" % chars[i].get("name"), parent=win):
+                self._role_delete_character(chars[i]["id"])  # delete内部会切到剩余最新套并刷新
+        tk.Button(crow, text="新建", width=6, command=_do_new).pack(side="left", padx=2)
+        tk.Button(crow, text="改名", width=6, command=_do_rename).pack(side="left", padx=2)
+        tk.Button(crow, text="删除", width=6, command=_do_del).pack(side="left", padx=2)
+
+        def _rebuild_chars():  # 按数据重建下拉项并选中当前套(程序化current不触发选中事件,不会递归)
+            chars = self._role_rec.get("characters", [])
+            names = [c.get("name", "角色") for c in chars]
+            self._role_char_combo.config(values=names)
+            aid = self._role_rec.get("active")
+            ci = next((i for i, c in enumerate(chars) if c.get("id") == aid), 0)
+            if names:
+                self._role_char_combo.current(ci); self._role_char_var.set(names[ci])
+        self._role_char_combo.bind("<<ComboboxSelected>>", _on_pick_char)
+        self._role_refresh_chars = _rebuild_chars
+        _rebuild_chars()
 
         self._role_anchor_frame = tk.Frame(win)
         self._role_anchor_frame.pack(fill="x", padx=8)
