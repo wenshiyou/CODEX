@@ -8631,96 +8631,135 @@ class MinimapRouteRecorder:
         if getattr(self, '_was_random_running', False) and self.route_mode == "随机":
             self._start_random()
 
-    def _save_char_feature_set(self, batch_dir, frames, labels, patch_r=8):
-        """F4角色特征集落盘。铁律：一帧只要有>=1个标记点(特征点或脚基点)就算标好、保留；
-        0标记点的帧自动删除(不写)。保留帧重新连续编号 frame_00..。
-        保存前先清掉旧 frame_*.png 与 patches(管理器重标/删张场景),保证磁盘与本次结果一致。
-        点兼容 (x,y)老格式=圆r8 与 (x,y,shape,hw,hh)。返回保留帧数(int);异常返回-1。"""
-        import glob, shutil
+    def _dedup_whole_frames(self, frames):
+        """整框连拍去重(用户定稿:只去掉几乎一模一样的帧,动作不同/受击明暗递进一律保留,剩几张算几张)。
+        判重复=16x16归一化结构相关≥WHOLE_DUP_SIM 且 亮度均值差≤WHOLE_DUP_DMEAN(两条件同时满足);
+        只结构像但一明一暗=受击明暗变化,保留。保持原时间顺序返回。"""
+        kept, keys, means = [], [], []
+        for im in frames:
+            if im is None or im.shape[0] < 8 or im.shape[1] < 8:
+                continue  # 空/坏帧跳过
+            g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+            z = cv2.resize(g, (16, 16), interpolation=cv2.INTER_AREA).astype(np.float32).flatten()
+            m = float(z.mean()); z = z - m
+            nrm = float(np.linalg.norm(z)); v = z / nrm if nrm > 1e-6 else z
+            is_dup = False
+            for kp, km in zip(keys, means):
+                if abs(m - km) <= self.WHOLE_DUP_DMEAN and float(np.dot(v, kp)) >= self.WHOLE_DUP_SIM:
+                    is_dup = True
+                    break  # 与某张已留帧结构+明暗都几乎一致=重复,丢掉
+            if not is_dup:
+                kept.append(im); keys.append(v); means.append(m)
+        return kept
+
+    def _save_whole_set(self, batch_dir, tpl_imgs, anchors):
+        """整框特征组落盘(覆盖式重写本批):每张整人图一个模板、自带脚下基点(ax,ay=相对该图左上)。
+        写 t_00.png... + char_feature_set.json(mode='whole')。返回模板数;-1=异常。"""
+        import glob
         try:
             os.makedirs(batch_dir, exist_ok=True)
-            for f in glob.glob(os.path.join(batch_dir, "frame_*.png")):
+            for f in glob.glob(os.path.join(batch_dir, "t_*.png")):  # 清掉旧整框模板,不残留旧文件
                 try: os.remove(f)
                 except Exception: pass
-            pdir = os.path.join(batch_dir, "patches")
-            if os.path.isdir(pdir): shutil.rmtree(pdir, ignore_errors=True)
-            os.makedirs(pdir, exist_ok=True)
-            rec, entries, e, kept = [], [], 0, 0
-            for small, lab0 in zip(frames, labels):
-                lab = lab0 if lab0 is not None else {"pts": [], "anchor": None}
-                pts, anc = lab.get("pts", []), lab.get("anchor")
-                if len(pts) == 0 and anc is None:
-                    continue   # 0标记点 -> 自动删除
-                fi = kept; kept += 1
-                cv2.imwrite(os.path.join(batch_dir, "frame_%02d.png" % fi), small)
-                rec.append({"frame": "frame_%02d.png" % fi, "anchor": anc,
-                            "points": [list(q) for q in pts]})
-                if anc is None:
-                    continue   # 有特征点但没定脚基点:留图留标注,但无法产投票块(投票要dx/dy)
-                hh, ww = small.shape[:2]
-                for pp in pts:
-                    if len(pp) >= 5:
-                        px, py, shp, hw, phh = pp[0], pp[1], pp[2], int(pp[3]), int(pp[4])
-                    else:
-                        px, py = pp[0], pp[1]; shp, hw, phh = "circle", patch_r, patch_r
-                    x1, x2, y1, y2 = px-hw, px+hw+1, py-phh, py+phh+1
-                    if x1 < 0 or y1 < 0 or x2 > ww or y2 > hh:
-                        continue
-                    patch = small[y1:y2, x1:x2]
-                    if patch.shape[0] != phh*2+1 or patch.shape[1] != hw*2+1:
-                        continue
-                    pf = "patches/p_%02d_%02d.png" % (fi, e); e += 1
-                    cv2.imwrite(os.path.join(batch_dir, pf), patch)
-                    entries.append({"patch": pf, "shape": shp, "hw": hw, "hh": phh,
-                                    "dx": int(px-anc[0]), "dy": int(py-anc[1]), "frame": fi})
-            with open(os.path.join(batch_dir, "labels.json"), "w", encoding="utf-8") as fp:
-                json.dump(rec, fp, ensure_ascii=False, indent=1)
-            fset = {"n_frames": kept, "n_patches": len(entries), "entries": entries}
+            entries = []
+            for i, (im, anc) in enumerate(zip(tpl_imgs, anchors)):
+                if im is None or anc is None:
+                    continue
+                fn = "t_%02d.png" % i
+                ok, buf = cv2.imencode(".png", im)
+                if not ok:
+                    continue
+                buf.tofile(os.path.join(batch_dir, fn))  # imencode+tofile,中文路径安全
+                entries.append({"file": fn, "ax": int(anc[0]), "ay": int(anc[1])})
+            fset = {"mode": "whole", "n_templates": len(entries), "templates": entries}
             with open(os.path.join(batch_dir, "char_feature_set.json"), "w", encoding="utf-8") as fp:
                 json.dump(fset, fp, ensure_ascii=False, indent=1)
-            print("[F4采集] 保存完成 %s 保留帧=%d 小块=%d" % (batch_dir, kept, len(entries)))
-            return kept
+            print("[F4整框] 保存 %s 模板%d张" % (batch_dir, len(entries)))
+            return len(entries)
         except Exception:
-            import traceback; _debug_log("[F4采集] 保存异常: %s" % traceback.format_exc())
+            import traceback; _debug_log("[F4整框] 保存异常: %s" % traceback.format_exc())
             return -1
 
+    def _append_whole_templates(self, batch_dir, tpl_imgs, anchors):
+        """手动补帧:把若干整框模板(各自带基点)追加进一个已存在的whole组,文件名序号续接。返回追加后总数;-1异常。"""
+        try:
+            os.makedirs(batch_dir, exist_ok=True)
+            jp = os.path.join(batch_dir, "char_feature_set.json")
+            entries = []
+            if os.path.exists(jp):
+                old = json.load(open(jp, encoding="utf-8"))
+                if old.get("mode") == "whole":
+                    entries = list(old.get("templates", []))  # 续接已有条目
+            next_i = 0
+            for e in entries:  # 算下一个 t_XX 序号,避免覆盖已有
+                try:
+                    next_i = max(next_i, int(os.path.splitext(e["file"])[0].split("_")[1]) + 1)
+                except Exception:
+                    pass
+            for im, anc in zip(tpl_imgs, anchors):
+                if im is None or anc is None:
+                    continue
+                fn = "t_%02d.png" % next_i; next_i += 1
+                ok, buf = cv2.imencode(".png", im)
+                if not ok:
+                    continue
+                buf.tofile(os.path.join(batch_dir, fn))
+                entries.append({"file": fn, "ax": int(anc[0]), "ay": int(anc[1])})
+            fset = {"mode": "whole", "n_templates": len(entries), "templates": entries}
+            with open(jp, "w", encoding="utf-8") as fp:
+                json.dump(fset, fp, ensure_ascii=False, indent=1)
+            print("[F4整框] 手动追加 %s 现共%d张" % (batch_dir, len(entries)))
+            return len(entries)
+        except Exception:
+            import traceback; _debug_log("[F4整框] 追加异常: %s" % traceback.format_exc())
+            return -1
+
+    def _latest_whole_batch(self, create=False):
+        """返回最新一个 mode=whole 批次目录;没有时 create=True 返回新建批次路径(仅建目录),否则 None。"""
+        import glob
+        root = os.path.join(DATA_DIR, "char_capture")
+        cands = []
+        if os.path.isdir(root):
+            for d in sorted(glob.glob(os.path.join(root, "batch_*"))):
+                jp = os.path.join(d, "char_feature_set.json")
+                if os.path.exists(jp):
+                    try:
+                        if json.load(open(jp, encoding="utf-8")).get("mode") == "whole":
+                            cands.append(d)  # 只认整框组,旧描点批次跳过
+                    except Exception:
+                        pass
+        if cands:
+            return cands[-1]
+        if create:
+            bd = os.path.join(root, "batch_" + time.strftime("%Y%m%d_%H%M%S"))
+            os.makedirs(bd, exist_ok=True)
+            return bd
+        return None
+
     def _char_feature_capture(self):
-        """F4角色特征 采集/标注/管理 一体(模态,阻塞主循环,期间不自动打怪)。
-        按F4先弹主菜单:开始采集 / 查看管理(重标·删张·删批) / 采集参数(秒数·每秒张数) / 退出。
-        稳显(对齐F9):盖游戏的阶段用静态帧1:1+TOPMOST,实时采集时把窗移到游戏外侧;菜单/管理为纯绘制居中TOPMOST。
-        Esc用按下边沿:菜单=关闭,其余=回菜单,绝不卡后台。保存铁律:一帧>=1标记点才留,0点帧自动删。"""
+        """F4 整框特征组(用户2026-09-13定稿,替代旧逐张描点投票)。
+        自动原地连拍:鼠标拖【正方形】框紧贴人物(空白拖=画/框内拖=移/重拖=改)→3秒倒计时做动作→
+        固定框内3秒、每秒15张共45张→自动去重(只去几乎相同,明暗递进全留,剩几张算几张)→
+        点一次脚下基点(默认框底边正中,整组共用)→存为whole整框组。
+        手动补帧:全图拖正方形框住移动/瞬移姿态→裁剪→点这张自己的基点→并入最新whole组。
+        查看管理:列整框组、删单张、删整批。模态阻塞主循环(期间不自动打怪),Esc按下边沿逐级回退绝不卡后台。"""
         import glob, shutil
         win = "CharFeature F4"
         try:
             self._update_window_rect()
-            cfg_path = os.path.join(DATA_DIR, "char_capture_config.json")
-
-            def _load_cfg():
-                try:
-                    c = json.load(open(cfg_path, encoding="utf-8"))
-                    return float(c.get("cap_sec", 2.0)), int(c.get("cap_hz", 10))
-                except Exception:
-                    return 2.0, 10
-
-            def _save_cfg(s, h):
-                try:
-                    json.dump({"cap_sec": s, "cap_hz": h}, open(cfg_path, "w", encoding="utf-8"))
-                except Exception:
-                    pass
-            CAP_SEC0, CAP_HZ0 = _load_cfg()
-            BW, BH, CD_SEC = 950, 260, 3.0
-            LW, LH = 1180, 380
-            CLICK_PX, DEL_TOL = 6, 14
-            FORMS = [("circle", 16, 16), ("circle", 24, 24), ("rect", 22, 16), ("circle", 10, 10)]
-            FORM_NAME = ["整块圆33", "大块圆49", "整块矩45x33", "小块圆21"]
-            MW, MH = 780, 560
+            CAP_SEC = self.WHOLE_CAP_SEC       # 自动连拍秒数=3
+            CAP_HZ = self.WHOLE_CAP_HZ         # 每秒张数=15(3秒共45张)
+            CD_SEC = self.WHOLE_COUNTDOWN      # 开拍前倒计时=3秒
+            SQ_MIN = self.WHOLE_SQ_MIN         # 正方形选框最小边长
+            MW, MH = 780, 560                  # 菜单/管理窗口尺寸(固定不可拉伸,文字不变形)
+            AW, AH = 560, 620                  # 定基点窗口尺寸
             _sw, _sh = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
-            mx, my = (_sw-MW)//2, 50
-            VK_ESC, VK_F4 = 0x1B, 0x73
+            mx, my = (_sw - MW) // 2, 40
+            VK_ESC = 0x1B
             _fv = cv2.FONT_HERSHEY_SIMPLEX
 
             def _show_win(w, h, x, y):
-                # WINDOW_AUTOSIZE:窗口尺寸严格=imshow图像像素、用户不可拉伸(文字绝不压扁变形),这里只移动+置顶
+                # WINDOW_AUTOSIZE:窗口严格=图像像素、用户不可拉伸(文字绝不压扁),只移动+置顶
                 try:
                     cv2.moveWindow(win, int(x), int(y))
                     cv2.setWindowProperty(win, cv2.WND_PROP_TOPMOST, 1)
@@ -8732,7 +8771,7 @@ class MinimapRouteRecorder:
 
             def _text_w(text, scale, th):
                 try:
-                    fs = self._load_cn_font(int(round(round(cv2.getTextSize("A", _fv, scale, th)[0][1])*1.3)))
+                    fs = self._load_cn_font(int(round(round(cv2.getTextSize("A", _fv, scale, th)[0][1]) * 1.3)))
                     dd = ImageDraw.Draw(Image.new("RGB", (1, 1))); w = 0
                     for ch in text:
                         if '一' <= ch <= '鿿' or ch in '，。、；：？！（）【】《》“”':
@@ -8741,115 +8780,30 @@ class MinimapRouteRecorder:
                             w += cv2.getTextSize(ch, _fv, scale, th)[0][0]
                     return w
                 except Exception:
-                    return len(text)*int(12*scale)
+                    return len(text) * int(12 * scale)
 
             def _ctext(img, text, cx, y, scale, color, th=1):
-                self._draw_cn_mixed(img, text, int(cx-_text_w(text, scale, th)/2), y, scale, color, th)
+                self._draw_cn_mixed(img, text, int(cx - _text_w(text, scale, th) / 2), y, scale, color, th)
 
             def _btn(img, r, name, col=(40, 130, 255), ts=0.9):
                 cv2.rectangle(img, (r[0], r[1]), (r[2], r[3]), col, -1)
                 cv2.rectangle(img, (r[0], r[1]), (r[2], r[3]), (255, 255, 255), 2)
-                _ctext(img, name, (r[0]+r[2])//2, (r[1]+r[3])//2+9, ts, (255, 255, 255), 2)
+                _ctext(img, name, (r[0] + r[2]) // 2, (r[1] + r[3]) // 2 + 9, ts, (255, 255, 255), 2)
 
-            def _list_batches():
-                root = os.path.join(DATA_DIR, "char_capture"); out = []
-                if os.path.isdir(root):
-                    for d in sorted(glob.glob(os.path.join(root, "batch_*"))):
-                        try:
-                            nf = len(glob.glob(os.path.join(d, "frame_*.png")))
-                            npat = len(glob.glob(os.path.join(d, "patches", "*.png")))
-                            nlab = nf
-                            fs = os.path.join(d, "char_feature_set.json")
-                            if os.path.exists(fs):
-                                nlab = json.load(open(fs, encoding="utf-8")).get("n_frames", nf)
-                            out.append((os.path.basename(d), nf, nlab, npat))
-                        except Exception:
-                            pass
-                return sorted(out, key=lambda t: t[0])
-
-            def _open_batch(batchdir):
-                pp = sorted(glob.glob(os.path.join(batchdir, "frame_*.png")))
-                frames = [cv2.imread(p) for p in pp]; frames = [f for f in frames if f is not None]
-                labs = [{"pts": [], "anchor": None} for _ in frames]
-                lp = os.path.join(batchdir, "labels.json")
-                if os.path.exists(lp):
-                    try:
-                        rec = json.load(open(lp, encoding="utf-8"))
-                        for k, r in enumerate(rec[:len(labs)]):
-                            qs = []
-                            for q in r.get("points", []):
-                                qs.append((q[0], q[1], q[2], int(q[3]), int(q[4])) if len(q) >= 5 else (q[0], q[1], "circle", 8, 8))
-                            labs[k] = {"pts": qs, "anchor": r.get("anchor")}
-                    except Exception:
-                        pass
-                return frames, labs
-
-            cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)  # 固定=图像像素大小、不可拉伸(不变形),标题栏可拖动
-            _show_win(MW, MH, mx, my)
-            st = {"phase": "menu", "click": None,
-                  "place_frame": None, "bx": 0, "by": 0, "drag": False, "ox": 0, "oy": 0,
-                  "t0": 0.0, "next": 0.0, "last_full": None,
-                  "frames": [], "labels": [], "idx": 0, "batch": None,
-                  "cap_sec": CAP_SEC0, "cap_hz": CAP_HZ0,
-                  "view": None, "stack": [], "form_idx": 0, "drag0": None, "mmap": None,
-                  "mb": [], "cells": [], "sel": None, "ret": "menu",
-                  "toast": "", "toast_t": 0.0, "prev_f4": False}
-            B_START = (40, 80, MW-40, 150); B_MGR = (40, 170, MW-40, 240); B_EXIT = (40, MH-90, MW-40, MH-30)
-            SEC_BOX = (240, 270, 360, 318); SEC_PLUS = (382, 270, 432, 318); SEC_MINUS = (450, 270, 500, 318)
-            HZ_BOX = (240, 342, 360, 390); HZ_PLUS = (382, 342, 432, 390); HZ_MINUS = (450, 342, 500, 390)
-
-            def d_to_o(xd, yd):
-                mm = st["mmap"]
-                if not mm: return None
-                s, ox, oy, a, b = mm
-                return (a+(xd-ox)/s, b+(yd-oy)/s)
-
-            def on_mouse(e, x, y, fl, p):
-                if e == cv2.EVENT_LBUTTONDOWN:
-                    st["click"] = (x, y)
-                ph = st["phase"]
-                if ph == "place":
-                    pf = st["place_frame"]
-                    if e == cv2.EVENT_LBUTTONDOWN:
-                        st["drag"] = True; st["ox"] = x-st["bx"]; st["oy"] = y-st["by"]
-                    elif e == cv2.EVENT_MOUSEMOVE and st["drag"] and pf is not None:
-                        fh, fw = pf.shape[:2]
-                        st["bx"] = max(0, min(fw-BW, x-st["ox"])); st["by"] = max(0, min(fh-BH, y-st["oy"]))
-                    elif e == cv2.EVENT_LBUTTONUP:
-                        st["drag"] = False
-                elif ph == "label":
-                    cur = st["labels"][st["idx"]]
-                    if e == cv2.EVENT_LBUTTONDOWN:
-                        st["drag0"] = (x, y)
-                    elif e == cv2.EVENT_LBUTTONUP:
-                        d0 = st["drag0"]; st["drag0"] = None
-                        if d0 is None: return
-                        o1, o2 = d_to_o(*d0), d_to_o(x, y)
-                        if o1 is None or o2 is None: return
-                        if abs(x-d0[0])+abs(y-d0[1]) < CLICK_PX:
-                            shp, hw, hh = FORMS[st["form_idx"]]
-                            cur["pts"].append((int(round(o2[0])), int(round(o2[1])), shp, hw, hh))
-                        else:
-                            ax1, ax2 = sorted([int(o1[0]), int(o2[0])])
-                            ay1, ay2 = sorted([int(o1[1]), int(o2[1])])
-                            ax1, ay1 = max(0, ax1), max(0, ay1); ax2, ay2 = min(BW, ax2), min(BH, ay2)
-                            if ax2-ax1 >= 10 and ay2-ay1 >= 10:
-                                st["stack"].append(st["view"] if st["view"] is not None else (0, 0, BW, BH))
-                                st["view"] = (ax1, ay1, ax2, ay2)
-                    elif e == cv2.EVENT_RBUTTONDOWN:
-                        o = d_to_o(x, y)
-                        if o is None: return
-                        oxn, oyn = o; best = None; bd = DEL_TOL
-                        for k, q in enumerate(cur["pts"]):
-                            d = abs(q[0]-oxn)+abs(q[1]-oyn)
-                            if d < bd: bd, best = d, k
-                        anc = cur["anchor"]
-                        if anc is not None and abs(anc[0]-oxn)+abs(anc[1]-oyn) < bd:
-                            cur["anchor"] = None
-                        elif best is not None:
-                            cur["pts"].pop(best)
-            cv2.setMouseCallback(win, on_mouse)
-            VK_L, VK_U, VK_R_, VK_D = 0x25, 0x26, 0x27, 0x28
+            def _small_geom(gl, gt, gw, gh, fw, fh):
+                # 实时采集时把显示窗挪到游戏窗口外侧(不挡游戏),尺寸按画面比例缩放
+                rf, lf = _sw - (gl + gw), gl
+                w2 = min(430, max(140, max(rf, lf) - 8)); h2 = int(w2 * fh / max(1, fw))
+                if rf >= w2:
+                    xx = gl + gw + 6
+                elif lf >= w2:
+                    xx = gl - w2 - 6
+                else:
+                    xx = gl
+                    if gt + gh + h2 + 6 <= _sh:
+                        return w2, h2, max(0, xx), gt + gh + 6
+                yy = gt if gt + h2 <= _sh else max(0, _sh - h2)
+                return w2, h2, max(0, xx), max(0, yy)
 
             def _focus_game():
                 try:
@@ -8864,291 +8818,367 @@ class MinimapRouteRecorder:
                 except Exception:
                     pass
 
-            def _small_geom(gl, gt, gw, gh, fw, fh):
-                rf, lf = _sw-(gl+gw), gl
-                w2 = min(430, max(140, max(rf, lf)-8)); h2 = int(w2*fh/max(1, fw))
-                if rf >= w2:
-                    xx = gl+gw+6
-                elif lf >= w2:
-                    xx = gl-w2-6
-                else:
-                    xx = gl
-                    if gt+gh+h2+6 <= _sh:
-                        return w2, h2, max(0, xx), gt+gh+6
-                yy = gt if gt+h2 <= _sh else max(0, _sh-h2)
-                return w2, h2, max(0, xx), max(0, yy)
+            def _list_whole_batches():
+                # 只列 mode=whole 整框组(旧描点批次不显示),返回[(批次名,模板数)]
+                root = os.path.join(DATA_DIR, "char_capture"); out = []
+                if os.path.isdir(root):
+                    for d in sorted(glob.glob(os.path.join(root, "batch_*"))):
+                        jp = os.path.join(d, "char_feature_set.json")
+                        if not os.path.exists(jp):
+                            continue
+                        try:
+                            fs = json.load(open(jp, encoding="utf-8"))
+                            if fs.get("mode") == "whole":
+                                out.append((os.path.basename(d), int(fs.get("n_templates", 0))))
+                        except Exception:
+                            pass
+                return sorted(out, key=lambda t: t[0])
 
-            def render_label(idx, view):
-                small = st["frames"][idx]
-                a, b, c, d = view if view is not None else (0, 0, BW, BH)
-                sub = small[b:d, a:c]
-                s = min(LW/float(max(1, c-a)), LH/float(max(1, d-b)))
-                rw, rh = int((c-a)*s), int((d-b)*s); ox, oy = (LW-rw)//2, (LH-rh)//2
-                canvas = np.full((LH, LW, 3), 24, np.uint8)
-                if rh > 0 and rw > 0:
-                    canvas[oy:oy+rh, ox:ox+rw] = cv2.resize(sub, (rw, rh), interpolation=cv2.INTER_NEAREST)
-                st["mmap"] = (s, ox, oy, a, b)
-                def _td(px, py): return (int(ox+(px-a)*s), int(oy+(py-b)*s))
-                lab = st["labels"][idx]
-                for q in lab["pts"]:
-                    px, py, shp = q[0], q[1], q[2]; hw, hh = max(2, int(q[3]*s)), max(2, int(q[4]*s)); xd, yd = _td(px, py)
-                    if shp == "rect": cv2.rectangle(canvas, (xd-hw, yd-hh), (xd+hw, yd+hh), (0, 230, 0), 2)
-                    else: cv2.circle(canvas, (xd, yd), hw, (0, 230, 0), 2)
-                if lab["anchor"] is not None:
-                    xd, yd = _td(*lab["anchor"])
-                    cv2.circle(canvas, (xd, yd), max(3, int(5*s)), (0, 0, 255), -1)  # 基点:红色实心小圆(只作dx/dy基准,不产特征块)
-                return canvas, (c-a)/BW
+            def _load_whole(batchdir):
+                # 按 json 顺序读整框模板(imdecode兼容中文路径),返回(imgs,metas,fs)
+                jp = os.path.join(batchdir, "char_feature_set.json")
+                fs = json.load(open(jp, encoding="utf-8"))
+                imgs, metas = [], []
+                for e in fs.get("templates", []):
+                    p = os.path.join(batchdir, e["file"])
+                    im = cv2.imdecode(np.fromfile(p, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if im is not None:
+                        imgs.append(im); metas.append(e)
+                return imgs, metas, fs
+
+            cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)  # 固定=图像像素、不可拉伸、标题栏可拖
+            _show_win(MW, MH, mx, my)
+            st = {"phase": "menu", "click": None,
+                  "base_full": None, "sq": None, "drag_mode": None, "draw_start": None, "move_off": None,
+                  "t0": 0.0, "next": 0.0, "last_full": None,
+                  "raw": [], "frames": [], "anchor": None, "idx": 0,
+                  "m_img": None, "mb": [], "sel": None, "cells": [],
+                  "imgs": [], "metas": [], "amap": None, "aclick": None,
+                  "toast": "", "toast_t": 0.0, "ret": "menu"}
+            B_START = (40, 80, MW - 40, 150)
+            B_MANUAL = (40, 170, MW - 40, 240)
+            B_MGR = (40, 260, MW - 40, 330)
+            B_EXIT = (40, MH - 90, MW - 40, MH - 30)
 
             def _goto(ph):
                 st["phase"] = ph; st["click"] = None
 
-            def _start_capture():
+            def _begin_place(manual):
+                # 进入拖框:先校验游戏窗口正常,截一帧全屏作可实时刷新底图
                 self._update_window_rect(); wr = self.window_rect
                 if not wr or wr.get("left", 0) <= -30000 or wr.get("width", 0) < 200:
-                    st["toast"] = "游戏窗口未正常显示(可能最小化)"; st["toast_t"] = time.time(); st["ret"] = "menu"; _goto("toast"); return
+                    st["toast"] = "游戏窗口未正常显示(可能最小化)"; st["toast_t"] = time.time(); _goto("toast"); return
                 pf = self._capture_window()
                 if pf is None:
-                    st["toast"] = "截图为空,请先绑定游戏窗口"; st["toast_t"] = time.time(); st["ret"] = "menu"; _goto("toast"); return
-                st["place_frame"] = pf; fh, fw = pf.shape[:2]
-                st["bx"], st["by"] = (fw-BW)//2, (fh-BH)//2
-                st["frames"] = []; st["view"] = None; st["stack"] = []; st["last_full"] = pf
-                _show_win(fw, fh, wr["left"], wr["top"]); _goto("place")
+                    st["toast"] = "截图为空,请先绑定游戏窗口"; st["toast_t"] = time.time(); _goto("toast"); return
+                st["base_full"] = pf; st["last_full"] = pf
+                st["sq"] = None; st["drag_mode"] = None; st["draw_start"] = None; st["move_off"] = None
+                fh, fw = pf.shape[:2]
+                _show_win(fw, fh, wr["left"], wr["top"])
+                _goto("m_place" if manual else "place")
 
-            def _do_save():
-                if not st["batch"]:
-                    st["batch"] = os.path.join(DATA_DIR, "char_capture", "batch_"+time.strftime("%Y%m%d_%H%M%S"))
-                kept = self._save_char_feature_set(st["batch"], st["frames"], st["labels"])
-                if kept < 0: st["toast"] = "保存异常,见debug.log"
-                elif kept == 0:
-                    try:
-                        if st["batch"] and os.path.isdir(st["batch"]): shutil.rmtree(st["batch"])
-                    except Exception: pass
-                    st["toast"] = "没有任何标记点,未保存"
-                else:
-                    st["toast"] = "已保存%d张(0点帧已自动删)" % kept
-                st["toast_t"] = time.time(); _goto("toast")
+            def on_mouse(e, x, y, fl, p):
+                if e == cv2.EVENT_LBUTTONDOWN:
+                    st["click"] = (x, y)
+                ph = st["phase"]
+                if ph in ("place", "m_place"):
+                    bf = st["base_full"]
+                    if bf is None:
+                        return
+                    fh, fw = bf.shape[:2]; sq = st["sq"]
+                    if e == cv2.EVENT_LBUTTONDOWN:
+                        if sq is not None and _in_rect(sq, x, y):
+                            st["drag_mode"] = "move"; st["move_off"] = (x - sq[0], y - sq[1])  # 点框内=整体移动
+                        else:
+                            st["drag_mode"] = "draw"; st["draw_start"] = (x, y)  # 点空白=重画正方形
+                    elif e == cv2.EVENT_MOUSEMOVE and st["drag_mode"] == "draw":
+                        sx, sy = st["draw_start"]
+                        side = max(abs(x - sx), abs(y - sy))  # 边长=横纵较大值,保证整个人装下
+                        if side < SQ_MIN:
+                            st["sq"] = None
+                        else:
+                            if x >= sx: x0, x1 = sx, sx + side
+                            else: x0, x1 = sx - side, sx
+                            if y >= sy: y0, y1 = sy, sy + side
+                            else: y0, y1 = sy - side, sy
+                            if x0 < 0: x1, x0 = x1 - x0, 0       # 超左/上边界:整体平移回来,边长不变(恒正方形)
+                            if y0 < 0: y1, y0 = y1 - y0, 0
+                            if x1 > fw - 1: x0, x1 = x0 - (x1 - (fw - 1)), fw - 1  # 超右/下同理
+                            if y1 > fh - 1: y0, y1 = y0 - (y1 - (fh - 1)), fh - 1
+                            x0, y0 = max(0, x0), max(0, y0)
+                            st["sq"] = (int(x0), int(y0), int(x1), int(y1))
+                    elif e == cv2.EVENT_MOUSEMOVE and st["drag_mode"] == "move" and sq is not None:
+                        ox, oy = st["move_off"]; side = sq[2] - sq[0]
+                        nx = max(0, min(fw - side, x - ox)); ny = max(0, min(fh - side, y - oy))
+                        st["sq"] = (int(nx), int(ny), int(nx + side), int(ny + side))
+                    elif e == cv2.EVENT_LBUTTONUP:
+                        st["drag_mode"] = None
+                        q = st["sq"]
+                        if q is not None and (q[2] - q[0]) < SQ_MIN:
+                            st["sq"] = None  # 边长太小=误触,作废
+                elif ph in ("anchor", "m_anchor"):
+                    if e == cv2.EVENT_LBUTTONDOWN:
+                        st["aclick"] = (x, y)
+            cv2.setMouseCallback(win, on_mouse)
+            VK_L, VK_U, VK_R_, VK_D = 0x25, 0x26, 0x27, 0x28
+
+            def render_anchor():
+                # 把当前模板等比放大居中,画脚下基点(红实心小圆),返回(画布,原图宽,高);amap供点击逆映射
+                timg = st["m_img"] if st["phase"] == "m_anchor" else st["frames"][st["idx"]]
+                th, tw = timg.shape[:2]
+                top, bot = 64, 96
+                s = min((AW - 40) / float(tw), (AH - top - bot) / float(th))
+                rw, rh = int(tw * s), int(th * s)
+                ox, oy = (AW - rw) // 2, top + (AH - top - bot - rh) // 2
+                canvas = np.full((AH, AW, 3), 24, np.uint8)
+                canvas[oy:oy + rh, ox:ox + rw] = cv2.resize(timg, (rw, rh), interpolation=cv2.INTER_NEAREST)
+                st["amap"] = (s, ox, oy)  # 模板坐标=(显示坐标-偏移)/s
+                ax, ay = st["anchor"]
+                dx, dy = int(ox + ax * s), int(oy + ay * s)
+                cv2.circle(canvas, (dx, dy), 6, (0, 0, 255), -1)  # 基点=红色实心小圆(脚下)
+                cv2.circle(canvas, (dx, dy), 9, (0, 255, 255), 1)
+                return canvas, tw, th
 
             prev_esc = False
             while True:
                 ph = st["phase"]; now = time.time(); key = 255
                 esc_down = (user32.GetAsyncKeyState(VK_ESC) & 0x8000) != 0
-                f4_down = (user32.GetAsyncKeyState(VK_F4) & 0x8000) != 0
                 esc_pressed = esc_down and not prev_esc
                 click = st["click"]; st["click"] = None
-                if esc_pressed:   # Esc按下边沿:菜单=关闭,其余=回菜单(标注编辑中回帧网格并恢复磁盘状态)
+                if esc_pressed:  # Esc按下边沿:逐级回退,绝不卡后台
                     if ph == "menu":
                         break
-                    if ph == "label" and st["ret"] == "frames":
-                        if st["sel"]: st["frames"], st["labels"] = _open_batch(st["sel"])
-                        _show_win(MW, MH, mx, my); _goto("frames")
+                    if ph == "frames":
+                        st["mb"] = _list_whole_batches(); _show_win(MW, MH, mx, my); _goto("batches")
                     else:
                         _show_win(MW, MH, mx, my); _goto("menu")
                     prev_esc = esc_down; continue
+
                 if ph == "menu":
                     img = np.full((MH, MW, 3), 32, np.uint8)
-                    _ctext(img, "角色特征集", MW//2, 48, 1.1, (255, 255, 255), 2)
-                    _btn(img, B_START, "开始采集")
-                    _btn(img, B_MGR, "查看管理(重标 / 删除)")
-                    def _numbox(box, text):
-                        cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (55, 55, 55), -1)
-                        cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (255, 255, 255), 2)
-                        _ctext(img, text, (box[0]+box[2])//2, box[3]-11, 0.95, (0, 255, 255), 2)
-                    self._draw_cn_mixed(img, "采集秒数:", 60, 304, 0.8, (255, 255, 255), 2)
-                    _numbox(SEC_BOX, "%.1f" % st["cap_sec"])
-                    _btn(img, SEC_PLUS, "+", (60, 110, 60), 1.1); _btn(img, SEC_MINUS, "-", (60, 110, 60), 1.1)
-                    self._draw_cn_mixed(img, "秒", 514, 304, 0.8, (200, 200, 200), 2)
-                    self._draw_cn_mixed(img, "每秒张数:", 60, 376, 0.8, (255, 255, 255), 2)
-                    _numbox(HZ_BOX, "%d" % st["cap_hz"])
-                    _btn(img, HZ_PLUS, "+", (60, 110, 60), 1.1); _btn(img, HZ_MINUS, "-", (60, 110, 60), 1.1)
-                    self._draw_cn_mixed(img, "张/秒  共%d张" % int(round(st["cap_sec"]*st["cap_hz"])),
-                                       514, 376, 0.7, (200, 200, 200), 1)
-                    _ctext(img, "标注中再按F4=只存标好的并退出;没有标记点的帧自动删除", MW//2, 440, 0.6, (180, 220, 255), 1)
+                    _ctext(img, "角色整框特征组", MW // 2, 48, 1.1, (255, 255, 255), 2)
+                    _btn(img, B_START, "开始采集(原地连拍)")
+                    _btn(img, B_MANUAL, "手动补帧(移动/瞬移)", (40, 110, 180))
+                    _btn(img, B_MGR, "查看管理(删张/删批)", (70, 70, 70))
+                    _ctext(img, "自动:拖正方形框紧贴身→3秒倒计时做动作→连拍3秒45张→自动去重→点脚下基点保存",
+                           MW // 2, 380, 0.58, (180, 220, 255), 1)
+                    _ctext(img, "手动:移动/瞬移姿态截几张补进同一组;每组基点=脚下,用于和怪算距离",
+                           MW // 2, 410, 0.58, (180, 220, 255), 1)
                     _btn(img, B_EXIT, "退出(Esc)", (90, 90, 90))
                     cv2.imshow(win, img); key = cv2.waitKey(15) & 0xFF
                     if click:
                         x, y = click
-                        if _in_rect(B_START, x, y): _start_capture()
+                        if _in_rect(B_START, x, y): _begin_place(False)
+                        elif _in_rect(B_MANUAL, x, y): _begin_place(True)
                         elif _in_rect(B_MGR, x, y):
-                            st["mb"] = _list_batches(); _goto("batches")
+                            st["mb"] = _list_whole_batches(); _goto("batches")
                         elif _in_rect(B_EXIT, x, y): break
-                        elif _in_rect(SEC_PLUS, x, y):
-                            st["cap_sec"] = min(5.0, round(st["cap_sec"]+0.5, 1)); _save_cfg(st["cap_sec"], st["cap_hz"])
-                        elif _in_rect(SEC_MINUS, x, y):
-                            st["cap_sec"] = max(1.0, round(st["cap_sec"]-0.5, 1)); _save_cfg(st["cap_sec"], st["cap_hz"])
-                        elif _in_rect(HZ_PLUS, x, y):
-                            st["cap_hz"] = min(15, st["cap_hz"]+1); _save_cfg(st["cap_sec"], st["cap_hz"])
-                        elif _in_rect(HZ_MINUS, x, y):
-                            st["cap_hz"] = max(5, st["cap_hz"]-1); _save_cfg(st["cap_sec"], st["cap_hz"])
-                elif ph == "place":
-                    pf = st["place_frame"]; disp = pf.copy(); bx, by = st["bx"], st["by"]
-                    if user32.GetAsyncKeyState(VK_L) & 0x8000: bx -= 3
-                    if user32.GetAsyncKeyState(VK_R_) & 0x8000: bx += 3
-                    if user32.GetAsyncKeyState(VK_U) & 0x8000: by -= 3
-                    if user32.GetAsyncKeyState(VK_D) & 0x8000: by += 3
-                    fh, fw = pf.shape[:2]
-                    st["bx"] = max(0, min(fw-BW, bx)); st["by"] = max(0, min(fh-BH, by)); bx, by = st["bx"], st["by"]
-                    cv2.rectangle(disp, (bx, by), (bx+BW, by+BH), (0, 200, 255), 2)
-                    self._draw_cn_mixed(disp, "拖动/方向键移动框(950x260)框住角色  空格=%d秒后开始  Esc回菜单" % CD_SEC,
-                                       12, 30, 0.7, (0, 0, 255), 2)
+
+                elif ph in ("place", "m_place"):
+                    fr = self._capture_window()  # 实时画面,方便对准当前人物
+                    if fr is not None:
+                        st["base_full"] = fr; st["last_full"] = fr
+                    disp = st["base_full"].copy(); sq = st["sq"]
+                    if sq is not None:  # 方向键整体微调位置
+                        bx, by = sq[0], sq[1]; side = sq[2] - sq[0]
+                        if user32.GetAsyncKeyState(VK_L) & 0x8000: bx -= 2
+                        if user32.GetAsyncKeyState(VK_R_) & 0x8000: bx += 2
+                        if user32.GetAsyncKeyState(VK_U) & 0x8000: by -= 2
+                        if user32.GetAsyncKeyState(VK_D) & 0x8000: by += 2
+                        fh, fw = disp.shape[:2]
+                        bx = max(0, min(fw - side, bx)); by = max(0, min(fh - side, by))
+                        sq = (bx, by, bx + side, by + side); st["sq"] = sq
+                        cv2.rectangle(disp, (sq[0], sq[1]), (sq[2], sq[3]), (0, 200, 255), 2)
+                        self._draw_cn_mixed(disp, "边长%d  空格=确定  Esc=回菜单" % side,
+                                            sq[0], max(12, sq[1] - 12), 0.7, (0, 0, 255), 2)
+                    self._draw_cn_mixed(disp, "空白处按住拖=画正方形框紧贴人物(头到脚);框内拖=移动;重拖=改大小",
+                                        12, 30, 0.7, (0, 0, 255), 2)
                     cv2.imshow(win, disp); key = cv2.waitKey(15) & 0xFF
-                    if key == ord(' '):
-                        wr = self.window_rect
-                        w2, h2, xx, yy = _small_geom(wr["left"], wr["top"], wr["width"], wr["height"], fw, fh)
-                        _show_win(w2, h2, xx, yy); st["t0"] = now; _goto("countdown"); _focus_game()
+                    if key == ord(' ') and sq is not None and (sq[2] - sq[0]) >= SQ_MIN:
+                        if ph == "place":
+                            wr = self.window_rect
+                            w2, h2, xx, yy = _small_geom(wr["left"], wr["top"], wr["width"], wr["height"],
+                                                         disp.shape[1], disp.shape[0])
+                            _show_win(w2, h2, xx, yy); st["t0"] = now; _goto("countdown"); _focus_game()
+                        else:
+                            x0, y0, x1, y1 = sq
+                            st["m_img"] = st["base_full"][y0:y1, x0:x1].copy()
+                            hh, ww = st["m_img"].shape[:2]
+                            st["anchor"] = (ww // 2, hh - 1)  # 默认框底边正中=脚
+                            _show_win(AW, AH, (_sw - AW) // 2, 30); _focus_cv(); _goto("m_anchor")
+
                 elif ph == "countdown":
                     fr = self._capture_window()
                     if fr is not None: st["last_full"] = fr
-                    disp = st["last_full"].copy(); bx, by = st["bx"], st["by"]
-                    el = now-st["t0"]; n = max(1, int(CD_SEC-el)+1)
-                    cv2.rectangle(disp, (bx, by), (bx+BW, by+BH), (0, 200, 255), 2)
-                    self._draw_cn_mixed(disp, "%d秒后开始,请操控角色/放技能" % n, bx, by-12, 0.85, (0, 0, 255), 2)
-                    cv2.putText(disp, str(n), (bx+BW//2-35, by+BH//2+45), cv2.FONT_HERSHEY_SIMPLEX, 2.6, (0, 0, 255), 6)
+                    disp = st["last_full"].copy(); sq = st["sq"]
+                    el = now - st["t0"]; n = max(1, int(CD_SEC - el) + 1)
+                    cv2.rectangle(disp, (sq[0], sq[1]), (sq[2], sq[3]), (0, 200, 255), 2)
+                    self._draw_cn_mixed(disp, "%d秒后开始,请完整做攻击动作(打怪前→放技能→收招)" % n,
+                                        sq[0], max(12, sq[1] - 12), 0.85, (0, 0, 255), 2)
+                    cv2.putText(disp, str(n), (sq[0] + (sq[2]-sq[0])//2 - 35, sq[1] + (sq[3]-sq[1])//2 + 45),
+                                cv2.FONT_HERSHEY_SIMPLEX, 2.6, (0, 0, 255), 6)
                     wr = self.window_rect
-                    w2, h2, _, _ = _small_geom(wr["left"], wr["top"], wr["width"], wr["height"], disp.shape[1], disp.shape[0])
+                    w2, h2, _, _ = _small_geom(wr["left"], wr["top"], wr["width"], wr["height"],
+                                               disp.shape[1], disp.shape[0])
                     cv2.imshow(win, cv2.resize(disp, (w2, h2))); cv2.waitKey(15)
                     if el >= CD_SEC:
-                        st["t0"] = now; st["next"] = now; st["frames"] = []; _goto("capture")
+                        st["t0"] = now; st["next"] = now; st["raw"] = []; _goto("capture")
+
                 elif ph == "capture":
                     fr = self._capture_window()
                     if fr is not None: st["last_full"] = fr
-                    disp = st["last_full"].copy(); bx, by = st["bx"], st["by"]
-                    N = int(round(st["cap_sec"]*st["cap_hz"])); DT = 1.0/st["cap_hz"]
-                    if now >= st["next"] and len(st["frames"]) < N:
-                        crop = st["last_full"][by:by+BH, bx:bx+BW].copy()
-                        if crop.shape[0] == BH and crop.shape[1] == BW: st["frames"].append(crop)
+                    disp = st["last_full"].copy(); sq = st["sq"]
+                    N = int(round(CAP_SEC * CAP_HZ)); DT = 1.0 / CAP_HZ
+                    if now >= st["next"] and len(st["raw"]) < N:  # 固定节拍裁框内正方形
+                        x0, y0, x1, y1 = sq
+                        crop = st["last_full"][y0:y1, x0:x1].copy()
+                        if crop.shape[0] == (y1-y0) and crop.shape[1] == (x1-x0):
+                            st["raw"].append(crop)
                         st["next"] += DT
-                    got = len(st["frames"])
-                    cv2.rectangle(disp, (bx, by), (bx+BW, by+BH), (0, 200, 255), 2)
-                    cv2.rectangle(disp, (bx, by-8), (bx+BW, by-2), (255, 255, 255), -1)
-                    cv2.rectangle(disp, (bx, by-8), (bx+int(BW*got/max(1, N)), by-2), (0, 0, 255), -1)
-                    self._draw_cn_mixed(disp, "采集中 %d/%d 持续做动作/放技能" % (got, N), bx, by-16, 0.7, (0, 0, 255), 2)
+                    got = len(st["raw"])
+                    cv2.rectangle(disp, (sq[0], sq[1]), (sq[2], sq[3]), (0, 200, 255), 2)
+                    cv2.rectangle(disp, (sq[0], sq[1] - 8), (sq[2], sq[1] - 2), (255, 255, 255), -1)
+                    cv2.rectangle(disp, (sq[0], sq[1] - 8),
+                                  (sq[0] + int((sq[2]-sq[0]) * got / max(1, N)), sq[1] - 2), (0, 0, 255), -1)
+                    self._draw_cn_mixed(disp, "采集中 %d/%d 持续做动作" % (got, N),
+                                        sq[0], max(12, sq[1] - 16), 0.7, (0, 0, 255), 2)
                     wr = self.window_rect
-                    w2, h2, _, _ = _small_geom(wr["left"], wr["top"], wr["width"], wr["height"], disp.shape[1], disp.shape[0])
+                    w2, h2, _, _ = _small_geom(wr["left"], wr["top"], wr["width"], wr["height"],
+                                               disp.shape[1], disp.shape[0])
                     cv2.imshow(win, cv2.resize(disp, (w2, h2))); cv2.waitKey(5)
                     if got >= N:
-                        st["batch"] = None
-                        st["labels"] = [{"pts": [], "anchor": None} for _ in st["frames"]]
-                        st["idx"] = 0; st["view"] = None; st["stack"] = []; st["form_idx"] = 0; st["ret"] = "menu"
-                        _show_win(LW, LH, 40, 40); _focus_cv(); _goto("label")
-                elif ph == "label":
-                    i = st["idx"]; lab = st["labels"][i]; N = len(st["frames"])
-                    canvas, zf = render_label(i, st["view"])
-                    self._draw_cn_mixed(canvas,
-                        "%d/%d 形态[%s](Tab) 左键加点/拖框放大 r退回 方向键移点(Shift快) 点脚+空格定基点并下一张 n/b翻页 F4=只存标好的退出 右键删 Esc回菜单"
-                        % (i+1, N, FORM_NAME[st["form_idx"]]), 8, 20, 0.4, (0, 0, 255), 1)
-                    _nm = len(lab["pts"])+(1 if lab["anchor"] else 0)
-                    self._draw_cn_mixed(canvas, "zoom %.1fx 本帧标记%d" % (1/max(1e-6, zf), _nm), 8, LH-122, 0.5, (0, 255, 255), 1)
+                        frames = self._dedup_whole_frames(st["raw"])  # 自动去重,剩几张算几张
+                        st["raw"] = []
+                        if not frames:
+                            st["toast"] = "未采到有效帧,请重试"; st["toast_t"] = now
+                            _show_win(MW, MH, mx, my); _goto("toast")
+                        else:
+                            st["frames"] = frames; st["idx"] = 0
+                            hh, ww = frames[0].shape[:2]
+                            st["anchor"] = (ww // 2, hh - 1)  # 整组默认基点=框底边正中
+                            _show_win(AW, AH, (_sw - AW) // 2, 30); _focus_cv(); _goto("anchor")
+
+                elif ph in ("anchor", "m_anchor"):
+                    canvas, tw, th = render_anchor()
+                    nfrm = len(st["frames"])
+                    title = "定脚下基点(整组共用) %d/%d张" % (st["idx"]+1, nfrm) if ph == "anchor" else "定这张的脚下基点"
+                    self._draw_cn_mixed(canvas, title, 8, 24, 0.62, (0, 0, 255), 2)
+                    self._draw_cn_mixed(canvas, "左键=基点设到这  方向键微调  空格=保存" +
+                                        ("  n/b翻看" if ph == "anchor" else "") + "  Esc=取消",
+                                        8, 48, 0.55, (0, 255, 255), 1)
+                    self._draw_cn_mixed(canvas, "基点默认在框底边正中(脚),红点对在脚底下即可", 8, AH - 64, 0.55,
+                                        (200, 200, 200), 1)
+                    self._draw_cn_mixed(canvas, "基点(%d,%d)" % (st["anchor"][0], st["anchor"][1]),
+                                        8, AH - 36, 0.6, (0, 255, 255), 1)
                     cv2.imshow(win, canvas); key = cv2.waitKey(15) & 0xFF
-                    if f4_down and not st["prev_f4"]:
-                        _do_save()
-                    elif key == ord(' '):
-                        if lab["pts"]:
-                            last = lab["pts"].pop(); lab["anchor"] = (last[0], last[1])
-                        if i < N-1:
-                            st["idx"] += 1; st["view"] = None; st["stack"] = []
-                        else:
-                            _do_save()
-                    elif key == ord('b'):
-                        st["idx"] = max(0, i-1); st["view"] = None; st["stack"] = []
-                    elif key == ord('n'):
-                        st["idx"] = min(N-1, i+1); st["view"] = None; st["stack"] = []
-                    elif key == ord('r'):
-                        st["view"] = st["stack"].pop() if st["stack"] else None
-                    elif key == 9:
-                        st["form_idx"] = (st["form_idx"]+1) % len(FORMS)
-                    elif key == ord('d') and st["ret"] == "frames":
-                        st["frames"].pop(i); st["labels"].pop(i)
-                        if st["frames"]:
-                            self._save_char_feature_set(st["batch"], st["frames"], st["labels"])
-                            st["frames"], st["labels"] = _open_batch(st["batch"])
-                        else:
-                            try:
-                                if st["batch"] and os.path.isdir(st["batch"]): shutil.rmtree(st["batch"])
-                            except Exception: pass
-                        st["mb"] = _list_batches(); _show_win(MW, MH, mx, my); _goto("frames")
+                    if st["aclick"] is not None:  # 鼠标点设基点:显示坐标逆映射回模板坐标并限界
+                        axs, ays = st["aclick"]; st["aclick"] = None
+                        s, ox, oy = st["amap"]
+                        tax = int(round((axs - ox) / s)); tay = int(round((ays - oy) / s))
+                        st["anchor"] = (max(0, min(tw-1, tax)), max(0, min(th-1, tay)))
                     else:
-                        step = 5 if (user32.GetAsyncKeyState(0x10) & 0x8000) else 1
-                        dx = (1 if user32.GetAsyncKeyState(0x27) & 0x8000 else 0)-(1 if user32.GetAsyncKeyState(0x25) & 0x8000 else 0)
-                        dy = (1 if user32.GetAsyncKeyState(0x28) & 0x8000 else 0)-(1 if user32.GetAsyncKeyState(0x26) & 0x8000 else 0)
-                        if dx or dy:
-                            def _cp(x, y): return (min(BW-1, max(0, x)), min(BH-1, max(0, y)))
-                            if lab["pts"]:
-                                q = lab["pts"][-1]; nx, ny = _cp(q[0]+dx*step, q[1]+dy*step)
-                                lab["pts"][-1] = (nx, ny, q[2], q[3], q[4])
-                            elif lab["anchor"] is not None:
-                                ax, ay = _cp(lab["anchor"][0]+dx*step, lab["anchor"][1]+dy*step); lab["anchor"] = (ax, ay)
-                    st["prev_f4"] = f4_down
+                        step = 5 if (user32.GetAsyncKeyState(0x10) & 0x8000) else 1  # Shift快移
+                        ddx = (1 if user32.GetAsyncKeyState(0x27) & 0x8000 else 0) - (1 if user32.GetAsyncKeyState(0x25) & 0x8000 else 0)
+                        ddy = (1 if user32.GetAsyncKeyState(0x28) & 0x8000 else 0) - (1 if user32.GetAsyncKeyState(0x26) & 0x8000 else 0)
+                        if ddx or ddy:
+                            ax, ay = st["anchor"]
+                            st["anchor"] = (max(0, min(tw-1, ax + ddx*step)), max(0, min(th-1, ay + ddy*step)))
+                    if key == ord(' '):
+                        if ph == "anchor":
+                            bd = os.path.join(DATA_DIR, "char_capture", "batch_" + time.strftime("%Y%m%d_%H%M%S"))
+                            nk = self._save_whole_set(bd, st["frames"], [st["anchor"]] * len(st["frames"]))
+                            st["toast"] = "已保存整框组%d张" % nk if nk >= 0 else "保存异常,见debug.log"
+                        else:
+                            bd = self._latest_whole_batch(create=True)
+                            nk = self._append_whole_templates(bd, [st["m_img"]], [st["anchor"]])
+                            st["toast"] = "已补入整框组,现共%d张" % nk if nk >= 0 else "追加异常,见debug.log"
+                        st["toast_t"] = time.time(); st["m_img"] = None
+                        _show_win(MW, MH, mx, my); _goto("toast")
+                    elif key == ord('n') and ph == "anchor":
+                        st["idx"] = min(nfrm - 1, st["idx"] + 1)
+                    elif key == ord('b') and ph == "anchor":
+                        st["idx"] = max(0, st["idx"] - 1)
+
                 elif ph == "batches":
                     img = np.full((MH, MW, 3), 32, np.uint8)
-                    _ctext(img, "查看管理 - 选择批次", MW//2, 40, 1.0, (255, 255, 255), 2)
+                    _ctext(img, "查看管理 - 选择整框组", MW // 2, 40, 1.0, (255, 255, 255), 2)
                     st["cells"] = []; y0, rh = 70, 58; rows = st["mb"]
-                    if not rows: _ctext(img, "(还没有批次,先开始采集)", MW//2, 190, 0.8, (180, 180, 180), 1)
-                    for k, (name, nf, nlab, npat) in enumerate(rows):
-                        ry = y0+k*rh; r = (30, ry, MW-30, ry+rh-6); st["cells"].append((r, name))
+                    if not rows: _ctext(img, "(还没有整框组,先开始采集)", MW // 2, 190, 0.8, (180, 180, 180), 1)
+                    for k, (name, nt) in enumerate(rows):
+                        ry = y0 + k * rh; r = (30, ry, MW - 30, ry + rh - 6); st["cells"].append((r, name))
                         cv2.rectangle(img, (r[0], r[1]), (r[2], r[3]), (45, 55, 70), -1)
                         cv2.rectangle(img, (r[0], r[1]), (r[2], r[3]), (200, 200, 200), 1)
-                        self._draw_cn_mixed(img, name.replace("batch_", "批次 "), 50, ry+20, 0.7, (255, 255, 255), 1)
-                        self._draw_cn_mixed(img, "标好%d张 / 共采%d张 / 小块%d" % (nlab, nf, npat), 50, ry+44, 0.62, (0, 255, 255), 1)
-                    BB = (40, MH-70, 240, MH-20); _btn(img, BB, "返回", (90, 90, 90))
+                        self._draw_cn_mixed(img, name.replace("batch_", "批次 "), 50, ry + 20, 0.7, (255, 255, 255), 1)
+                        self._draw_cn_mixed(img, "整框模板%d张(点进去可删单张)" % nt, 50, ry + 44, 0.62, (0, 255, 255), 1)
+                    BB = (40, MH - 70, 240, MH - 20); _btn(img, BB, "返回", (90, 90, 90))
                     cv2.imshow(win, img); cv2.waitKey(15)
                     if click:
                         x, y = click
-                        if _in_rect(BB, x, y): _goto("menu")
+                        if _in_rect(BB, x, y):
+                            _goto("menu")
                         else:
                             for r, name in st["cells"]:
                                 if _in_rect(r, x, y):
                                     st["sel"] = os.path.join(DATA_DIR, "char_capture", name)
-                                    st["frames"], st["labels"] = _open_batch(st["sel"])
+                                    st["imgs"], st["metas"], _ = _load_whole(st["sel"])
                                     _goto("frames"); break
+
                 elif ph == "frames":
                     img = np.full((MH, MW, 3), 28, np.uint8)
-                    _ctext(img, "%s  点缩略图重标(标注里按d删这张)" % (os.path.basename(st["sel"] or "")), MW//2, 32, 0.6, (255, 255, 255), 1)
-                    cols, cw = 4, 176; chh = int(cw*BH/BW); gx, gy, pad = 24, 64, 10
+                    _ctext(img, "%s  点缩略图=删这张" % os.path.basename(st["sel"] or ""), MW // 2, 32, 0.6, (255, 255, 255), 1)
+                    cols, cw = 5, 132; chh = cw; gx, gy, pad = 24, 64, 12
                     st["cells"] = []
-                    for k, small in enumerate(st["frames"]):
-                        rr, cc = divmod(k, cols); x = gx+cc*(cw+pad); y = gy+rr*(chh+34)
-                        r = (x, y, x+cw, y+chh); st["cells"].append((r, k))
-                        img[y:y+chh, x:x+cw] = cv2.resize(small, (cw, chh))
-                        lab = st["labels"][k]; nm = len(lab["pts"])+(1 if lab["anchor"] else 0)
-                        col = (0, 230, 0) if nm > 0 else (120, 120, 120)
-                        cv2.rectangle(img, (x, y), (x+cw, y+chh), col, 2)
-                        self._draw_cn_mixed(img, "#%d 标记%d" % (k, nm), x+4, y+chh+20, 0.55, col, 1)
-                    BDEL = (40, MH-70, 260, MH-20); BB = (280, MH-70, 500, MH-20)
+                    for k, tim in enumerate(st["imgs"]):
+                        rr, cc = divmod(k, cols); x = gx + cc * (cw + pad); y = gy + rr * (chh + 30)
+                        r = (x, y, x + cw, y + chh); st["cells"].append((r, k))
+                        img[y:y+chh, x:x+cw] = cv2.resize(tim, (cw, chh))
+                        cv2.rectangle(img, (x, y), (x + cw, y + chh), (0, 230, 0), 2)
+                    BDEL = (40, MH - 70, 260, MH - 20); BB = (280, MH - 70, 500, MH - 20)
                     _btn(img, BDEL, "删整批", (50, 50, 200)); _btn(img, BB, "返回批次", (90, 90, 90))
                     cv2.imshow(win, img); cv2.waitKey(15)
                     if click:
                         x, y = click
-                        if _in_rect(BDEL, x, y):
+                        if _in_rect(BDEL, x, y):  # 删整批
                             try:
                                 if st["sel"] and os.path.isdir(st["sel"]): shutil.rmtree(st["sel"])
-                            except Exception: pass
-                            st["mb"] = _list_batches(); _goto("batches")
+                            except Exception:
+                                pass
+                            st["mb"] = _list_whole_batches(); _goto("batches")
                         elif _in_rect(BB, x, y):
-                            st["mb"] = _list_batches(); _goto("batches")
+                            st["mb"] = _list_whole_batches(); _goto("batches")
                         else:
+                            hit = None
                             for r, k in st["cells"]:
-                                if _in_rect(r, x, y):
-                                    st["idx"] = k; st["view"] = None; st["stack"] = []
-                                    st["form_idx"] = 0; st["ret"] = "frames"; st["batch"] = st["sel"]
-                                    _show_win(LW, LH, 40, 40); _focus_cv(); _goto("label"); break
+                                if _in_rect(r, x, y): hit = k; break
+                            if hit is not None:  # 删单张:删png+重写json(序号不重排,加载按json读),删空删目录
+                                sel = st["sel"]; imgs, metas, _ = _load_whole(sel)
+                                rm_file = os.path.join(sel, metas[hit]["file"])
+                                try: os.remove(rm_file)
+                                except Exception: pass
+                                imgs.pop(hit); metas.pop(hit)
+                                if metas:
+                                    fset = {"mode": "whole", "n_templates": len(metas), "templates": metas}
+                                    with open(os.path.join(sel, "char_feature_set.json"), "w", encoding="utf-8") as fp:
+                                        json.dump(fset, fp, ensure_ascii=False, indent=1)
+                                    st["imgs"], st["metas"] = imgs, metas
+                                else:
+                                    try: shutil.rmtree(sel)
+                                    except Exception: pass
+                                    st["mb"] = _list_whole_batches(); _goto("batches")
+
                 elif ph == "toast":
-                    img = np.full((180, 600, 3), 30, np.uint8)
-                    _ctext(img, st["toast"], 300, 100, 0.72, (0, 255, 255), 2)
-                    _show_win(600, 180, (_sw-600)//2, (_sh-180)//2)
+                    img = np.full((180, 620, 3), 30, np.uint8)
+                    _ctext(img, st["toast"], 310, 100, 0.72, (0, 255, 255), 2)
+                    _show_win(620, 180, (_sw - 620) // 2, (_sh - 180) // 2)
                     cv2.imshow(win, img); cv2.waitKey(1)
-                    if now-st["toast_t"] >= 1.2:
-                        _show_win(MW, MH, mx, my)
-                        if st["ret"] == "frames" and st["sel"] and os.path.isdir(st["sel"]):
-                            st["frames"], st["labels"] = _open_batch(st["sel"]); _goto("frames")
-                        else:
-                            _goto("menu")
-                        st["ret"] = "menu"
+                    if now - st["toast_t"] >= 1.2:
+                        _show_win(MW, MH, mx, my); _goto("menu")
                 prev_esc = esc_down
             try: cv2.destroyWindow(win)
             except Exception: pass
-            self._add_log("F4特征管理已关闭")
+            self._add_log("F4整框特征管理已关闭")
         except Exception:
-            import traceback; _debug_log("[F4采集] 异常: %s" % traceback.format_exc())
+            import traceback; _debug_log("[F4整框] 异常: %s" % traceback.format_exc())
             try: cv2.destroyWindow("CharFeature F4")
             except Exception: pass
 
@@ -13996,170 +14026,122 @@ class MinimapRouteRecorder:
         map_y = int(r["top"] + ry * r["height"])
         return (map_x, map_y)
 
-    # ===== 多点投票定脚(F4特征集)：每个小块自带相对脚(dx,dy),小窗内逐块匹配反算脚、密度簇≥3取中位数 =====
-    VOTE_THR = 0.60        # 单块匹配分阈值(TM_CCOEFF_NORMED)
-    VOTE_CLUSTER = 24      # 脚候选同簇半径(px),正确票抱团/误票散乱
-    VOTE_MIN = 3           # 定脚最少要几个【不同块】几何一致(用户定稿:整块大点,3个以上即可,越多越稳)
-    VOTE_Q_WIN = 4         # 脚点累计网格(px),同块落同格只计1票(票数=支持的不同块数)
-    VOTE_W_COLOR = 0.70    # 相似度=颜色为主(HS色相饱和,抗受击明暗)权重
-    VOTE_W_SHAPE = 0.30    # 相似度=形状为辅(灰度)权重
-    VOTE_HALF_W = 80       # 跟踪小窗左右半宽(以脚为中心)
-    VOTE_UP = 130          # 小窗向上覆盖(特征块在脚上方,头约高160-180)
-    VOTE_DOWN = 70         # 小窗向下覆盖
-    VOTE_COARSE_W = 130    # 光点粗位"首捕/重捕"大窗左右半宽(光点有镜头惯性误差,窗要罩得住真人)
-    VOTE_COARSE_UP = 80    # 粗位大窗向上(光点近似人物中心,脚在其下)
-    VOTE_COARSE_DN = 180   # 粗位大窗向下(覆盖 中心→脚 的偏差+光点误差)
-    VOTE_SCALE = 0.5       # 全图首捕匹配缩放(面积变1/4,坐标再除回)
-    VOTE_WIN_SCALE = 0.5   # 小窗跟踪匹配缩放:整块33~49缩半仍16~24px、颜色面色不受影响,块数不减也能提速
-    VOTE_GRID = 10         # 去重网格:相对脚(dx,dy)每10px一格,同格只留最清晰一块(去跨帧冗余)
-    VOTE_CAP = 80          # 去重后块数硬上限,超出按相对位置空间均匀抽(保证身体各区域都覆盖)
-    VOTE_SIM = 0.85        # 图像相似去重阈值(8x8归一化相关),几乎一模一样的块只留最清晰
-    VOTE_MAX_MOVE = 45     # 相邻帧位移门限:候选脚离上一脚超45px=误配直接丢(人一帧不可能瞬移)
-    VOTE_THR_WIN = 0.50    # 综合相似度阈值(新批次离线标定:0.50/MIN3=14~15/16、误差中位2px;整块缩半;track/coarse共用)
+    # ===== 整框特征组定脚(whole,F4正方形框连拍一组整人模板,每模板自带脚下基点ax/ay) =====
+    WHOLE_MATCH_SCALE = 0.5   # 匹配统一缩半(面积1/4提速,颜色面色不受影响),坐标再除回原尺度
+    WHOLE_THR = 0.60          # 综合分采信阈值(整框大图,用户定稿0.6不误判)
+    WHOLE_W_COLOR = 0.70      # 综合分=颜色(HS色相饱和,丢V明度抗受击明暗)权重
+    WHOLE_W_SHAPE = 0.30      # 综合分=形状(灰度)权重
+    WHOLE_CAP_SEC = 3.0       # F4自动连拍秒数(用户定稿3秒)
+    WHOLE_CAP_HZ = 15         # F4每秒张数(3秒共45张,再自动去重)
+    WHOLE_COUNTDOWN = 3.0     # F4开拍前倒计时秒数
+    WHOLE_DUP_SIM = 0.95      # 连拍去重:16x16归一化结构相关≥此值
+    WHOLE_DUP_DMEAN = 12.0    # 且亮度均值差≤此值才算重复(只结构像但明暗递进=受击,保留)
+    WHOLE_SQ_MIN = 40         # F4正方形选框最小边长(px)
+    WHOLE_TRACK_MX = 55       # 跟踪小窗:模板相对脚的外延之外,水平再留一检测周期位移余量
+    WHOLE_TRACK_MU = 36       # 跟踪小窗:向上额外余量
+    WHOLE_TRACK_MD = 20       # 跟踪小窗:向下额外余量
+    WHOLE_COARSE_MX = 150     # 光点粗位大窗水平余量(光点有镜头惯性误差,窗要罩得住真人)
+    WHOLE_COARSE_MU = 120     # 粗位大窗向上余量
+    WHOLE_COARSE_MD = 190     # 粗位大窗向下余量
+    WHOLE_MAX_MOVE = 45       # 跟踪:候选脚离上一脚超此=小窗没跟上,丢并转粗位重捕(人一帧不瞬移)
 
     def _load_char_vote_set(self):
-        """载入最新完整批次特征小块并去重提速。每块存(全分辨率灰度, 缩半灰度, dx,dy):
-        小窗跟踪用全分辨率(17x17区分力强、约4ms),全图首捕用缩半(省算力)。
-        相对位置网格去重 + 图像相似去重 + 上限空间均匀抽。缓存;F4新保存后按目录名热重载。"""
-        import glob
+        """载入最新 whole 整框特征组。每模板=(缩半灰度gh, 缩半HS颜色ch, 基点ax, 基点ay, 原高th0, 原宽tw0)。
+        基点ax/ay=相对该模板左上的脚下坐标(自动组整组共用/手动帧各自带),不缩放、匹配时按缩半比还原。
+        只认 mode=whole(旧描点patch批次跳过);缓存,F4新保存后按目录名热重载。方法名保留以免动调用点。"""
         try:
-            root = os.path.join(DATA_DIR, "char_capture")
-            cands = [d for d in sorted(glob.glob(os.path.join(root, "batch_*")))
-                     if os.path.exists(os.path.join(d, "char_feature_set.json"))]
-            if not cands:
+            bd = self._latest_whole_batch()
+            if not bd:
                 return getattr(self, "_vote_tpls", []) or []
-            bd = cands[-1]
             if getattr(self, "_vote_sig", None) == bd and getattr(self, "_vote_tpls", None):
                 return self._vote_tpls
             fs = json.load(open(os.path.join(bd, "char_feature_set.json"), encoding="utf-8"))
-            sc = self.VOTE_SCALE
-            raw = []
-            for e in fs.get("entries", []):
-                im = cv2.imread(os.path.join(bd, e["patch"]))
-                if im is None:
+            sc = self.WHOLE_MATCH_SCALE
+            tpls = []
+            for e in fs.get("templates", []):
+                im = cv2.imdecode(np.fromfile(os.path.join(bd, e["file"]), dtype=np.uint8),
+                                  cv2.IMREAD_COLOR)  # imdecode兼容中文路径
+                if im is None or im.shape[0] < 8 or im.shape[1] < 8:
                     continue
-                g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)                     # 形状(灰度)
-                _hsv = cv2.cvtColor(im, cv2.COLOR_BGR2HSV)
-                col = cv2.merge([_hsv[:, :, 0], _hsv[:, :, 1]])             # 颜色=H色相+S饱和(丢V明度→抗受击明暗)
-                sharp = float(cv2.Laplacian(g, cv2.CV_64F).var())           # 清晰度,同格/相似时留最清晰
-                gh = cv2.resize(g, (max(1, int(g.shape[1]*sc)), max(1, int(g.shape[0]*sc))))
-                ch = cv2.resize(col, (max(1, int(col.shape[1]*sc)), max(1, int(col.shape[0]*sc))))
-                raw.append((g, gh, col, ch, int(e["dx"]), int(e["dy"]), sharp))
-            # 1) 相对脚位置网格去重:同一格只留最清晰
-            cells = {}
-            for gf, gh, cf, ch, dx, dy, sh in raw:
-                k = (dx//self.VOTE_GRID, dy//self.VOTE_GRID)
-                if k not in cells or sh > cells[k][6]:
-                    cells[k] = (gf, gh, cf, ch, dx, dy, sh)
-            items = list(cells.values())
-            # 2) 图像相似去重:8x8归一化特征,清晰度优先,与已选几乎一样就丢
-            def _vkey(gf):
-                z = cv2.resize(gf, (8, 8)).astype(np.float32).flatten(); z = z-z.mean(); n = np.linalg.norm(z)
-                return z/n if n > 1e-6 else z
-            items.sort(key=lambda z: -z[6]); kept, keys = [], []
-            for gf, gh, cf, ch, dx, dy, sh in items:
-                k = _vkey(gf)
-                if any(float(np.dot(k, kp)) > self.VOTE_SIM for kp in keys):
-                    continue
-                kept.append((gf, gh, cf, ch, dx, dy, sh)); keys.append(k)
-            # 3) 仍超上限:按相对位置空间等间隔抽,保证头/身/脚各区域均匀覆盖
-            if len(kept) > self.VOTE_CAP:
-                kept.sort(key=lambda z: (z[4], z[5]))
-                idx = np.linspace(0, len(kept)-1, self.VOTE_CAP).round().astype(int)
-                kept = [kept[i] for i in sorted(set(idx))]
-            # (灰度全尺寸,灰度缩半,彩色HS全尺寸,彩色HS缩半,dx,dy)
-            tpls = [(z[0], z[1], z[2], z[3], z[4], z[5]) for z in kept]
+                th0, tw0 = im.shape[:2]
+                g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)                    # 形状(灰度)
+                hsv = cv2.cvtColor(im, cv2.COLOR_BGR2HSV)
+                col = cv2.merge([hsv[:, :, 0], hsv[:, :, 1]])              # 颜色=H色相+S饱和(丢V明度→抗受击明暗)
+                gh = cv2.resize(g, (max(1, int(tw0*sc)), max(1, int(th0*sc))))
+                ch = cv2.resize(col, (max(1, int(tw0*sc)), max(1, int(th0*sc))))
+                tpls.append((gh, ch, int(e["ax"]), int(e["ay"]), int(th0), int(tw0)))
             self._vote_sig, self._vote_tpls = bd, tpls
-            print("[人物投票] 载入特征集 %s 原始%d块→去重后%d块" % (os.path.basename(bd), len(raw), len(tpls)))
-            _debug_log("[人物投票] 载入特征集 %s 原始%d块→去重后%d块(小窗全分辨率/全图缩半+位移门限,多点投票定脚)"
-                       % (os.path.basename(bd), len(raw), len(tpls)))
+            print("[人物整框] 载入 %s 模板%d张" % (os.path.basename(bd), len(tpls)))
+            _debug_log("[人物整框] 载入 %s 模板%d张(整框竞争/颜色0.7形状0.3/缩半)" % (os.path.basename(bd), len(tpls)))
             return tpls
         except Exception:
-            import traceback; _debug_log("[人物投票] 载入异常: %s" % traceback.format_exc())
+            import traceback; _debug_log("[人物整框] 载入异常: %s" % traceback.format_exc())
             return getattr(self, "_vote_tpls", []) or []
 
     def _vote_match_character(self, frame, center, coarse=False):
-        """多点投票定脚(整块;相似度=颜色HS为主0.7+灰度形状为辅0.3;多块几何一致)。主流两段式:
-        track(coarse=False):有可信上一脚→以脚为中心小窗+相邻帧位移门限,最快最稳;
-        coarse(光点粗位首捕/重捕):以小地图光点换算的屏幕大位置为中心开较大窗、不卡位移门限(光点有镜头惯性误差)。
-        不做模板全图硬找(实测整块全图也凑不齐一致且会乱配)。返回(foot_x,foot_y,conf)或None。"""
+        """整框特征组定脚(用户定稿:多整框模板竞争,颜色0.7+形状0.3取综合分最高一张,≥WHOLE_THR才采信)。
+        两段式:track(coarse=False)以上一脚为中心开小窗+相邻帧位移门限(最快最稳);
+        coarse以小地图光点换算的屏幕大位置为中心开较大窗、不卡位移门限(光点有镜头惯性误差)。
+        每张模板自带脚下基点(ax,ay):模板最佳匹配左上角+基点=脚。返回(foot_x,foot_y,conf)或None。"""
         tpls = self._load_char_vote_set()
         def _diag(reason, extra=""):
             _tn = time.time()
             if _tn - getattr(self, "_vote_diag_t", 0) > 0.6:
                 self._vote_diag_t = _tn
-                _debug_log("[投票诊断] %s tpls=%d 中心=%s 粗位=%d %s" % (
+                _debug_log("[整框诊断] %s tpls=%d 中心=%s 粗位=%d %s" % (
                     reason, len(tpls), "有" if center else "无", 1 if coarse else 0, extra))
         if not tpls:
-            _diag("无特征块(加载失败?)"); return None
+            _diag("无整框模板(先F4采集)"); return None
         if frame is None or center is None:
             return None
-        fh, fw = frame.shape[:2]
-        cx, cy = center
+        fh, fw = frame.shape[:2]; cx, cy = center
+        # 1) 所有模板相对"脚基点"的最大外延(原尺度):保证脚=center时整张人都落在搜索区内
+        L = max(t[2] for t in tpls)
+        R = max(t[5] - t[2] for t in tpls)
+        U = max(t[3] for t in tpls)
+        D = max(t[4] - t[3] for t in tpls)
         if coarse:
-            _hw, _up, _dn = self.VOTE_COARSE_W, self.VOTE_COARSE_UP, self.VOTE_COARSE_DN
+            mx, mu, md = self.WHOLE_COARSE_MX, self.WHOLE_COARSE_MU, self.WHOLE_COARSE_MD
         else:
-            _hw, _up, _dn = self.VOTE_HALF_W, self.VOTE_UP, self.VOTE_DOWN
-        rx1, rx2 = max(0, cx-_hw), min(fw, cx+_hw)
-        ry1, ry2 = max(0, cy-_up), min(fh, cy+_dn)
+            mx, mu, md = self.WHOLE_TRACK_MX, self.WHOLE_TRACK_MU, self.WHOLE_TRACK_MD
+        rx1 = int(max(0, cx - L - mx)); rx2 = int(min(fw, cx + R + mx))
+        ry1 = int(max(0, cy - U - mu)); ry2 = int(min(fh, cy + D + md))
         src = frame[ry1:ry2, rx1:rx2]
         if src.shape[0] < 20 or src.shape[1] < 20:
             _diag("搜索区过小"); return None
-        sc = self.VOTE_WIN_SCALE       # 整块缩半仍清晰、颜色面色不受影响,块数不减也提速
-        _gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+        sc = self.WHOLE_MATCH_SCALE
+        sg = cv2.resize(cv2.cvtColor(src, cv2.COLOR_BGR2GRAY),
+                        (max(1, int(src.shape[1]*sc)), max(1, int(src.shape[0]*sc))))
         _hsv = cv2.cvtColor(src, cv2.COLOR_BGR2HSV)
-        _col = cv2.merge([_hsv[:, :, 0], _hsv[:, :, 1]])      # 颜色搜索图=H色相+S饱和(丢V明度,抗受击明暗)
-        def _scaled(im):
-            if sc != 1.0:
-                return cv2.resize(im, (max(1, int(im.shape[1]*sc)), max(1, int(im.shape[0]*sc))))
-            return im
-        roi_g, roi_c = _scaled(_gray), _scaled(_col)         # 形状搜索图 / 颜色搜索图
-        _thr, Q, min_sup = self.VOTE_THR_WIN, self.VOTE_Q_WIN, self.VOTE_MIN
-        # === 多块几何一致综合投票:每块按【颜色为主+形状为辅】综合相似度找所有达标位置,反算脚、量化到脚网格,
-        # 同块同格只1票→格票数=有多少【不同块】一致支持,真人压倒性多、背景颜色不同凑不齐 ===
-        Ws, Hs = src.shape[1], src.shape[0]
-        gW, gH = int(np.ceil(Ws/Q))+1, int(np.ceil(Hs/Q))+1
-        acc = np.zeros(gW*gH, dtype=np.int32)     # 脚网格累计支持块数
-        n_hit = 0
-        wc, wsh = self.VOTE_W_COLOR, self.VOTE_W_SHAPE
-        for gf, ghalf, cf, chalf, dx, dy in tpls:
-            tg, tc = ghalf, chalf                 # 灰度形状/彩色HS模板(统一缩半)
-            th, tw = tg.shape[:2]
-            if th > roi_g.shape[0] or tw > roi_g.shape[1]:
-                continue
-            r_sh = cv2.matchTemplate(roi_g, tg, cv2.TM_CCOEFF_NORMED)   # 形状分
-            r_co = cv2.matchTemplate(roi_c, tc, cv2.TM_CCOEFF_NORMED)   # 颜色分
-            r = wc*r_co + wsh*r_sh                                     # 综合:颜色为主、形状为辅
-            ys, xs = np.where(r >= _thr)         # 该块所有达标位置(不只取最优点)
-            if xs.size == 0:
-                continue
-            flx = (xs.astype(np.float64)+tw/2.0)/sc - dx   # 脚在搜索区局部坐标(还原原尺度)
-            fly = (ys.astype(np.float64)+th/2.0)/sc - dy
-            if not coarse:                      # 跟踪:候选脚离上一脚(中心)超门限=误配丢;粗位不卡(光点本身有误差)
-                km = np.hypot(flx+rx1-cx, fly+ry1-cy) <= self.VOTE_MAX_MOVE
-                flx, fly = flx[km], fly[km]
-                if flx.size == 0:
-                    continue
-            gx = np.floor(flx/Q).astype(int); gy = np.floor(fly/Q).astype(int)
-            ok = (gx >= 0)&(gx < gW)&(gy >= 0)&(gy < gH)
-            ubi = np.unique(gx[ok]*gH+gy[ok])    # 同块同格只计1票(票数=不同块数)
-            if ubi.size == 0:
-                continue
-            n_hit += 1
-            np.add.at(acc, ubi, 1)
-        sup = int(acc.max()) if acc.size else 0
-        if sup < min_sup:
-            _diag("粗位一致块不足" if coarse else "小窗一致块不足",
-                  "最多%d块一致(门限%d) 有命中块%d/%d" % (sup, min_sup, n_hit, len(tpls)))
-            return None
-        bstar = int(acc.argmax())                # 支持块最多的格=脚(格中心定脚,Q小=±2px,免逐点循环提速)
-        gy0, gx0 = bstar % gH, bstar // gH
-        bx = int(round((gx0+0.5)*Q)) + rx1
-        by = int(round((gy0+0.5)*Q)) + ry1
+        sco = cv2.resize(cv2.merge([_hsv[:, :, 0], _hsv[:, :, 1]]), (sg.shape[1], sg.shape[0]))
+        wc, wsh, thr = self.WHOLE_W_COLOR, self.WHOLE_W_SHAPE, self.WHOLE_THR
+        # 2) 逐模板在缩半搜索区找各自最佳,全局取综合分最高一张(整框大图竞争,背景凑不出整张人)
+        best_v, best_t, best_lx, best_ly = -2.0, None, 0, 0
+        for gh, ch, ax, ay, th0, tw0 in tpls:
+            th, tw = gh.shape[:2]
+            if th > sg.shape[0] or tw > sg.shape[1]:
+                continue  # 模板比搜索区还大(移动过快/粗位窗也没罩住),跳过,靠下帧或上层兜底
+            r_sh = cv2.matchTemplate(sg, gh, cv2.TM_CCOEFF_NORMED)    # 形状分
+            r_co = cv2.matchTemplate(sco, ch, cv2.TM_CCOEFF_NORMED)   # 颜色分
+            r = wc*r_co + wsh*r_sh                                    # 综合:颜色为主、形状为辅
+            _, mv, _, ml = cv2.minMaxLoc(r)
+            if mv > best_v:
+                best_v, best_t, best_lx, best_ly = float(mv), (gh, ch, ax, ay, th0, tw0), ml[0], ml[1]
+        if best_t is None or best_v < thr:
+            _diag("综合分不足", "最高%.3f(门限%.2f)" % (best_v, thr)); return None
+        gh, ch, ax, ay, th0, tw0 = best_t
+        # 3) 缩半loc→原尺度模板左上→加该模板基点=脚
+        top_x = rx1 + best_lx/sc
+        top_y = ry1 + best_ly/sc
+        fx = int(round(top_x + ax))
+        fy = int(round(top_y + ay))
+        if not coarse and np.hypot(fx-cx, fy-cy) > self.WHOLE_MAX_MOVE:
+            _diag("小窗位移超门限", "候选脚(%d,%d)离上一脚%.0f" % (
+                fx, fy, np.hypot(fx-cx, fy-cy)))
+            return None  # 跟踪小窗没跟上→上层_get_player_screen_pos自动转光点粗位大窗重捕
         if coarse:
-            _debug_log("[人物投票] 光点粗位首捕 脚(%d,%d) 粗位(%d,%d) %d块一致(命中%d/%d)" % (
-                bx, by, cx, cy, sup, n_hit, len(tpls)))
-        return bx, by, 1.0
+            _debug_log("[人物整框] 光点粗位首捕 脚(%d,%d) 综合%.3f" % (fx, fy, best_v))
+        return fx, fy, float(best_v)
 
     def _get_player_screen_pos(self, frame):
         """获取人物在游戏画面中的坐标: 多特征融合模板匹配(已含每特征offset到脚)。
