@@ -85,6 +85,19 @@ try:
     faulthandler.enable(file=_cf, all_threads=True)
 except Exception:
     pass
+# 主线程未捕获异常同样留痕:提权隐藏窗口启动时stderr被吞,普通Python异常导致的"安静闪退"看不到报错,
+# 写进和faulthandler同一个crash.log,下次闪退即可拿到完整Python traceback精确定位。
+try:
+    import sys as _sys, traceback as _tbmod
+    def _main_excepthook(et, ev, tb):
+        try:
+            _cf.write("[主线程未捕获异常] " + "".join(_tbmod.format_exception(et, ev, tb)) + "\n"); _cf.flush()
+        except Exception:
+            pass
+        _sys.__excepthook__(et, ev, tb)  # 仍走默认行为(打印到stderr)
+    _sys.excepthook = _main_excepthook
+except Exception:
+    pass
 import subprocess
 import queue
 import random
@@ -3402,9 +3415,10 @@ class MinimapRouteRecorder:
             print("[角色识别] 保存失败:", e)
 
     def _role_anchor_path(self, key):
-        """锚点模板图路径=当前角色套子目录/<key>.png(切套即换目录,各角色互不串图)"""
+        """锚点模板图路径=当前角色套子目录/<key>.png(切套即换目录,各角色互不串图)。
+        高频调用(每帧name/脸/后脑各一次),不在此makedirs;目录由load/select/采集落盘时建好。"""
         cid = (self._role_rec or {}).get("active") if self._role_rec else None
-        return os.path.join(self._role_char_dir(cid or "c0"), "%s.png" % key)
+        return os.path.join(ROLE_REC_DIR, str(cid or "c0"), "%s.png" % key)
 
     def _role_has_anchor(self, key):
         """该锚点在当前套是否已采集(元数据在且模板图存在)"""
@@ -3699,7 +3713,12 @@ class MinimapRouteRecorder:
             okenc, buf = cv2.imencode(".png", out_img)
             if not okenc:
                 self._add_log("锚点图像编码失败,采集作废"); return False
-            buf.tofile(self._role_anchor_path(key))
+            _ap = self._role_anchor_path(key)
+            try:
+                os.makedirs(os.path.dirname(_ap), exist_ok=True)  # 当前套目录兜底(正常load/select已建)
+            except Exception:
+                pass
+            buf.tofile(_ap)
             meta = {"kind": kind,
                     "poly": [[px - x0, py - y0] for px, py in pts],  # 相对裁剪框的顶点
                     "box": [int(x0), int(y0), int(x1), int(y1)],
