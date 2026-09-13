@@ -77,6 +77,14 @@ if sys.platform == 'win32':
         sys.stderr.reconfigure(encoding='utf-8')
     except Exception:
         pass
+# 原生崩溃(段错误)栈记录:Tk跨线程/OpenCV等C层崩溃Python的try拦不住、进程直接消失,faulthandler把所有线程栈写crash.log便于定位
+try:
+    import faulthandler
+    _cf = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crash.log'), 'a', encoding='utf-8')
+    _cf.write('\n===== run %s =====\n' % time.strftime('%Y-%m-%d %H:%M:%S')); _cf.flush()
+    faulthandler.enable(file=_cf, all_threads=True)
+except Exception:
+    pass
 import subprocess
 import queue
 import random
@@ -3283,7 +3291,7 @@ class MinimapRouteRecorder:
         """加载全局角色识别数据(锚点元数据+跟踪参数);无文件/损坏则给默认空壳。
         全局数据只跟角色有关、不随地图方案变,启动直接加载,重采才覆盖。
         锚点模板图存 data/role_recognize/<key>.png,json只记多边形顶点与"锚点中心→脚"偏移。"""
-        rec = {"anchors": {}, "params": dict(ROLE_TRACK_DEFAULT)}
+        rec = {"anchors": {}, "params": dict(ROLE_TRACK_DEFAULT), "blocklist": []}
         try:
             if os.path.exists(ROLE_REC_FILE):
                 with open(ROLE_REC_FILE, "r", encoding="utf-8") as fp:
@@ -3299,6 +3307,10 @@ class MinimapRouteRecorder:
                             rec["params"][k] = dv
         except Exception as e:
             print("[角色识别] 加载失败,用默认:", e)
+        _bl = saved.get("blocklist")
+        if isinstance(_bl, list):  # 角色识别黑名单矩形[x,y,w,h](全局游戏窗口坐标),命中点落在框内不采信,防固定UI误检
+            rec["blocklist"] = [list(map(int, r)) for r in _bl
+                                if isinstance(r, (list, tuple)) and len(r) == 4]
         # 只保留当前锚点定义里存在的key(旧版本残留字段自动丢弃)
         rec["anchors"] = {k: v for k, v in rec["anchors"].items() if k in ROLE_ANCHOR_KEYS}
         self._role_rec = rec
@@ -3578,6 +3590,20 @@ class MinimapRouteRecorder:
         except Exception:
             return np.zeros_like(vv, np.uint8)
 
+    def _role_blocked(self, gx, gy):
+        """全局坐标(gx,gy)是否落在角色识别黑名单矩形内(框内命中不采信,防固定UI/图标被误认成锚点)。"""
+        rec = self._role_rec
+        if not rec:
+            return False
+        for _r in rec.get("blocklist", []):
+            try:
+                _x, _y, _w, _h = _r
+                if _x <= gx <= _x + _w and _y <= gy <= _y + _h:
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _role_anchor_pivot(self, key, tw, th):
         """返回锚点'所描多边形主体'相对外接png左上角的中心偏移(顶点质心);没poly就回退外接png中心。
         用户要求人脸/人名/后脑一律以'描出来的形状中心'为基点,而不是整张外接矩形的几何中心(形状偏画时会偏)。"""
@@ -3626,7 +3652,10 @@ class MinimapRouteRecorder:
                 res = cv2.matchTemplate(scene, tpl, cv2.TM_CCOEFF_NORMED)
                 _, mv, _, ml = cv2.minMaxLoc(res)
                 _ox, _oy = self._role_anchor_pivot(key, tw, th)  # 基点=所描名字形状中心,不是外接png中心
-                return float(mv), (x0 + ml[0] + _ox, y0 + ml[1] + _oy), None
+                _nx, _ny = x0 + ml[0] + _ox, y0 + ml[1] + _oy
+                if self._role_blocked(_nx, _ny):  # 最佳命中落在黑名单矩形=固定UI误检,不采信
+                    return 0.0, None, None
+                return float(mv), (_nx, _ny), None
             # 脸/后脑:灰度TM_CCOEFF_NORMED(减均值、抗明暗,假阳性低=稳版算法;曾试带mask的CCORR/SQDIFF彩色匹配,
             # 亮岩壁/UI会撞恒定0.84假分把定位框带飞,已回滚)。脸:朝右模板+水平镜像各配一次、谁分高判朝向。
             # 脸/后脑:模板多边形外那圈黑会拉低CCOEFF相关分(固定图才55%)。不换算法、只把外圈填成"主体内平均灰度",
@@ -3654,7 +3683,10 @@ class MinimapRouteRecorder:
                 if float(sl2) > best:
                     best, lx, ly, face = float(sl2), ll[0], ll[1], "L"
             _ox2, _oy2 = self._role_anchor_pivot(key, tw, th)  # 命中点=所描形状(脸/后脑)自身中心
-            return best, (x0 + lx + _ox2, y0 + ly + _oy2), face
+            _bx, _by = x0 + lx + _ox2, y0 + ly + _oy2
+            if self._role_blocked(_bx, _by):  # 最佳命中落在黑名单矩形=固定UI误检,不采信
+                return 0.0, None, None
+            return best, (_bx, _by), face
         except Exception:
             return 0.0, None, None
 
@@ -3691,6 +3723,38 @@ class MinimapRouteRecorder:
             self._save_role_recognize()
         if getattr(self, '_role_tpl_c', None) is not None:  # 移除后清模板缓存
             self._role_tpl_c.pop(key, None)
+
+    def _role_pick_blocklist_region(self):
+        """在游戏画面框一个矩形加入角色识别黑名单(框内不采信锚点命中,防固定UI/图标误检)。
+        抓帧+框选与「人物特征截图」_capture_character_feature逐字同款:单次_capture_window→统一框选器_interactive_box_select
+        (WINDOW_NORMAL+resizeWindow,拖拽框选/方向键微调/回车确认/ESC或右键取消)。不withdraw管理窗、不前置游戏、
+        不自写cv2循环、不多帧筛选——那些额外动作正是灰屏/残影来源,人物特征从同一tk窗触发单次抓帧一直正常。"""
+        try:
+            if self.hwnd is None:
+                self._add_log("请先绑定游戏窗口"); return
+            self._update_window_rect()
+            frame = self._capture_window()
+            if frame is None:  # 与人物特征截图同款健壮性:瞬时失败提示重试
+                self._add_log("截图失败,请重试"); return
+            fh, fw = frame.shape[:2]
+            if fh <= 0 or fw <= 0:
+                self._add_log("截图失败"); return
+            x, y, w, h = self._interactive_box_select("Select Blocklist", frame)  # 直接复用人物特征同一个框选器
+            if w <= 0 or h <= 0:
+                return  # ESC/右键取消
+            if w < 8 or h < 8:
+                self._add_log("框选区域太小,请重新框选"); return
+            added = [int(x), int(y), int(w), int(h)]
+            self._role_rec.setdefault("blocklist", []).append(added)
+            self._save_role_recognize()
+            self._add_log("已加角色黑名单 %s" % added)
+            if hasattr(self, "_role_refresh_blocklist"):  # 同步刷新管理窗黑名单列表
+                try:
+                    self._role_refresh_blocklist()
+                except Exception:
+                    pass
+        except Exception as e:
+            print("[角色识别] 黑名单框选异常:", e); _debug_log("[角色识别] 黑名单框选异常: %s" % e)
 
     def _open_role_recognize_window(self):
         """打开「角色识别」管理窗(2026-09-13对齐心火):全局锚点采集/移除+缩略图+8项跟踪参数。
@@ -3791,20 +3855,16 @@ class MinimapRouteRecorder:
         self._role_refresh_window = _rebuild_anchors
         _rebuild_anchors()
 
-        # 实时识别率:每500ms截一帧匹配已采锚点,顶部显示坐标/识别率/朝向(对齐心火顶部状态行)
+        # 实时识别率:直接读检测线程现成分数刷新控件。【角色窗彻底不用Tk after定时器】拖动标题栏时Windows进入
+        # 模态移动循环,after回调会在其中嵌套进入"不可重入"的Tcl解释器→进程直接退出(faulthandler都抓不到栈,
+        # 这正是"角色窗一移动就闪退"的根因)。改为OpenCV主循环在左键松开(=没在拖窗)的安全时机每500ms直接调
+        # self._role_live_do一次,和其他不崩的弹窗一样窗内无任何定时器。
         _cn_map = {k: c for k, c, _ in ROLE_ANCHORS}
 
-        self._role_live_on = True
-        def _live_tick():
-            try:
-                _alive = bool(win.winfo_exists())
-            except Exception:
-                _alive = False
-            if not _alive or not getattr(self, '_role_live_on', False):
-                return  # 窗口已关/正在关:停after链(旧版每500ms自己抓帧全图匹配,拖动/关窗时与tk交错会整程序闪退)
+        def _do_refresh():
             try:
                 thr = float(self._role_rec.get("params", {}).get("thr", ROLE_TRACK_DEFAULT["thr"]))
-                scores = getattr(self, "_role_last_scores", {}) or {}  # 直接读检测线程现成分数,不再自己抓帧匹配
+                scores = getattr(self, "_role_last_scores", {}) or {}  # 读检测线程现成分数,不自己抓帧
                 for _k, _lbl in getattr(self, "_row_score_lbl", {}).items():  # 每行实时识别率
                     _t = scores.get(_k)
                     if _t is not None:
@@ -3826,19 +3886,45 @@ class MinimapRouteRecorder:
                     self._role_live_lbl.config(fg="#9E9E9E", bg="#F5F5F5")
             except Exception:
                 pass
-            try:
-                if win.winfo_exists() and getattr(self, '_role_live_on', False):
-                    win.after(500, _live_tick)
-            except Exception:
-                pass
-        win.after(300, _live_tick)
+        self._role_live_do = _do_refresh   # 主循环持有的刷新闭包;关窗置None即停
+        self._role_live_next = 0.0         # 下次允许刷新的时间戳(主循环侧节流500ms)
 
         def on_close():
-            self._role_live_on = False  # 先停定时刷新链,再关窗,避免after回调访问已销毁控件
+            self._role_live_do = None  # 先断开主循环刷新闭包,避免关窗后还去config已销毁控件
             _apply_params(); self._close_window("_role_rec_window")
+        # ===== 角色识别黑名单(放最下方:框内不采信任何锚点命中,防固定UI/图标误检;对齐心火) =====
+        blk_outer = tk.LabelFrame(win, text="黑名单区域（框内不识别人物锚点·防UI误检）", font=("微软雅黑", 9, "bold"))
+        blk_outer.pack(fill="x", padx=8, pady=4, side="bottom")
+        blk_top = tk.Frame(blk_outer); blk_top.pack(fill="x", padx=6, pady=2)
+        self._role_blk_list_frame = tk.Frame(blk_outer); self._role_blk_list_frame.pack(fill="x", padx=6)
+
+        def _rebuild_blocklist():
+            for w in self._role_blk_list_frame.winfo_children():
+                w.destroy()
+            bl = self._role_rec.get("blocklist", [])
+            if not bl:
+                tk.Label(self._role_blk_list_frame, text="（暂无·点左侧在游戏画面框选要屏蔽的区域）", fg="gray",
+                         font=("微软雅黑", 8)).pack(anchor="w")
+            for i, rr in enumerate(bl):
+                row = tk.Frame(self._role_blk_list_frame); row.pack(fill="x", pady=1)
+
+                def do_del(idx=i):
+                    self._role_rec["blocklist"].pop(idx); self._save_role_recognize(); _rebuild_blocklist()
+                tk.Label(row, text="#%d  x%d y%d %d×%d" % (i + 1, rr[0], rr[1], rr[2], rr[3]), width=22,
+                         anchor="w", font=("微软雅黑", 8)).pack(side="left")
+                tk.Button(row, text="删除", width=5, command=do_del).pack(side="left")
+        self._role_refresh_blocklist = _rebuild_blocklist
+        tk.Button(blk_top, text="在画面框选添加", width=14,
+                  command=self._role_pick_blocklist_region).pack(side="left")
+
+        def _clear_blk():
+            self._role_rec["blocklist"] = []; self._save_role_recognize(); _rebuild_blocklist()
+        tk.Button(blk_top, text="清空全部", width=10, command=_clear_blk).pack(side="left", padx=6)
+        _rebuild_blocklist()
+
         win.protocol("WM_DELETE_WINDOW", on_close)
         tk.Button(win, text="保存并关闭", width=16, height=2, bg="#2196F3", fg="white",
-                  command=on_close).pack(pady=8)
+                  command=on_close).pack(side="bottom", pady=8)
 
     def _open_char_feature_window(self):
         """打开人物特征管理弹窗：左右分栏，左边特征列表(含偏移X/Y)，右边操作区"""
@@ -12042,6 +12128,20 @@ class MinimapRouteRecorder:
                                 gdi32.LineTo(hdc, int(_p0[0]), int(_p0[1]))  # 闭合(用户:框上不显示任何文字)
                                 gdi32.SelectObject(hdc, old_apen)
 
+                            # 角色识别黑名单矩形(纯红0x0000FF细线,调试显示开时可见,避开品红透明色键)
+                            for _br in (data.get('role_blocklist') or []):
+                                try:
+                                    _bx0, _by0, _bw, _bh = int(_br[0]), int(_br[1]), int(_br[2]), int(_br[3])
+                                    _bpen = gdi32.CreatePen(0, 1, 0x0000FF)
+                                    if _bpen:
+                                        gdi_objs.append(_bpen)
+                                    _old_bpen = gdi32.SelectObject(hdc, _bpen)
+                                    gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷只描边
+                                    gdi32.Rectangle(hdc, _bx0, _by0, _bx0 + _bw, _by0 + _bh)
+                                    gdi32.SelectObject(hdc, _old_bpen)
+                                except Exception:
+                                    pass
+
                             # 心火式两个实战范围框(都以人物为中心、随人移动):黄=怪物识别(YOLO)范围,紫=人物技能(攻击射程)范围
                             # 黄=怪物识别范围;技能范围用蓝(禁用品红0xFF00FF=透明色键,旧紫框被抠空才看不见,用户:换蓝)
                             for _rk2, _rc2, _rlab in (("yolo_crop", 0x0000FFFF, "怪物识别"),
@@ -18722,21 +18822,39 @@ class MinimapRouteRecorder:
                                getattr(self, '_ladder_feature_window', None) is not None or
                                getattr(self, '_role_rec_window', None) is not None)
                     if has_win:
-                        # 处理所有待处理事件（最多10ms，避免阻塞主循环），提高弹窗输入/移动响应速度
-                        # 注意：必须循环调用dooneevent直到没有事件或超时，否则after定时器事件可能不被处理
-                        _tk_start = time.time()
-                        _tk_count = 0
-                        while time.time() - _tk_start < 0.010:
-                            if not self._tk_root.dooneevent(0):  # 0 = 不等待，有事件就处理
-                                # 没有事件时短暂sleep，避免CPU占用过高
-                                time.sleep(0.001)
-                                _tk_count += 1
-                                if _tk_count > 3:  # 连续3次没有事件就退出
-                                    break
-                            else:
-                                _tk_count = 0  # 有事件时重置计数
+                        # 【防拖动闪退·2026-09-13】OpenCV主循环线程在跨线程手动泵Tk事件;按住左键拖动Toplevel标题栏时
+                        # Windows进入模态移动循环,此刻再dooneevent并发泵同一Tcl队列(Tk非线程安全)会段错误、整程序闪退
+                        # (角色识别窗一移动就崩的根因)。故左键按住期间(=正在拖窗/点控件)跳过泵事件、松开再泵,拖动交Windows独占。
+                        _lb_down = bool(user32.GetAsyncKeyState(0x01) & 0x8000)  # 0x01=VK_LBUTTON
+                        if not _lb_down:
+                            # 处理所有待处理事件（最多10ms，避免阻塞主循环），提高弹窗输入/移动响应速度
+                            # 注意：必须循环调用dooneevent直到没有事件或超时，否则after定时器事件可能不被处理
+                            _tk_start = time.time()
+                            _tk_count = 0
+                            while time.time() - _tk_start < 0.010:
+                                if not self._tk_root.dooneevent(0):  # 0 = 不等待，有事件就处理
+                                    # 没有事件时短暂sleep，避免CPU占用过高
+                                    time.sleep(0.001)
+                                    _tk_count += 1
+                                    if _tk_count > 3:  # 连续3次没有事件就退出
+                                        break
+                                else:
+                                    _tk_count = 0  # 有事件时重置计数
             except Exception as e:
                 _debug_log("[方案窗口] tk update异常: %s" % e)
+
+            # 角色识别窗实时识别率:窗内不用Tk after(拖动模态循环里after嵌套Tcl会闪退),
+            # 改由主循环在"左键松开=没在拖窗"时每500ms直接刷新一次控件(与Tk同一线程、非模态重入,安全)
+            try:
+                if getattr(self, '_role_live_do', None) is not None and \
+                        getattr(self, '_role_rec_window', None) is not None and \
+                        not bool(user32.GetAsyncKeyState(0x01) & 0x8000):
+                    _nowv = time.time()
+                    if _nowv >= getattr(self, '_role_live_next', 0.0):
+                        self._role_live_next = _nowv + 0.5
+                        self._role_live_do()
+            except Exception:
+                pass
 
             # === 偏移视觉反馈（游戏画面中角色匹配点+偏移点）===
             self._seg_loop['7a'] = self._seg_loop.get('7a', 0) + time.time() - self._lk.get('after_combat', time.time())
@@ -18811,6 +18929,9 @@ class MinimapRouteRecorder:
             # 新角色锚点:识别到的缩小多边形框 + 局部跟踪搜索范围框(每帧由检测线程写入,识别不到就为空)
             self._monster_overlay_data["role_anchor_polys"] = getattr(self, "_role_anchor_polys", {})
             self._monster_overlay_data["role_search_box"] = getattr(self, "_role_search_box", None)
+            # 角色识别黑名单矩形(调试显示开时画红框,让人看到哪片被屏蔽);wnd_proc不能用self,走overlay_data
+            self._monster_overlay_data["role_blocklist"] = \
+                (self._role_rec or {}).get("blocklist", []) if self._role_rec else []
             # 黄/紫范围框直接按人物显示点几何算(不依赖B线程:上梯冻结B或未运行时也必须显示,用户2026-09-13)
             try:
                 _rf0 = self._raw_frame
