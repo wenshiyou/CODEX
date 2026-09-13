@@ -3334,7 +3334,7 @@ class MinimapRouteRecorder:
         旧单套格式(顶层anchors+平铺<png>)首次加载自动迁移成「角色一」、平铺png移进 c0/ 子目录。"""
         import shutil
         rec = {"anchors": {}, "params": dict(ROLE_TRACK_DEFAULT), "blocklist": [],
-               "active": None, "characters": [], "_seq": 0}
+               "blocklist_monster": False, "active": None, "characters": [], "_seq": 0}
         saved = {}
         _migrated = False  # 本次是否发生"旧单套→多套"迁移;迁移完落盘一次,json一步转新结构
         try:
@@ -3348,10 +3348,11 @@ class MinimapRouteRecorder:
                         rec["params"][k] = float(p[k]) if isinstance(dv, float) else int(float(p.get(k, dv)))
                     except (TypeError, ValueError):
                         rec["params"][k] = dv
-            _bl = saved.get("blocklist")  # 黑名单=全局共用一套
+            _bl = saved.get("blocklist")  # 黑名单=全局共用一套(可多处矩形,同时生效)
             if isinstance(_bl, list):
                 rec["blocklist"] = [list(map(int, r)) for r in _bl
                                     if isinstance(r, (list, tuple)) and len(r) == 4]
+            rec["blocklist_monster"] = bool(saved.get("blocklist_monster", False))  # 黑名单是否同时对怪物YOLO生效(默认只人物)
             try:
                 rec["_seq"] = int(saved.get("_seq", 0))
             except Exception:
@@ -3406,6 +3407,7 @@ class MinimapRouteRecorder:
             cur["anchors"] = rec.get("anchors", {})  # 顶层与当前套保持同步
             out = {"params": rec.get("params", dict(ROLE_TRACK_DEFAULT)),
                    "blocklist": rec.get("blocklist", []),
+                   "blocklist_monster": bool(rec.get("blocklist_monster", False)),
                    "active": rec.get("active"),
                    "_seq": int(rec.get("_seq", 0)),
                    "characters": rec.get("characters", [])}
@@ -3785,6 +3787,38 @@ class MinimapRouteRecorder:
                 continue
         return False
 
+    def _role_sub_rects(self, S, tw, th):
+        """搜索矩形S=(x0,y0,x1,y1)全局坐标,几何扣除所有黑名单矩形后,拆成若干【不含黑名单、且放得下模板tw×th】
+        的不重叠子矩形(全局)。用户:400×300识别区拉黑100×300→模板只在剩下300×300上滑窗、根本不扫黑名单。
+        做法:依次用每个黑名单矩形对当前所有子矩形做矩形差集(相交就切成:上/下两条【全宽】横带+黑名单Y段内的
+        左/右两块,四块拼起来正好=原子块减黑名单、不多扣也不漏),递归处理多个黑名单;最后丢掉宽<tw或高<th的碎片。
+        注意上下带必须全宽、左右块只占黑名单的Y段(写反会让多条不同宽横带之间的干净区域被错误收窄=过度扣除)。
+        无黑名单时原样返回[S]。"""
+        x0, y0, x1, y1 = S
+        rects = [[int(x0), int(y0), int(x1), int(y1)]]
+        try:
+            for _r in (self._role_rec or {}).get("blocklist", []):
+                bx, by, bw, bh = int(_r[0]), int(_r[1]), int(_r[2]), int(_r[3])
+                bx1, by1 = bx + bw, by + bh
+                out = []
+                for rx0, ry0, rx1, ry1 in rects:
+                    if bx >= rx1 or bx1 <= rx0 or by >= ry1 or by1 <= ry0:  # 与该黑名单不相交→整块保留
+                        out.append([rx0, ry0, rx1, ry1]); continue
+                    ix0, ix1 = max(rx0, bx), min(rx1, bx1)  # 与黑名单重叠的X/Y段
+                    iy0, iy1 = max(ry0, by), min(ry1, by1)
+                    if iy0 > ry0:  # 上横带·全宽
+                        out.append([rx0, ry0, rx1, iy0])
+                    if iy1 < ry1:  # 下横带·全宽
+                        out.append([rx0, iy1, rx1, ry1])
+                    if ix0 > rx0 and iy1 > iy0:  # 黑名单Y段内·左侧块
+                        out.append([rx0, iy0, ix0, iy1])
+                    if ix1 < rx1 and iy1 > iy0:  # 黑名单Y段内·右侧块
+                        out.append([ix1, iy0, rx1, iy1])
+                rects = out
+        except Exception:
+            return [[int(x0), int(y0), int(x1), int(y1)]]
+        return [[a, b, c, d] for a, b, c, d in rects if (c - a) >= tw and (d - b) >= th]
+
     def _role_anchor_pivot(self, key, tw, th):
         """返回锚点'所描多边形主体'相对外接png左上角的中心偏移(顶点质心);没poly就回退外接png中心。
         用户要求人脸/人名/后脑一律以'描出来的形状中心'为基点,而不是整张外接矩形的几何中心(形状偏画时会偏)。"""
@@ -3820,54 +3854,58 @@ class MinimapRouteRecorder:
             src = frame[y0:y1, x0:x1]
             if src.shape[0] < th or src.shape[1] < tw:
                 return 0.0, None, None
-            if key == "name" or key.startswith("pet"):
-                # 同一帧、同一搜索窗的二值化结果在name/pet间复用,只算一次
-                _ck = (id(frame), None if box is None else (x0, y0, x1, y1))
-                _cache = getattr(self, '_role_bin_cache', None)
-                if _cache is not None and _cache[0] == _ck[0] and _cache[1] == _ck[1]:
-                    scene = _cache[2]
-                else:
-                    vv = cv2.cvtColor(src, cv2.COLOR_BGR2HSV)[:, :, 2]
-                    scene = self._role_text_binarize(vv, denoise=False)
-                    self._role_bin_cache = (_ck[0], _ck[1], scene)
-                res = cv2.matchTemplate(scene, tpl, cv2.TM_CCOEFF_NORMED)
-                _, mv, _, ml = cv2.minMaxLoc(res)
-                _ox, _oy = self._role_anchor_pivot(key, tw, th)  # 基点=所描名字形状中心,不是外接png中心
-                _nx, _ny = x0 + ml[0] + _ox, y0 + ml[1] + _oy
-                if self._role_blocked(_nx, _ny):  # 最佳命中落在黑名单矩形=固定UI误检,不采信
-                    return 0.0, None, None
-                return float(mv), (_nx, _ny), None
-            # 脸/后脑:灰度TM_CCOEFF_NORMED(减均值、抗明暗,假阳性低=稳版算法;曾试带mask的CCORR/SQDIFF彩色匹配,
-            # 亮岩壁/UI会撞恒定0.84假分把定位框带飞,已回滚)。脸:朝右模板+水平镜像各配一次、谁分高判朝向。
-            # 脸/后脑:模板多边形外那圈黑会拉低CCOEFF相关分(固定图才55%)。不换算法、只把外圈填成"主体内平均灰度",
-            # CCOEFF减均值后外圈≈0贡献=软掩膜,主体分上来;算法仍是减均值的CCOEFF、抗明暗,不会像CCORR在亮区撞假高分。
-            if not (key == "name" or key.startswith("pet")):
+            ox, oy = self._role_anchor_pivot(key, tw, th)  # 基点=所描形状中心(名字/脸/后脑统一)
+            is_text = (key == "name") or key.startswith("pet")
+            # 脸/后脑:模板多边形外圈填主体内平均灰度,CCOEFF减均值后外圈≈0贡献(固定图也能上分数);脸另备镜像定朝向
+            tpl_m = None
+            if not is_text:
                 try:
-                    _rec0 = self._role_rec or self._load_role_recognize()
-                    _pp0 = (_rec0 or {}).get("anchors", {}).get(key, {}).get("poly")
+                    _pp0 = (self._role_rec or {}).get("anchors", {}).get(key, {}).get("poly")
                     if _pp0:
                         _mk0 = np.zeros(tpl.shape[:2], np.uint8)
                         cv2.fillPoly(_mk0, [np.array(_pp0, np.int32)], 255)
                         if (_mk0 > 0).any():
-                            _mval = tpl[_mk0 > 0].mean()
-                            tpl = tpl.copy()
-                            tpl[_mk0 == 0] = int(_mval)  # 外圈填主体均值,减均值后近似零贡献
+                            tpl = tpl.copy(); tpl[_mk0 == 0] = int(tpl[_mk0 > 0].mean())
                 except Exception:
                     pass
-            gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
-            res = cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED)
-            _, sr, _, sl = cv2.minMaxLoc(res)
-            best, lx, ly, face = float(sr), sl[0], sl[1], "R"
-            if key == "face_r":
-                res2 = cv2.matchTemplate(gray, cv2.flip(tpl, 1), cv2.TM_CCOEFF_NORMED)
-                _, sl2, _, ll = cv2.minMaxLoc(res2)
-                if float(sl2) > best:
-                    best, lx, ly, face = float(sl2), ll[0], ll[1], "L"
-            _ox2, _oy2 = self._role_anchor_pivot(key, tw, th)  # 命中点=所描形状(脸/后脑)自身中心
-            _bx, _by = x0 + lx + _ox2, y0 + ly + _oy2
-            if self._role_blocked(_bx, _by):  # 最佳命中落在黑名单矩形=固定UI误检,不采信
+                if key == "face_r":
+                    tpl_m = cv2.flip(tpl, 1)
+            # 核心:搜索矩形几何扣除黑名单→只在剩余子矩形上滑窗比对(模板根本不扫黑名单那片),逐子矩形取全局最佳
+            subs = self._role_sub_rects((x0, y0, x1, y1), tw, th)
+            best_s, best_xy, best_face = -2.0, None, None
+            _binc = getattr(self, '_role_bin_cache', None)  # name/pet二值化按子矩形缓存,同帧复用
+            if not isinstance(_binc, dict):
+                _binc = {}; self._role_bin_cache = _binc
+            for (gx0, gy0, gx1, gy1) in subs:
+                sub = frame[gy0:gy1, gx0:gx1]
+                if sub.shape[0] < th or sub.shape[1] < tw:
+                    continue
+                if is_text:  # 名字/宠物名:V通道OTSU二值(黑底白字)再比,和采集同源
+                    _ck = (id(frame), (gx0, gy0, gx1, gy1))
+                    scene = _binc.get(_ck)
+                    if scene is None:
+                        scene = self._role_text_binarize(cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 2], denoise=False)
+                        _binc[_ck] = scene
+                        if len(_binc) > 48:
+                            _binc.clear(); _binc[_ck] = scene
+                    _, mv, _, ml = cv2.minMaxLoc(cv2.matchTemplate(scene, tpl, cv2.TM_CCOEFF_NORMED))
+                    if float(mv) > best_s:
+                        best_s, best_xy, best_face = float(mv), (gx0 + ml[0] + ox, gy0 + ml[1] + oy), None
+                else:  # 脸/后脑:灰度比;脸再比镜像,谁高定朝向
+                    gray = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+                    _, sr, _, sl = cv2.minMaxLoc(cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED))
+                    ss, ll, ff = float(sr), sl, "R"
+                    if tpl_m is not None:
+                        _, s2, _, l2 = cv2.minMaxLoc(cv2.matchTemplate(gray, tpl_m, cv2.TM_CCOEFF_NORMED))
+                        if float(s2) > ss:
+                            ss, ll, ff = float(s2), l2, "L"
+                    if ss > best_s:
+                        best_s, best_xy, best_face = ss, (gx0 + ll[0] + ox, gy0 + ll[1] + oy), ff
+            if best_xy is None:  # 搜索区被黑名单全部扣除/都放不下模板
                 return 0.0, None, None
-            return best, (_bx, _by), face
+            if self._role_blocked(best_xy[0], best_xy[1]):  # 双保险(几何扣除后理论不会命中框内)
+                return 0.0, None, None
+            return best_s, best_xy, best_face
         except Exception:
             return 0.0, None, None
 
@@ -3906,36 +3944,87 @@ class MinimapRouteRecorder:
             self._role_tpl_c.pop(key, None)
 
     def _role_pick_blocklist_region(self):
-        """在游戏画面框一个矩形加入角色识别黑名单(框内不采信锚点命中,防固定UI/图标误检)。
-        抓帧+框选与「人物特征截图」_capture_character_feature逐字同款:单次_capture_window→统一框选器_interactive_box_select
-        (WINDOW_NORMAL+resizeWindow,拖拽框选/方向键微调/回车确认/ESC或右键取消)。不withdraw管理窗、不前置游戏、
-        不自写cv2循环、不多帧筛选——那些额外动作正是灰屏/残影来源,人物特征从同一tk窗触发单次抓帧一直正常。"""
+        """在游戏截图上拖一个矩形加入角色识别黑名单(框内不采信锚点命中,防固定UI/图标误检)。
+        完全照抄角色锚点采集_capture_role_anchor的成熟窗口骨架:cv2 WINDOW_AUTOSIZE+moveWindow到游戏窗口+TOPMOST、
+        先withdraw tk管理窗、setMouseCallback、while waitKey、finally里deiconify恢复管理窗。
+        鼠标回调(x,y)永远是【截图内像素坐标】,与窗口在屏幕的位置/标题栏/DPI无关,而截图=_capture_window按window_rect抓、
+        检测帧和_role_blocked判定、主蒙板客户区也都=window_rect坐标,四者同源天然1:1不偏移(透明分层蒙板colorkey像素鼠标会
+        穿透、收不到左键,故不在蒙板上拖)。操作:左键拖矩形(可重拖),回车/空格确认,ESC或右键取消。"""
+        win = "拉黑区域框选(左键拖框 回车确认 ESC取消)"
+        rw = getattr(self, "_role_rec_window", None)
+        ok = False
+        added = None
         try:
             if self.hwnd is None:
                 self._add_log("请先绑定游戏窗口"); return
-            self._update_window_rect()
+            self._update_window_rect(); wr = self.window_rect
+            if not wr or wr.get("left", 0) <= -30000 or wr.get("width", 0) < 200:
+                self._add_log("游戏窗口未正常显示,无法框选"); return
             frame = self._capture_window()
-            if frame is None:  # 与人物特征截图同款健壮性:瞬时失败提示重试
-                self._add_log("截图失败,请重试"); return
-            fh, fw = frame.shape[:2]
-            if fh <= 0 or fw <= 0:
-                self._add_log("截图失败"); return
-            x, y, w, h = self._interactive_box_select("Select Blocklist", frame)  # 直接复用人物特征同一个框选器
-            if w <= 0 or h <= 0:
-                return  # ESC/右键取消
-            if w < 8 or h < 8:
-                self._add_log("框选区域太小,请重新框选"); return
-            added = [int(x), int(y), int(w), int(h)]
+            if frame is None:
+                self._add_log("截图为空,请重试"); return
+            H, W = frame.shape[:2]
+            try:  # 隐藏tk管理窗,避免tk/cv2冲突闪退(同锚点采集)
+                if rw is not None: rw.withdraw(); rw.update()
+            except Exception:
+                pass
+            cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
+            try:
+                cv2.moveWindow(win, int(wr.get("left", 40)), int(wr.get("top", 40)))
+                cv2.setWindowProperty(win, cv2.WND_PROP_TOPMOST, 1)
+            except Exception:
+                pass
+            st = {"x1": -1, "y1": -1, "x2": -1, "y2": -1, "drag": False, "cancel": False}
+
+            def on_mouse(e, x, y, fl, p):
+                x, y = int(x), int(y)
+                if e == cv2.EVENT_LBUTTONDOWN:
+                    st["drag"] = True; st["x1"], st["y1"], st["x2"], st["y2"] = x, y, x, y
+                elif e == cv2.EVENT_MOUSEMOVE and st["drag"]:
+                    st["x2"], st["y2"] = x, y
+                elif e == cv2.EVENT_LBUTTONUP:
+                    st["drag"] = False
+                elif e == cv2.EVENT_RBUTTONDOWN:
+                    st["cancel"] = True
+
+            cv2.setMouseCallback(win, on_mouse)
+            while True:
+                disp = frame.copy()
+                if st["x2"] >= 0:
+                    _a, _b = min(st["x1"], st["x2"]), min(st["y1"], st["y2"])
+                    _c, _d = max(st["x1"], st["x2"]), max(st["y1"], st["y2"])
+                    cv2.rectangle(disp, (_a, _b), (_c, _d), (0, 0, 255), 2)
+                cv2.imshow(win, disp)
+                k = cv2.waitKey(20) & 0xFF
+                if k == 27 or st["cancel"]:
+                    st["cancel"] = True; break
+                if k in (13, 32) and st["x2"] >= 0 and (st["x2"] != st["x1"] or st["y2"] != st["y1"]):
+                    ok = True; break
+            if ok:
+                x0, y0 = min(st["x1"], st["x2"]), min(st["y1"], st["y2"])
+                ww, hh = abs(st["x2"] - st["x1"]), abs(st["y2"] - st["y1"])
+                if ww < 8 or hh < 8:
+                    self._add_log("框选区域太小,请重新框选"); return
+                added = [int(x0), int(y0), int(ww), int(hh)]
+        except Exception as e:
+            import traceback; traceback.print_exc(); print("[角色识别] 黑名单框选异常:", e)
+            _debug_log("[角色识别] 黑名单框选异常: %s" % e)
+        finally:
+            try: cv2.destroyWindow(win)
+            except Exception: pass
+            for _ in range(2):
+                try: cv2.waitKey(20)
+                except Exception: pass
+            try:  # 恢复tk管理窗(同锚点采集收尾)
+                if rw is not None: rw.deiconify(); rw.lift(); rw.update()
+            except Exception: pass
+        if added is not None:
             self._role_rec.setdefault("blocklist", []).append(added)
             self._save_role_recognize()
             self._add_log("已加角色黑名单 %s" % added)
-            if hasattr(self, "_role_refresh_blocklist"):  # 同步刷新管理窗黑名单列表
-                try:
-                    self._role_refresh_blocklist()
-                except Exception:
-                    pass
-        except Exception as e:
-            print("[角色识别] 黑名单框选异常:", e); _debug_log("[角色识别] 黑名单框选异常: %s" % e)
+            if hasattr(self, "_role_refresh_blocklist"):
+                try: self._role_refresh_blocklist()
+                except Exception: pass
 
     def _open_role_recognize_window(self):
         """打开「角色识别」管理窗(2026-09-13对齐心火):全局锚点采集/移除+缩略图+8项跟踪参数。
@@ -4127,7 +4216,7 @@ class MinimapRouteRecorder:
             self._role_live_do = None  # 先断开主循环刷新闭包,避免关窗后还去config已销毁控件
             _apply_params(); self._close_window("_role_rec_window")
         # ===== 角色识别黑名单(放最下方:框内不采信任何锚点命中,防固定UI/图标误检;对齐心火) =====
-        blk_outer = tk.LabelFrame(win, text="黑名单区域（框内不识别人物锚点·防UI误检）", font=("微软雅黑", 9, "bold"))
+        blk_outer = tk.LabelFrame(win, text="黑名单区域（默认只屏蔽人物锚点；勾选后怪物YOLO也屏蔽；可框多处同时生效）", font=("微软雅黑", 9, "bold"))
         blk_outer.pack(fill="x", padx=8, pady=4, side="bottom")
         blk_top = tk.Frame(blk_outer); blk_top.pack(fill="x", padx=6, pady=2)
         self._role_blk_list_frame = tk.Frame(blk_outer); self._role_blk_list_frame.pack(fill="x", padx=6)
@@ -4154,6 +4243,11 @@ class MinimapRouteRecorder:
         def _clear_blk():
             self._role_rec["blocklist"] = []; self._save_role_recognize(); _rebuild_blocklist()
         tk.Button(blk_top, text="清空全部", width=10, command=_clear_blk).pack(side="left", padx=6)
+        _blk_mon_var = tk.BooleanVar(value=bool(self._role_rec.get("blocklist_monster", False)))  # 默认只对人物,勾选才对怪
+        def _toggle_blk_mon():
+            self._role_rec["blocklist_monster"] = bool(_blk_mon_var.get()); self._save_role_recognize()
+        tk.Checkbutton(blk_top, text="对怪物也生效", variable=_blk_mon_var,
+                       command=_toggle_blk_mon, font=("微软雅黑", 8)).pack(side="left", padx=6)
         _rebuild_blocklist()
 
         win.protocol("WM_DELETE_WINDOW", on_close)
@@ -10430,9 +10524,44 @@ class MinimapRouteRecorder:
                  "cancel": False}
         win = caption
         _cv.namedWindow(win, _cv.WINDOW_NORMAL)
-        _cv.moveWindow(win, self.window_rect["left"], self.window_rect["top"])
-        _cv.resizeWindow(win, fw, fh)
+        _cv.resizeWindow(win, fw, fh)  # 客户区(图像显示区)=游戏窗口尺寸
         _cv.imshow(win, frame)
+        _cv.waitKey(1)  # 先让窗口真正创建出来,下面才能FindWindow做精确对齐
+        # 客户区精确覆盖游戏window_rect:OpenCV自带窗有标题栏/边框,moveWindow只对齐"窗外框",图像客户区会比
+        # 真实游戏窗口错位一个标题栏+边框;黑名单存的是窗口绝对坐标,错位即表现为"保存后红框和原窗口对不上"。
+        # 用win32反推客户区屏幕原点、移动窗外框使客户区原点=(window_rect.left,top)、客户区尺寸=fw×fh,
+        # 这样框选坐标与抓帧/主蒙板严格1:1同源(人物特征/F9等所有框选一并受益)。
+        try:
+            import ctypes as _ct
+            from ctypes import wintypes as _wt
+            _u = _ct.windll.user32
+            _u.FindWindowW.restype = _wt.HWND
+            _u.FindWindowW.argtypes = [_wt.LPCWSTR, _wt.LPCWSTR]
+            _u.GetClientRect.argtypes = [_wt.HWND, _ct.c_void_p]
+            _u.GetWindowRect.argtypes = [_wt.HWND, _ct.c_void_p]
+            _u.ClientToScreen.argtypes = [_wt.HWND, _ct.c_void_p]
+            _u.SetWindowPos.argtypes = [_wt.HWND, _wt.HWND, _ct.c_int, _ct.c_int,
+                                        _ct.c_int, _ct.c_int, _wt.UINT]
+            _wh = _u.FindWindowW(None, win)
+            _wr = self.window_rect
+
+            class _PT(_ct.Structure):
+                _fields_ = [("x", _ct.c_long), ("y", _ct.c_long)]
+            if _wh and _wr:
+                for _ in range(2):  # 边框厚度固定,迭代2次收敛(1次即可,二次保险);NOSIZE|NOZORDER=0x1|0x4
+                    _p0 = _PT(0, 0); _u.ClientToScreen(_wh, _ct.byref(_p0))
+                    _wr0 = _wt.RECT(); _u.GetWindowRect(_wh, _ct.byref(_wr0))
+                    _u.SetWindowPos(_wh, None,
+                                    int(_wr0.left + _wr["left"] - _p0.x),
+                                    int(_wr0.top + _wr["top"] - _p0.y),
+                                    0, 0, 0x0001 | 0x0004)
+            else:
+                _cv.moveWindow(win, self.window_rect["left"], self.window_rect["top"])
+        except Exception:
+            try:
+                _cv.moveWindow(win, self.window_rect["left"], self.window_rect["top"])
+            except Exception:
+                pass
 
         def on_mouse(ev, x, y, flags, param):
             s = state
@@ -11944,9 +12073,8 @@ class MinimapRouteRecorder:
         _debug_log("[怪物蒙板] 已停止")
 
     def _monster_overlay_loop(self):
-        """后台线程：创建置顶透明蒙板窗口，每100ms更新
-        优先使用Win32原生API（打包可靠），失败回退tkinter
-        统一显示：角色偏移黄点 + 怪物绿框/连线 + 血条红点 + 蓝条蓝点"""
+        """后台线程：主游戏窗口唯一的置顶透明蒙板(Win32分层窗),每100ms更新
+        统一显示:角色锚点框/黑名单框/黄蓝范围框 + 角色点 + 怪物框/连线 + 血条蓝条(主窗口只此一套蒙板)"""
         try:
             self._win32_overlay_loop()
         except Exception as e:
@@ -12123,7 +12251,8 @@ class MinimapRouteRecorder:
                 elif msg == 0x0202:  # WM_LBUTTONUP
                     if getattr(self, '_auto_calib_dragging', None):
                         self._auto_calib_dragging = None
-                elif msg == 0x0204:  # WM_RBUTTONDOWN：右键点击检测框内弹出对话框（编辑/保存）
+                        return 0
+                elif msg == 0x0204:  # WM_RBUTTONDOWN：右键点检测框弹编辑/保存
                     _rx = ctypes.c_short(lParam & 0xFFFF).value
                     _ry = ctypes.c_short((lParam >> 16) & 0xFFFF).value
                     for _di, _db in enumerate(self._bg_regions):
@@ -12517,8 +12646,6 @@ class MinimapRouteRecorder:
         self._overlay_wndprocs.append(wnd_proc_ref)
         self._overlay_wndproc = wnd_proc_ref
 
-        # === 第二个蒙板：专门显示人物绿框（小地图光点映射内容），独立窗口过程 ===
-
         wc = WNDCLASS()
         wc.lpfnWndProc = wnd_proc_ref
         wc.hInstance = hinst
@@ -12582,20 +12709,23 @@ class MinimapRouteRecorder:
         msg = MSG()
         while self._monster_overlay_running:
             try:
-                if self.hwnd and self.window_rect:
-                    wr = self.window_rect
+                if self.hwnd:
+                    # 蒙板自己每轮直接GetWindowRect取游戏窗口实时几何(该API微秒级、只读,与主循环_update互不干扰)。
+                    # 旧逻辑只读self.window_rect缓存、要等主循环十几秒刷新一次→拖游戏窗口时黑名单等静态框钉在屏幕原地。
+                    _gr = ctypes.create_string_buffer(16)
+                    user32.GetWindowRect(self.hwnd, _gr)
+                    _gl, _gt, _grr, _gb = struct.unpack("llll", _gr.raw)
+                    _cur_geom = (_gl, _gt, _grr - _gl, _gb - _gt)
                     if first_draw[0]:
-                        _debug_log("[怪物蒙板] 窗口几何: %dx%d +%d+%d" % (wr['width'], wr['height'], wr['left'], wr['top']))
+                        _debug_log("[怪物蒙板] 窗口几何: %dx%d +%d+%d" % (_cur_geom[2], _cur_geom[3], _cur_geom[0], _cur_geom[1]))
                         first_draw[0] = False
-                    # 2026-09-07 CPU优化：原每50ms无条件SetWindowPos→每次都触发WM_PAINT(叠加到30fps重绘)。
-                    # 只在几何变化时SetWindowPos，蒙板重绘降为 WM_TIMER(100ms)+主循环节流(100ms)≈10fps
-                    _cur_geom = (wr['left'], wr['top'], wr['width'], wr['height'])
+                    # 2026-09-07 CPU优化：只在几何变化时SetWindowPos(每次SetWindowPos都会触发重绘)
                     if getattr(self, '_overlay_last_geom', None) != _cur_geom:
-                        user32.SetWindowPos(hwnd, -1, wr['left'], wr['top'],
-                                            wr['width'], wr['height'], 0x0050)
+                        user32.SetWindowPos(hwnd, -1, _cur_geom[0], _cur_geom[1],
+                                            _cur_geom[2], _cur_geom[3], 0x0050)
                         self._overlay_last_geom = _cur_geom
                 elif first_draw[0]:
-                    _debug_log("[怪物蒙板] 警告：hwnd或window_rect无效")
+                    _debug_log("[怪物蒙板] 警告：hwnd无效")
                     first_draw[0] = False
             except Exception as e:
                 _debug_log("[怪物蒙板] SetWindowPos异常: %s" % e)
@@ -12613,76 +12743,7 @@ class MinimapRouteRecorder:
             user32.UnregisterClassW(className, hinst)
         except Exception:
             pass
-        try:
-            user32.UnregisterClassW(className2, hinst)
-        except Exception:
-            pass
         _debug_log("[怪物蒙板] Win32窗口已销毁")
-
-    def _tkinter_overlay_loop(self):
-        """tkinter透明蒙板（回退方案）"""
-        import tkinter as tk
-        root = tk.Tk()
-        root.withdraw()
-        overlay = tk.Toplevel(root)
-        overlay.overrideredirect(True)
-        overlay.attributes('-topmost', True)
-        overlay.attributes('-transparentcolor', 'magenta')
-        canvas = tk.Canvas(overlay, bg='magenta', highlightthickness=0, bd=0)
-        canvas.pack(fill='both', expand=True)
-        print("[怪物蒙板] Tk窗口已创建，等待数据...")
-        _overlay_first_draw = [True]
-
-        def update():
-            if not self._monster_overlay_running:
-                root.destroy()
-                return
-            try:
-                if self.hwnd and self.window_rect:
-                    wr = self.window_rect
-                    overlay.geometry("%dx%d+%d+%d" % (
-                        wr['width'], wr['height'], wr['left'], wr['top']))
-                canvas.delete('all')
-                # 调试总开关(F4):关时data置空,tk覆盖层也不画任何框/点
-                data = self._monster_overlay_data if getattr(self, '_debug_overlay', True) else {}
-                now_ms = time.time() * 1000
-                if data:
-                    hp_marker = data.get('hp_marker')
-                    if hp_marker:
-                        hx, hy = hp_marker
-                        canvas.create_rectangle(hx - 2, hy, hx + 2, hy + 10, outline='red', width=2)
-                    mp_marker = data.get('mp_marker')
-                    if mp_marker:
-                        mx, my = mp_marker
-                        canvas.create_rectangle(mx - 2, my, mx + 2, my + 10, outline='#0080FF', width=2)
-                    char_pos = data.get('char_pos')
-                    if char_pos:
-                        if _overlay_first_draw[0]:
-                            _overlay_first_draw[0] = False
-                            print("[怪物蒙板] 首次绘制黄点 at", char_pos)
-                        cx, cy = char_pos
-                        blink_until = data.get('blink_until', 0)
-                        if blink_until > now_ms:
-                            if int(now_ms / 300) % 2 == 0:
-                                canvas.create_oval(cx - 6, cy - 6, cx + 6, cy + 6,
-                                                   fill='yellow', outline='orange', width=2)
-                        else:
-                            canvas.create_oval(cx - 5, cy - 5, cx + 5, cy + 5,
-                                               fill='yellow', outline='orange', width=2)
-                        for (x1, y1, x2, y2, score) in data.get('monsters', []):
-                            mx, my = (x1 + x2) // 2, (y1 + y2) // 2
-                            canvas.create_line(cx, cy, mx, my, fill='#00FF00', width=2)
-                            canvas.create_rectangle(x1, y1, x2, y2, outline='#00FF00', width=2)
-                            dist = int(((mx - cx) ** 2 + (my - cy) ** 2) ** 0.5)
-                            canvas.create_text((cx + mx) // 2, (cy + my) // 2,
-                                               text=str(dist), fill='#00FF00',
-                                               font=('Arial', 9, 'bold'))
-            except Exception as e:
-                print("[怪物蒙板] 更新异常:", e)
-            overlay.after(100, update)
-
-        overlay.after(100, update)
-        root.mainloop()
 
     def _calc_character_monster_distance(self, char_pos, monster_bbox):
         """计算人物与怪物之间的像素距离
@@ -14372,12 +14433,37 @@ class MinimapRouteRecorder:
             pass
         return default
 
-    def _detect_monsters(self, frame, crop_rect=None):
+    def _nms_monsters(self, detections):
+        """对一批怪框做一次NMS去重(单个区域、多个黑名单子块合并后都用它)。"""
+        if not detections:
+            return []
+        boxes = [[d[0], d[1], d[2] - d[0], d[3] - d[1]] for d in detections]
+        scores = [d[4] for d in detections]
+        indices = cv2.dnn.NMSBoxes(boxes, scores, self._yolo_conf, self._yolo_nms)
+        return [detections[i] for i in indices] if len(indices) > 0 else []
+
+    def _detect_monsters(self, frame, crop_rect=None, _bl_split=True):
         """YOLO检测怪物，返回 [(x1,y1,x2,y2,score), ...]
-        crop_rect: (x1,y1,x2,y2) 限定检测区域（人物+寻怪范围），None=全图检测。
-        裁剪后只推理局部区域，坐标自动映射回原图。"""
+        crop_rect: (x1,y1,x2,y2) 限定检测区域（人物+寻怪范围），None=全图检测,裁剪后只推理局部、坐标映射回原图。
+        黑名单勾选'对怪物也生效'时在【推理前】就用黑名单把搜索区几何切成多块分别推理(复用_role_sub_rects),
+        YOLO根本不看拉黑那块(用户:要识别前扣除,不是识别完再丢结果);各块结果合并再NMS。_bl_split=False=递归内的单个子块、不再切。"""
         if frame is None or not self._init_yolo():
             return []
+        # —— 黑名单几何扣除(识别前):把本次搜索区按黑名单切成若干不含黑名单的子矩形,逐块推理后合并 ——
+        _rrec = self._role_rec or {}
+        if _bl_split and _rrec.get("blocklist_monster") and _rrec.get("blocklist"):
+            _fh0, _fw0 = frame.shape[:2]
+            if crop_rect is None:
+                S0 = (0, 0, _fw0, _fh0)
+            else:
+                S0 = (max(0, int(crop_rect[0])), max(0, int(crop_rect[1])),
+                      min(_fw0, int(crop_rect[2])), min(_fh0, int(crop_rect[3])))
+            _subs = self._role_sub_rects(S0, 20, 30)  # 子块至少放得下最小怪(宽20高30),更小的碎片不推理
+            if _subs and not (len(_subs) == 1 and tuple(_subs[0]) == S0):  # 搜索区确实被黑名单切开才分块
+                _allm = []
+                for _sb in _subs:
+                    _allm.extend(self._detect_monsters(frame, tuple(_sb), _bl_split=False))
+                return self._nms_monsters(_allm)  # 跨子块边界可能重复检到同一只怪,合并后统一NMS
         _crop_x1 = _crop_y1 = 0
         if crop_rect is not None:
             cx1, cy1, cx2, cy2 = crop_rect
@@ -14418,12 +14504,8 @@ class MinimapRouteRecorder:
                 # 大小过滤：怪通常宽30-110，高40-140，太大的是建筑误检
                 if 20 <= bw <= 130 and 30 <= bh <= 160:
                     detections.append((x1, y1, x2, y2, float(score)))
-        # NMS去重
-        if detections:
-            boxes = [[d[0], d[1], d[2]-d[0], d[3]-d[1]] for d in detections]
-            scores = [d[4] for d in detections]
-            indices = cv2.dnn.NMSBoxes(boxes, scores, self._yolo_conf, self._yolo_nms)
-            detections = [detections[i] for i in indices] if len(indices) > 0 else []
+        # NMS去重(黑名单分块推理时,外层合并后还会再统一NMS一次)
+        detections = self._nms_monsters(detections)
         return detections
 
     def _detect_monster_hp_bars(self, frame, search_areas=None):
@@ -15145,11 +15227,13 @@ class MinimapRouteRecorder:
         return fx, fy, float(best_v)
 
     def _get_player_screen_pos(self, frame):
-        """人物坐标·新多锚点局部跟踪(2026-09-13对齐心火,替换旧整框投票;输出格式不变:脚点(x,y)/从未定位None)。
-        优先级 角色名→宠物1/2/3→后脑→面部:以上一锚点为中心开 rx×ry 局部窗快跟;连续 faststep 帧失配、
-        或距上次全图>research(ms) 就全图重搜校准;局部窗内相邻帧锚点跳变>maxmove 判瞬移误匹配丢弃;
-        面部原图/镜像谁高谁定朝向(_role_face)。找不到停在最后位置、后台继续全图搜、搜到立刻同步(沿用旧稳策略,
-        边缘自救靠_char_match_ok/_char_lost_edge,下游零改)。人物坐标=锚点中心本身(不做到脚补偿,单平台只看X、跨平台走引导线)。"""
+        """人物坐标·多锚点局部跟踪(2026-09-13对齐心火;输出格式不变:脚点(x,y)/从未定位None)。
+        实际参与定位的锚点=角色名name+面部face_r+后脑back(_match_keys);人名第一,人名丢了脸/后脑分高者兜底
+        (宠物pet1/2/3按用户定稿不参与定位,只在管理窗显示识别率)。以上一锚点为中心开 rx×ry 局部窗快跟,搜索区在比对前
+        几何扣除黑名单(_role_sub_rects,模板不扫黑名单);连续faststep帧失配或距上次全图>research(ms)就全图重搜;
+        局部窗相邻帧跳变>maxmove且弱匹配(<0.75)才丢弃(≥0.75强匹配=合法瞬移、全图重搜也不限跳变);面部原图/镜像谁高定朝向。
+        人物匹配频率受fps节流(A线程,上梯高帧豁免);丢失先保持上一可信点、连续hold个跟踪节拍没找回才清空(保持秒数≈hold/fps)。
+        边缘自救靠_char_match_ok/_char_lost_edge,下游零改。人物坐标=锚点中心(不做到脚补偿,单平台只看X、跨平台走引导线)。"""
         tr = getattr(self, '_role_track', None)
         if tr is None:
             tr = {"last": None, "foot": None, "miss": 0, "last_full": 0.0, "face": None, "score": 0.0}
@@ -15163,6 +15247,7 @@ class MinimapRouteRecorder:
         P = self._role_rec.get("params", ROLE_TRACK_DEFAULT) if self._role_rec else ROLE_TRACK_DEFAULT
         thr = float(P.get("thr", 0.62)); rx = int(P.get("rx", 180)); ry = int(P.get("ry", 120))
         maxmove = int(P.get("maxmove", 48)); faststep = int(P.get("faststep", 2)); research = float(P.get("research", 1500))
+        hold = int(P.get("hold", 90))  # 丢失保持(识别节拍数):丢了先沿用上一可信点,超过hold拍仍没找回才清空
         now = time.time() * 1000
         last = tr["last"]
         # 失配时miss每帧+1、≥faststep就全图=几乎每帧全图(脸还镜像=每帧4次全图匹配),吃满CPU/GIL把主循环绘制拖到
@@ -15172,10 +15257,11 @@ class MinimapRouteRecorder:
             or ((tr["miss"] >= faststep) and (now - tr["last_full"] > _FULL_GAP_MS))
         box = None if need_full else (last[0] - rx, last[1] - ry, last[0] + rx, last[1] + ry)
         self._role_search_box = box  # 局部跟踪搜索范围框(全图重搜时=None不画),供蒙板可视化"在哪片区域找锚点"
-        # 三锚点都匹配(用户2026-09-13终稿):人名永远第一;脸/后脑不靠梯子状态切换(手动挂绳脚本无状态可判),
-        # 二者谁分高用谁、只显示分高那个=天然互斥(平地脸朝镜头脸赢、梯子脸朝里后脑赢);pet仅管理窗评、不参与跟踪。
+        # 人名永远第一;其余=冗余兜底(脸/后脑/宠物名1-3),人名丢时谁分高用谁、各带"→人名线"偏移,只显示分高那个。
+        # 宠物始终跟人、位置绑定,人名/脸/后脑全被特效挡住时用宠物名兜底定位(用户:采了就要参与定位,不是只在管理窗看分)。
         got = {}
-        _match_keys = ("name", "face_r", "back")
+        _AUX = ("face_r", "back", "pet1", "pet2", "pet3")
+        _match_keys = ("name",) + _AUX
         for k in _match_keys:
             s, loc, face = self._role_match_in(frame, k, box)
             if loc is not None:
@@ -15185,9 +15271,9 @@ class MinimapRouteRecorder:
         _show_keys = set()
         if got.get("name", (0.0,))[0] >= thr:
             _show_keys.add("name")
-        _fbs = [(got[_k][0], _k) for _k in ("face_r", "back") if _k in got and got[_k][0] >= thr]
+        _fbs = [(got[_k][0], _k) for _k in _AUX if _k in got and got[_k][0] >= thr]
         if _fbs:
-            _show_keys.add(max(_fbs)[1])  # 脸/后脑分高者胜
+            _show_keys.add(max(_fbs)[1])  # 脸/后脑/宠物里分高者显示(只显示一个,不杂乱)
         polys = {}
         for _k in _show_keys:
             _s, _loc, _f = got[_k]
@@ -15215,10 +15301,12 @@ class MinimapRouteRecorder:
         if _nv is not None and _nv[0] >= thr:
             _cand = [("name", _nv)]
         else:
-            _cand = sorted(((kk, got[kk]) for kk in ("face_r", "back") if kk in got and got[kk][0] >= thr),
+            # 人名丢→脸/后脑/宠物名里谁过阈且分最高谁兜底(宠物是最后一道,人名脸后脑都没时顶上)
+            _cand = sorted(((kk, got[kk]) for kk in _AUX if kk in got and got[kk][0] >= thr),
                            key=lambda kv: -kv[1][0])
-        # 人名在时学习"脸/后脑中心→人名中心"偏移(EMA平滑);人名丢、用脸/后脑定位时把命中点加该偏移映射回人名那条线,
-        # 于是三源的【实际基点】统一在人名位置、打怪不上下跳;但各锚点橙框仍画在命中原位(显示不动)。
+        # 人名在时学习"各兜底锚点中心→人名中心"偏移(EMA平滑);人名丢、用脸/后脑/宠物定位时把命中点加该偏移映射回人名那条线,
+        # 于是所有源的【实际基点】统一在人名位置、打怪不上下跳;但各锚点橙框仍画在命中原位(显示不动)。
+        # 人名在时只给脸/后脑学"→人名中心"偏移(EMA);宠物在人左右位置不固定、无法学固定偏移,故宠物不偏移、兜底时直接用其命中点
         _nloc = _nv[1] if (_nv is not None and _nv[0] >= thr) else None
         for _kk in ("face_r", "back"):
             if _nloc is not None and _kk in got and got[_kk][0] >= thr:
@@ -15231,7 +15319,7 @@ class MinimapRouteRecorder:
         _pick = None
         for _pk, _pv in _cand:
             _ploc = _pv[1]
-            if _pk == "name":
+            if _pk == "name" or str(_pk).startswith("pet"):  # 人名直接用;宠物不偏移(在人左右不固定)、直接用命中点托底,保证定位大框不丢
                 _bx, _by = float(_ploc[0]), float(_ploc[1])
             else:  # 脸/后脑:实际基点偏移到人名位置;刚启动还没和人名同帧学到偏移时才暂用自身点
                 _o = tr.get("off_" + _pk)
@@ -15264,6 +15352,8 @@ class MinimapRouteRecorder:
         self._char_match_ok = False
         fp = tr["foot"]
         self._char_lost_edge = None
+        if fp is not None and tr["miss"] > hold:  # 丢失保持到期:连续hold个识别节拍没找回→清空旧点,不再死停(后台仍全图重搜,搜到自动恢复)
+            tr["foot"] = None; fp = None
         if fp is not None:
             _fw = frame.shape[1]
             if fp[0] <= CHAR_EDGE_MARGIN:
@@ -17430,7 +17520,19 @@ class MinimapRouteRecorder:
                         _band_y2 = max(_band_y1 + 1, _fh - DETECT_BOTTOM_MARGIN)
                         # A只在这帧上跑人物匹配(ROI很轻);怪/血条由B从帧槽取同一帧另算,上梯高帧时A照常高频出人物
                         _tc0 = time.time()
-                        _ch = self._get_player_screen_pos(_frame)  # 人物每周期匹配(ROI很轻,丢失才全图),保证人物点跟手
+                        # fps=每秒人物跟踪次数(面板可调):截图/帧槽仍按CPU档周期跑,只对人物匹配节流,未到节拍沿用上一人物点;
+                        # 上梯高帧对位豁免(必须跟手)。hold"丢失保持N帧"的帧=此跟踪节拍,故实际保持秒数≈hold/fps
+                        _in_precise = bool(getattr(self, '_ladder_precise_mode', False)) \
+                            and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+                        try:
+                            _role_fps = int((self._role_rec or {}).get("params", {}).get("fps", 24) or 24)
+                        except Exception:
+                            _role_fps = 24
+                        if _in_precise or time.time() - getattr(self, '_role_last_track_t', 0) >= 1.0 / max(1, _role_fps):
+                            _ch = self._get_player_screen_pos(_frame)  # 到节拍才匹配(局部很轻,丢失才全图)
+                            self._role_last_track_t = time.time()
+                        else:
+                            _ch = self._raw_char_pos  # 未到节拍:沿用上一人物点,省一次匹配开销
                         # 人物点落在顶部标题栏/底部UI带=误匹配(人物不可能站UI上),作废,避免拿假人物点算距离/锁怪
                         if _ch is not None and not (_band_y1 <= _ch[1] <= _band_y2):
                             _ch = None

@@ -4,19 +4,26 @@
     "thr": 0.6,
     "rx": 280,
     "ry": 130,
-    "maxmove": 48,
-    "faststep": 2,
+    "maxmove": 200,
+    "faststep": 3,
     "research": 1500,
     "hold": 90
   },
   "blocklist": [
     [
-      10,
-      647,
-      1251,
-      90
+      6,
+      632,
+      1260,
+      108
+    ],
+    [
+      12,
+      32,
+      1259,
+      110
     ]
   ],
+  "blocklist_monster": true,
   "active": "c0",
   "_seq": 2,
   "characters": [
