@@ -342,6 +342,44 @@ os.makedirs(CHAR_TEMPLATE_DIR, exist_ok=True)
 CHAR_TEMPLATE_META = os.path.join(CHAR_TEMPLATE_DIR, "meta.json")
 CHAR_MAX_TEMPLATES = 10
 CHAR_MATCH_THRESHOLD = 0.70  # 全图人物匹配阈值(用户2026-09-05：0.75太高角色只到~0.7被拒→降回0.70)
+# ==================== 角色识别(2026-09-13对齐心火:小锚点多冗余+局部半径跟踪,替代旧整框/小块人物特征) ====================
+ROLE_REC_DIR = os.path.join(DATA_DIR, "role_recognize")  # 全局角色锚点目录(只跟角色有关、不随地图方案变,采一次长期用,重采才覆盖)
+os.makedirs(ROLE_REC_DIR, exist_ok=True)
+ROLE_REC_FILE = os.path.join(ROLE_REC_DIR, "role_recognize.json")
+# 锚点定义(key,中文名,说明):角色名=主模板;面部只采朝右一张=人物主体(朝左由水平镜像自动生成,顺带判朝向);宠物名=被特效盖住时冗余
+# 心火成品只有:角色名/面部朝右/宠物名1-3/黑名单,没有"钻石"项(2026-09-13实机截图确认)
+ROLE_ANCHORS = [
+    ("name",    "角色名(主模板)",  "主要模板·头顶名字,固定不变,优先用它"),
+    ("face_r",  "面部·朝右",      "只采朝右一张=人物主体;朝左由它水平镜像自动生成(不采会换的衣服)"),
+    ("back",    "后脑",          "人物后脑/背面样式(爬梯等脸朝里、正面脸匹配不到时),彩色原图不抠图"),
+    ("pet1",    "宠物名1",        "人被特效盖住时改用宠物名,建议给宠物改独特名"),
+    ("pet2",    "宠物名2",        "第二个宠物名冗余(需先采1)"),
+    ("pet3",    "宠物名3",        "第三个宠物名冗余(需先采2)"),
+]
+ROLE_ANCHOR_KEYS = [_a[0] for _a in ROLE_ANCHORS]
+# 跟踪参数默认值=心火成品验证值(用户要求完整对齐;默认写死,角色识别面板可调、自动存盘)
+ROLE_TRACK_DEFAULT = {
+    "fps": 24,         # 每秒跟踪次数
+    "thr": 0.62,       # 锚点匹配阈值
+    "rx": 180,         # 横向半径=局部跟踪窗半宽(以上一帧锚点为中心)
+    "ry": 120,         # 纵向半径=局部跟踪窗半高
+    "maxmove": 48,     # 最大跳变(心火成品值):相邻帧锚点位移超此值判为瞬移到别人身上,丢弃
+    "faststep": 2,     # 快速失配(心火成品值):局部窗内连续失配多少帧后切全图搜索
+    "research": 1500,  # 全图搜索间隔(ms):局部跟丢后限频全屏找回,避免每帧全屏拖帧
+    "hold": 90,        # 丢失保持(帧):刚丢先保持上一可信点,不立刻乱跳
+}
+ROLE_TRACK_FIELDS = [  # (参数key,中文标签,是否小数)
+    ("fps", "跟踪FPS", False), ("thr", "匹配阈值", True),
+    ("rx", "横向半径", False), ("ry", "纵向半径", False),
+    ("maxmove", "最大跳变", False), ("faststep", "快速失配", False),
+    ("research", "全图搜索ms", False), ("hold", "丢失保持", False),
+]
+ROLE_POLY_CLOSE_DIST = 14  # 描点采集:鼠标靠近顶点/边线的命中距离(px)
+ROLE_POLY_AUTO_CLOSE = 4   # 点满几个点自动闭合(长方形点4角即可,不要求直角;闭合后点边线可继续加点)
+ROLE_POLY_MIN_PTS = 3      # 闭合多边形最少点数(删点不得少于此)
+ROLE_ANCHOR_TO_FOOT_Y = 0  # 已废弃(2026-09-13用户定稿):不做到脚补偿,锚点中心即人物坐标;单平台打怪只看X、跨平台走引导线,留常量=0仅为兼容
+ROLE_MAG_SRC = 100         # 放大描点:以鼠标点击点为中心取的原图边长(px)
+ROLE_MAG_ZOOM = 2          # 放大描点:放大倍数(放大图显示在点击点旁边,在放大图上描点、坐标映射回原图)
 # 人物特征颜色（暖色系，BGR格式，10种不重复）
 CHAR_FEATURE_COLORS = [
     (0, 0, 255),      # 红
@@ -988,7 +1026,11 @@ class MinimapRouteRecorder:
         self._dropdown = None  # 当前展开的下拉菜单: None/"save"/"route"/"mode"/"clear_route"
         # 独立窗口引用
         self._plan_window = None  # 方案管理窗口
-        self._char_feature_window = None  # 人物特征管理弹窗
+        self._char_feature_window = None  # 人物特征管理弹窗(旧小块特征,已旁路保留可回滚)
+        # === 角色识别(2026-09-13对齐心火):全局锚点+跟踪参数,启动直接加载、重采才覆盖,不随地图方案变 ===
+        self._role_rec_window = None   # 「角色识别」tk管理窗引用
+        self._role_rec = None          # 角色识别数据 {anchors:{key:{file,poly,off_x,off_y}}, params:{...}}
+        self._load_role_recognize()    # 启动即加载(无文件则给默认空壳)
         self._save_window = None  # 保存方案窗口
         self._clear_window = None  # 删除方案窗口
         # 原地打怪归位相关
@@ -1262,6 +1304,10 @@ class MinimapRouteRecorder:
         self._potion_last = {}  # potionN_key -> 上次释放时间戳
         self._attack_last = {}  # atk1/aoe -> 上次释放时间戳
         self._player_screen_pos = None  # (x,y) 人物画面坐标
+        self._role_track = None         # 新多锚点跟踪状态:last锚点/foot脚点/miss失配/last_full全图时间/face朝向/score
+        self._role_face = None          # 面部锚点判定的朝向 'L'/'R'(打怪左右决策用)
+        self._role_anchor_polys = {}    # 本帧识别到(过阈)的各锚点缩小多边形{key:([(x,y)...],score)},供蒙板画框
+        self._role_search_box = None    # 本帧局部跟踪搜索范围框(x0,y0,x1,y1);全图重搜时=None(不画)
         # === 梯子特征模板（随方案永久存盘，内存仅为运行时副本，权威在 data/route_xxx_ladder_tpl.json）===
         self._ladder_templates = []     # [{id,img,width,height}]
         self._ladder_tpl_sim = LADDER_TPL_DEFAULT_SIM
@@ -3230,6 +3276,530 @@ class MinimapRouteRecorder:
         self._add_log("已导出%d个方案到: %s" % (len(_wrote), _dir))
         print("[导出] 整理完成 %d个方案（每方案一文件夹含best.onnx）→ %s" % (len(_wrote), _dir))
 
+
+    # ==================== 角色识别:全局数据读写(对齐心火,2026-09-13) ====================
+    def _load_role_recognize(self):
+        """加载全局角色识别数据(锚点元数据+跟踪参数);无文件/损坏则给默认空壳。
+        全局数据只跟角色有关、不随地图方案变,启动直接加载,重采才覆盖。
+        锚点模板图存 data/role_recognize/<key>.png,json只记多边形顶点与"锚点中心→脚"偏移。"""
+        rec = {"anchors": {}, "params": dict(ROLE_TRACK_DEFAULT)}
+        try:
+            if os.path.exists(ROLE_REC_FILE):
+                with open(ROLE_REC_FILE, "r", encoding="utf-8") as fp:
+                    saved = json.load(fp)
+                if isinstance(saved.get("anchors"), dict):
+                    rec["anchors"] = saved["anchors"]
+                p = saved.get("params")
+                if isinstance(p, dict):
+                    for k, dv in ROLE_TRACK_DEFAULT.items():
+                        try:
+                            rec["params"][k] = float(p[k]) if isinstance(dv, float) else int(float(p.get(k, dv)))
+                        except (TypeError, ValueError):
+                            rec["params"][k] = dv
+        except Exception as e:
+            print("[角色识别] 加载失败,用默认:", e)
+        # 只保留当前锚点定义里存在的key(旧版本残留字段自动丢弃)
+        rec["anchors"] = {k: v for k, v in rec["anchors"].items() if k in ROLE_ANCHOR_KEYS}
+        self._role_rec = rec
+        return rec
+
+    def _save_role_recognize(self):
+        """落盘全局角色识别数据(锚点多边形/到脚偏移+跟踪参数)"""
+        try:
+            if self._role_rec is None:
+                self._role_rec = {"anchors": {}, "params": dict(ROLE_TRACK_DEFAULT)}
+            with open(ROLE_REC_FILE, "w", encoding="utf-8") as fp:
+                json.dump(self._role_rec, fp, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print("[角色识别] 保存失败:", e)
+
+    def _role_anchor_path(self, key):
+        """某锚点模板图的磁盘路径"""
+        return os.path.join(ROLE_REC_DIR, "%s.png" % key)
+
+    def _role_has_anchor(self, key):
+        """该锚点是否已采集(元数据在且模板图存在)"""
+        if not self._role_rec or key not in self._role_rec.get("anchors", {}):
+            return False
+        return os.path.exists(self._role_anchor_path(key))
+
+    def _capture_role_anchor(self, key):
+        """角色识别·统一多边形描点采集(2026-09-13定稿,对齐心火:不另定基点;角色名/面部/后脑/宠物名全部同一流程)。
+        流程:①左键点目标中心→以该点为中心取ROLE_MAG_SRC方块放大ROLE_MAG_ZOOM倍、放大框贴在点击点旁;
+        ②在放大框内左键逐点,点满4点自动闭合(长方形点4角、不要求直角,多边形通杀);
+        ③闭合后编辑:点白色边线=该处插新点并直接拖、拖白点改形、右键点白点删除;空格/回车确认,C重选中心,ESC取消。
+        描点坐标自动从放大框映射回原图。名字/宠物名圈内OTSU自动抠黑底白字,面部/后脑存彩色原图。
+        锚点中心即人物坐标(不做到脚补偿,单平台打怪只看X)。模态阻塞主循环,结束恢复tk管理窗。"""
+        if key not in ROLE_ANCHOR_KEYS:
+            return False
+        win = "角色锚点采集"
+        VK_ESC, VK_SP, VK_EN = 0x1B, 0x20, 0x0D
+        try:
+            self._update_window_rect(); wr = self.window_rect
+            if not wr or wr.get("left", 0) <= -30000 or wr.get("width", 0) < 200:
+                self._add_log("游戏窗口未正常显示,无法采集角色锚点"); return False
+            frame = self._capture_window()
+            if frame is None:
+                self._add_log("截图为空,请先绑定游戏窗口后再采集"); return False
+            H, W = frame.shape[:2]
+            rw = getattr(self, "_role_rec_window", None)  # 隐藏tk管理窗,避免tk/cv2冲突闪退
+            try:
+                if rw is not None: rw.withdraw(); rw.update()
+            except Exception:
+                pass
+            cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
+            try:
+                cv2.moveWindow(win, int(wr.get("left", 40)), int(wr.get("top", 40)))
+                cv2.setWindowProperty(win, cv2.WND_PROP_TOPMOST, 1)
+            except Exception:
+                pass
+            st = {"pts": [], "mouse": None, "phase": "pick", "drag": None,
+                  "center": None, "src": None, "mag": None}  # pick=选放大中心;poly=放大框内逐点;edit=闭合调形
+            HALF = ROLE_MAG_SRC // 2
+            ZM = ROLE_MAG_ZOOM
+            HITM = 8                                    # 放大框内顶点/边线的命中手感像素
+            HITS = max(3, int(HITM / ZM))               # 换算回原图坐标的命中半径
+
+            def _set_center(cx, cy):  # 以点击点为中心取ROLE_MAG_SRC方块,放大ZM倍,放大框贴在点击点旁边
+                sx0 = max(0, min(W - ROLE_MAG_SRC, cx - HALF))
+                sy0 = max(0, min(H - ROLE_MAG_SRC, cy - HALF))
+                mw = mh = ROLE_MAG_SRC * ZM
+                mx0 = cx + 60
+                if mx0 + mw > W - 4:
+                    mx0 = cx - 60 - mw                  # 右边放不下就放左边
+                mx0 = max(4, min(W - mw - 4, mx0))
+                my0 = max(4, min(H - mh - 4, cy - mh // 2))
+                st["center"] = (cx, cy)
+                st["src"] = (sx0, sy0, ROLE_MAG_SRC, ROLE_MAG_SRC)
+                st["mag"] = (mx0, my0, mw, mh)
+                st["pts"] = []; st["drag"] = None; st["phase"] = "poly"
+
+            def _in_mag(x, y):
+                mg = st["mag"]
+                return mg is not None and mg[0] <= x < mg[0] + mg[2] and mg[1] <= y < mg[1] + mg[3]
+
+            def _to_src(x, y):  # 放大窗口坐标→原图坐标
+                sx0, sy0, sw, sh = st["src"]; mx0, my0, _, _ = st["mag"]
+                ox = sx0 + int((x - mx0) / ZM); oy = sy0 + int((y - my0) / ZM)
+                return max(sx0, min(sx0 + sw - 1, ox)), max(sy0, min(sy0 + sh - 1, oy))
+
+            def _near_vertex(x, y):
+                for i, (px, py) in enumerate(st["pts"]):
+                    if (px - x) ** 2 + (py - y) ** 2 <= HITS * HITS:
+                        return i
+                return None
+
+            def _seg_dist(x, y, a, b):  # 点到线段距离
+                ax, ay = a; bx, by = b; dx, dy = bx - ax, by - ay
+                l2 = dx * dx + dy * dy
+                if l2 == 0:
+                    return ((x - ax) ** 2 + (y - ay) ** 2) ** 0.5
+                t = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / l2))
+                qx, qy = ax + t * dx, ay + t * dy
+                return ((x - qx) ** 2 + (y - qy) ** 2) ** 0.5
+
+            def _near_edge(x, y):
+                pts = st["pts"]; n = len(pts); best = None; bd = HITS
+                for i in range(n):  # 闭合边,含 最后点→首点
+                    d = _seg_dist(x, y, pts[i], pts[(i + 1) % n])
+                    if d < bd:
+                        bd, best = d, i + 1  # 新点插在 i 与 i+1 之间,index=i+1
+                return best
+
+            def on_mouse(e, x, y, fl, p):
+                x, y = int(x), int(y)
+                if e == cv2.EVENT_MOUSEMOVE:
+                    st["mouse"] = (x, y)
+                    if st["drag"] is not None and _in_mag(x, y):  # 拖顶点(含刚插入的新点)
+                        st["pts"][st["drag"]] = _to_src(x, y)
+                    return
+                if st["phase"] == "pick":
+                    if e == cv2.EVENT_LBUTTONDOWN:
+                        _set_center(x, y)
+                    return
+                if not _in_mag(x, y):  # 描点一律在放大框内进行,框外点击忽略
+                    if e == cv2.EVENT_LBUTTONUP:
+                        st["drag"] = None
+                    return
+                sx, sy = _to_src(x, y)  # 后续统一用原图坐标,pts存原图坐标
+                if st["phase"] == "poly":
+                    if e == cv2.EVENT_LBUTTONDOWN:
+                        st["pts"].append((sx, sy))
+                        if len(st["pts"]) >= ROLE_POLY_AUTO_CLOSE:  # 点满4点自动闭合
+                            st["phase"] = "edit"
+                    elif e == cv2.EVENT_RBUTTONDOWN and st["pts"]:
+                        st["pts"].pop()  # 加点阶段右键=撤销上一点
+                elif st["phase"] == "edit":
+                    if e == cv2.EVENT_LBUTTONDOWN:
+                        vi = _near_vertex(sx, sy)
+                        if vi is not None:
+                            st["drag"] = vi  # 按住已有白点→拖
+                        else:
+                            ei = _near_edge(sx, sy)
+                            if ei is not None:  # 点白线→该处插新点并直接拖
+                                st["pts"].insert(ei, (sx, sy)); st["drag"] = ei
+                    elif e == cv2.EVENT_LBUTTONUP:
+                        st["drag"] = None
+                    elif e == cv2.EVENT_RBUTTONDOWN:
+                        vi = _near_vertex(sx, sy)
+                        if vi is not None and len(st["pts"]) > ROLE_POLY_MIN_PTS:
+                            st["pts"].pop(vi)  # 编辑态右键点白点=删除(不少于3点)
+            cv2.setMouseCallback(win, on_mouse)
+
+            def draw():
+                img = frame.copy(); pts = st["pts"]; m = st["mouse"]
+                if st["phase"] == "pick":  # 选中心:跟随鼠标画100×100取景框+十字
+                    if m is not None:
+                        cv2.rectangle(img, (m[0] - HALF, m[1] - HALF),
+                                      (m[0] - HALF + ROLE_MAG_SRC, m[1] - HALF + ROLE_MAG_SRC), (0, 255, 255), 1)
+                        cv2.drawMarker(img, m, (0, 0, 255), cv2.MARKER_CROSS, 10, 1)
+                    self._draw_cn_mixed(img, "左键点目标中心(以该点%d×%d放大%d倍,再在放大框里描点); ESC取消" % (ROLE_MAG_SRC, ROLE_MAG_SRC, ZM),
+                                        12, 26, 0.6, (0, 255, 255), 1)
+                    return img
+                sx0, sy0, sw, sh = st["src"]; mx0, my0, mw, mh = st["mag"]
+                closed = st["phase"] == "edit"
+                if len(pts) >= 2:  # 主图上只画细轮廓(线宽1/点半径2,减半不挡字)+源区细框
+                    cv2.polylines(img, [np.array(pts, np.int32)], closed, (0, 200, 255), 1)
+                for (px, py) in pts:
+                    cv2.circle(img, (px, py), 2, (0, 0, 255), -1)
+                cv2.rectangle(img, (sx0, sy0), (sx0 + sw, sy0 + sh), (255, 255, 255), 1)
+                region = frame[sy0:sy0 + sh, sx0:sx0 + sw]  # 放大子图(2倍),描点主要在这里进行
+                magimg = cv2.resize(region, (sw * ZM, sh * ZM), interpolation=cv2.INTER_LINEAR)
+
+                def M(pt):
+                    return (int((pt[0] - sx0) * ZM), int((pt[1] - sy0) * ZM))
+                if len(pts) >= 2:
+                    cv2.polylines(magimg, [np.array([M(q) for q in pts], np.int32)], closed, (0, 200, 255), 2)
+                    if st["phase"] == "poly" and pts and m is not None and _in_mag(*m):  # 放大框内橡皮筋
+                        ex, ey = M(pts[-1])
+                        cv2.line(magimg, (ex, ey), (m[0] - mx0, m[1] - my0), (0, 200, 255), 1)
+                for i, (px, py) in enumerate(pts):
+                    qx, qy = M((px, py))
+                    cv2.circle(magimg, (qx, qy), 3, (0, 0, 255) if st["drag"] == i else (255, 255, 255), -1)
+                cv2.rectangle(magimg, (0, 0), (sw * ZM - 1, sh * ZM - 1), (255, 255, 255), 1)
+                img[my0:my0 + mh, mx0:mx0 + mw] = magimg
+                tip = ("在放大框内左键点4点自动闭合; C重选中心; 右键撤销; ESC取消" if st["phase"] == "poly"
+                       else "放大框内:点白线=加点并拖 / 拖白点改形 / 右键删点; 空格确认; C重选; ESC取消")
+                self._draw_cn_mixed(img, tip, 12, 26, 0.6, (0, 255, 255), 1)
+                return img
+
+            ok = False
+            VK_C = 0x43
+            while True:
+                k = cv2.waitKey(20) & 0xFF
+                if k == VK_ESC:
+                    break
+                if k == VK_C and st["phase"] != "pick":  # C=重选放大中心、清空重描
+                    st["phase"] = "pick"; st["pts"] = []; st["drag"] = None; st["src"] = None; st["mag"] = None
+                    continue
+                if st["phase"] == "edit" and k in (VK_SP, VK_EN):  # 闭合调形后:空格/回车确认保存
+                    ok = True; break
+                cv2.imshow(win, draw())
+            try: cv2.destroyWindow(win)
+            except Exception: pass
+            for _ in range(2): cv2.waitKey(20)
+            if not ok or len(st["pts"]) < ROLE_POLY_MIN_PTS:
+                return False
+            # === 按多边形外接框抠图(框外置黑减背景干扰),落盘 ===
+            pts = st["pts"]
+            xs = [q[0] for q in pts]; ys = [q[1] for q in pts]
+            x0, x1 = max(0, min(xs)), min(W - 1, max(xs)); y0, y1 = max(0, min(ys)), min(H - 1, max(ys))
+            if x1 - x0 < 3 or y1 - y0 < 3:
+                self._add_log("描边区域太小,本次采集作废"); return False
+            poly_mask = np.zeros(frame.shape[:2], np.uint8)
+            cv2.fillPoly(poly_mask, [np.array(pts, np.int32)], 255)
+            pm = poly_mask[y0:y1 + 1, x0:x1 + 1]
+            crop = cv2.bitwise_and(frame, frame, mask=poly_mask)[y0:y1 + 1, x0:x1 + 1].copy()
+            is_text = (key == "name") or key.startswith("pet")  # 名字/宠物名=半透明底板上的亮字→自动抠笔画;脸=实体→存彩色
+            if is_text:
+                # OTSU只在多边形内部像素上自动找"亮字/暗底"分界(零手调阈值),多边形外强制黑,再去碎点。
+                # 这样底板后透出的任意背景/特效都不进模板,运行时小窗内同样OTSU后再比笔画。
+                vv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)[:, :, 2]
+                if vv[pm > 0].size < 8:
+                    self._add_log("名字区域太小,本次采集作废"); return False
+                out_img = self._role_text_binarize(vv, pm)  # 与实时匹配同源(OTSU+去碎点),避免采集/识别两套二值化
+                kind = "text"
+            else:
+                out_img, kind = crop, "color"
+            okenc, buf = cv2.imencode(".png", out_img)
+            if not okenc:
+                self._add_log("锚点图像编码失败,采集作废"); return False
+            buf.tofile(self._role_anchor_path(key))
+            meta = {"kind": kind,
+                    "poly": [[px - x0, py - y0] for px, py in pts],  # 相对裁剪框的顶点
+                    "box": [int(x0), int(y0), int(x1), int(y1)],
+                    "off_x": 0, "off_y": 0,  # 不做到脚补偿:锚点中心即人物坐标(单平台只看X)
+                    "w": int(x1 - x0 + 1), "h": int(y1 - y0 + 1)}
+            if self._role_rec is None:
+                self._load_role_recognize()
+            self._role_rec.setdefault("anchors", {})[key] = meta
+            self._save_role_recognize()
+            if getattr(self, '_role_tpl_c', None) is not None:  # 重录后清模板缓存,下次匹配用新图+新掩膜
+                self._role_tpl_c.pop(key, None)
+            print("[角色识别] 已采集锚点 %s kind=%s 尺寸%dx%d" % (key, kind, meta["w"], meta["h"]))
+            return True
+        except Exception as e:
+            import traceback; traceback.print_exc(); print("[角色识别] 采集异常:", e); return False
+        finally:
+            try: cv2.destroyWindow("角色锚点采集")
+            except Exception: pass
+            for _ in range(2):
+                try: cv2.waitKey(20)
+                except Exception: pass
+            rw = getattr(self, "_role_rec_window", None)  # 恢复tk管理窗
+            try:
+                if rw is not None: rw.deiconify(); rw.lift(); rw.update()
+            except Exception: pass
+            try:
+                if rw is not None and hasattr(self, "_role_refresh_window"):
+                    self._role_refresh_window()
+            except Exception: pass
+
+    def _role_text_binarize(self, vv, mask=None, denoise=True):
+        """名字/宠物名统一二值化(采集与实时必须同源,否则真名字相似度被压低、背景纹理反成假阳性):
+        V通道OTSU自动找"亮笔画/底"分界→黑底白字。denoise=连通域去面积<3碎点(仅采集小模板用);
+        实时整窗必须传denoise=False——整帧连通域极慢,曾把帧率拖到1.3、主循环卡957ms致F12失灵/闪退。"""
+        try:
+            sel = vv[mask > 0] if mask is not None else vv
+            if sel is None or sel.size < 8:
+                return np.zeros_like(vv)
+            tval, _ = cv2.threshold(sel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            if mask is not None:
+                out = np.where((vv > tval) & (mask > 0), 255, 0).astype(np.uint8)
+            else:
+                out = np.where(vv > tval, 255, 0).astype(np.uint8)
+            if denoise:  # 连通域去碎点只在采集小模板上做;实时整窗做会拖垮帧率
+                _n, _lab, _st, _ = cv2.connectedComponentsWithStats(out)  # 去笔画外孤立碎点
+                for _i in range(1, _n):
+                    if _st[_i, cv2.CC_STAT_AREA] < 3:
+                        out[_lab == _i] = 0
+            return out
+        except Exception:
+            return np.zeros_like(vv, np.uint8)
+
+    def _role_match_in(self, frame, key, box=None):
+        """在指定区域 box=(x0,y0,x1,y1)(None=整帧)内匹配单锚点→(score0~1, 锚点中心全局(x,y)或None, 朝向'L'/'R'/None)。
+        名字/宠物名:区域V通道自适应二值成黑底白字再比(和采集OTSU笔画同源,抗半透明底板/换背景);
+        面部:区域灰度匹配+朝右模板水平镜像再配一次、谁分高判朝向;后脑:灰度直配(爬梯脸朝里兜底)。"""
+        try:
+            if not self._role_has_anchor(key):
+                return 0.0, None, None
+            tpl = cv2.imdecode(np.fromfile(self._role_anchor_path(key), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+            if tpl is None or tpl.size == 0:
+                return 0.0, None, None
+            th, tw = tpl.shape[:2]
+            H, W = frame.shape[:2]
+            if box is None:
+                # 全图重搜只搜活动带(拉黑顶部标题栏/底部血蓝技能UI栏),减小面积提速+防UI误匹配
+                x0, y0, x1, y1 = 0, DETECT_TOP_MARGIN, W, max(DETECT_TOP_MARGIN + 1, H - DETECT_BOTTOM_MARGIN)
+            else:
+                x0, y0 = max(0, int(box[0])), max(0, int(box[1]))
+                x1, y1 = min(W, int(box[2])), min(H, int(box[3]))
+            src = frame[y0:y1, x0:x1]
+            if src.shape[0] < th or src.shape[1] < tw:
+                return 0.0, None, None
+            if key == "name" or key.startswith("pet"):
+                # 同一帧、同一搜索窗的二值化结果在name/pet间复用,只算一次
+                _ck = (id(frame), None if box is None else (x0, y0, x1, y1))
+                _cache = getattr(self, '_role_bin_cache', None)
+                if _cache is not None and _cache[0] == _ck[0] and _cache[1] == _ck[1]:
+                    scene = _cache[2]
+                else:
+                    vv = cv2.cvtColor(src, cv2.COLOR_BGR2HSV)[:, :, 2]
+                    scene = self._role_text_binarize(vv, denoise=False)
+                    self._role_bin_cache = (_ck[0], _ck[1], scene)
+                res = cv2.matchTemplate(scene, tpl, cv2.TM_CCOEFF_NORMED)
+                _, mv, _, ml = cv2.minMaxLoc(res)
+                return float(mv), (x0 + ml[0] + tw // 2, y0 + ml[1] + th // 2), None
+            # 脸/后脑:灰度TM_CCOEFF_NORMED(减均值、抗明暗,假阳性低=稳版算法;曾试带mask的CCORR/SQDIFF彩色匹配,
+            # 亮岩壁/UI会撞恒定0.84假分把定位框带飞,已回滚)。脸:朝右模板+水平镜像各配一次、谁分高判朝向。
+            gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+            res = cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED)
+            _, sr, _, sl = cv2.minMaxLoc(res)
+            best, lx, ly, face = float(sr), sl[0], sl[1], "R"
+            if key == "face_r":
+                res2 = cv2.matchTemplate(gray, cv2.flip(tpl, 1), cv2.TM_CCOEFF_NORMED)
+                _, sl2, _, ll = cv2.minMaxLoc(res2)
+                if float(sl2) > best:
+                    best, lx, ly, face = float(sl2), ll[0], ll[1], "L"
+            return best, (x0 + lx + tw // 2, y0 + ly + th // 2), face
+        except Exception:
+            return 0.0, None, None
+
+    def _role_match_one(self, frame, key):
+        """整帧匹配单锚点(管理窗实时识别率用)"""
+        return self._role_match_in(frame, key, None)
+
+    def _role_eval_live(self):
+        """截一帧、对全部已采锚点各匹配一次,返回{scores:{key:(s,loc,face)}, best:(key,s,x,y,face)};供管理窗实时显示识别率。"""
+        try:
+            frame = self._capture_window()
+            if frame is None:
+                return None
+            scores, best = {}, None
+            for key in ROLE_ANCHOR_KEYS:
+                s, loc, face = self._role_match_one(frame, key)
+                scores[key] = (s, loc, face)
+                if loc is not None and (best is None or s > best[1]):
+                    best = (key, s, loc[0], loc[1], face)
+            return {"scores": scores, "best": best}
+        except Exception:
+            return None
+
+    def _role_remove_anchor(self, key):
+        """移除某角色锚点:删模板图+删元数据+落盘"""
+        try:
+            p = self._role_anchor_path(key)
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception as e:
+            print("[角色识别] 删除锚点图失败:", e)
+        if self._role_rec and key in self._role_rec.get("anchors", {}):
+            self._role_rec["anchors"].pop(key, None)
+            self._save_role_recognize()
+        if getattr(self, '_role_tpl_c', None) is not None:  # 移除后清模板缓存
+            self._role_tpl_c.pop(key, None)
+
+    def _open_role_recognize_window(self):
+        """打开「角色识别」管理窗(2026-09-13对齐心火):全局锚点采集/移除+缩略图+8项跟踪参数。
+        入口=控制面板"人物特征"按钮BTN_CHAR(替代旧小块人物特征窗)。数据全局长期保存、启动直接加载,不随地图方案变。"""
+        import tkinter as tk
+        from PIL import Image, ImageTk
+        if not self._ensure_tk_root():
+            return
+        if getattr(self, "_role_rec_window", None) is not None:  # 单例:已开则提到最前
+            try:
+                self._role_rec_window.lift(); return
+            except Exception:
+                pass
+        if self._role_rec is None:
+            self._load_role_recognize()
+        win = tk.Toplevel(self._tk_root)
+        self._role_rec_window = win
+        win.title("角色识别")
+        win.resizable(False, False)  # 固定大小不拉伸,文字不变形;标题栏可拖动
+        win.attributes("-topmost", True)
+        self._position_window(win, 600, 680)
+        self._role_thumbs = []  # 持有PhotoImage引用防被GC导致缩略图不显示
+
+        tk.Label(win, text="角色识别（小锚点多冗余 · 局部半径跟踪 · 对齐心火）",
+                 font=("微软雅黑", 11, "bold")).pack(pady=(8, 2))
+        self._role_live_var = tk.StringVar(value="实时锚点：（采好锚点、游戏画面可见角色时，这里显示坐标 / 识别率 / 朝向）")
+        self._role_live_lbl = tk.Label(win, textvariable=self._role_live_var, font=("微软雅黑", 9, "bold"),
+                                       fg="#1565C0", bg="#E3F2FD")
+        self._role_live_lbl.pack(fill="x", padx=8, pady=2)
+        tk.Label(win, text="优先顺序：角色名 → 宠物名1/2/3 → 面部/后脑。面部只采朝右一张，朝左由程序水平镜像自动生成。采集：左键点目标中心放大2倍 → 在放大框内点4点自动闭合 → 点白线加点/拖点微调 → 空格确认。",
+                 font=("微软雅黑", 8), fg="gray", wraplength=570, justify="left").pack(pady=(0, 4))
+
+        self._role_anchor_frame = tk.Frame(win)
+        self._role_anchor_frame.pack(fill="x", padx=8)
+
+        # ===== 跟踪参数区(默认心火成品值,可调,关窗统一落盘) =====
+        param_outer = tk.LabelFrame(win, text="角色跟踪参数（默认=心火成品值，可调）", font=("微软雅黑", 9, "bold"))
+        param_outer.pack(fill="x", padx=8, pady=6)
+        self._role_param_vars = {}
+        params = self._role_rec["params"]
+        for i, (k, label, is_float) in enumerate(ROLE_TRACK_FIELDS):
+            r, c = divmod(i, 2)
+            cell = tk.Frame(param_outer); cell.grid(row=r, column=c, sticky="w", padx=10, pady=3)
+            tk.Label(cell, text=label, width=10, anchor="w", font=("微软雅黑", 9)).pack(side="left")
+            var = tk.StringVar(value=str(params.get(k, ROLE_TRACK_DEFAULT[k])))
+            self._role_param_vars[k] = var
+            tk.Entry(cell, width=8, textvariable=var, font=("微软雅黑", 9)).pack(side="left")
+
+        def _apply_params():
+            try:
+                for (k, label, is_float) in ROLE_TRACK_FIELDS:
+                    v = self._role_param_vars[k].get().strip()
+                    dv = ROLE_TRACK_DEFAULT[k]
+                    if v == "":
+                        self._role_rec["params"][k] = dv; continue
+                    self._role_rec["params"][k] = float(v) if isinstance(dv, float) else int(float(v))
+                self._save_role_recognize()
+            except Exception as e:
+                print("[角色识别] 参数保存失败:", e)
+        self._role_apply_params = _apply_params
+
+        def _rebuild_anchors():
+            for w in self._role_anchor_frame.winfo_children():
+                w.destroy()
+            self._role_thumbs = []
+            self._row_score_lbl = {}
+            anchors = self._role_rec.get("anchors", {})
+            for key, cn, desc in ROLE_ANCHORS:
+                row = tk.Frame(self._role_anchor_frame); row.pack(fill="x", pady=2)
+                has = self._role_has_anchor(key)
+                locked = (key == "pet2" and not self._role_has_anchor("pet1")) or \
+                         (key == "pet3" and not self._role_has_anchor("pet2"))  # 宠物名按顺序解锁
+                def do_cap(k=key):
+                    win.update(); self._capture_role_anchor(k)  # 采集器内部会withdraw/恢复并回调刷新
+                def do_rm(k=key):
+                    self._role_remove_anchor(k); _rebuild_anchors()
+                tk.Button(row, text="采集", width=6, state=("disabled" if locked else "normal"),
+                          command=do_cap).pack(side="left")
+                tk.Button(row, text="移除", width=6, state=("normal" if has else "disabled"),
+                          command=do_rm).pack(side="left", padx=(2, 6))
+                tk.Label(row, text=cn, width=14, anchor="w", font=("微软雅黑", 9, "bold")).pack(side="left")
+                if has:
+                    m = anchors.get(key, {})
+                    tk.Label(row, text="已采 %dx%d" % (m.get("w", 0), m.get("h", 0)), fg="green",
+                             font=("微软雅黑", 8)).pack(side="left")
+                    sl = tk.Label(row, text="--%", width=7, anchor="w", fg="gray",
+                                  font=("微软雅黑", 8, "bold"))
+                    sl.pack(side="left", padx=(8, 0)); self._row_score_lbl[key] = sl  # 每行实时识别率(对齐心火)
+                    try:  # 锚点缩略图
+                        im = Image.open(self._role_anchor_path(key)); im.thumbnail((48, 48))
+                        ph = ImageTk.PhotoImage(im); self._role_thumbs.append(ph)
+                        tk.Label(row, image=ph).pack(side="right")
+                    except Exception:
+                        pass
+                else:
+                    tk.Label(row, text=("未采 · " + ("请先采集上一级宠物名" if locked else desc)),
+                             fg="gray", font=("微软雅黑", 8), wraplength=380, justify="left").pack(side="left")
+        self._role_refresh_window = _rebuild_anchors
+        _rebuild_anchors()
+
+        # 实时识别率:每500ms截一帧匹配已采锚点,顶部显示坐标/识别率/朝向(对齐心火顶部状态行)
+        _cn_map = {k: c for k, c, _ in ROLE_ANCHORS}
+
+        def _live_tick():
+            try:
+                if not win.winfo_exists():
+                    return
+            except Exception:
+                return
+            try:
+                thr = float(self._role_rec.get("params", {}).get("thr", ROLE_TRACK_DEFAULT["thr"]))
+                info = self._role_eval_live()
+                scores = info.get("scores", {}) if info else {}
+                for _k, _lbl in getattr(self, "_row_score_lbl", {}).items():  # 每行实时识别率
+                    _t = scores.get(_k)
+                    if _t is not None:
+                        _ss = _t[0]
+                        _lbl.config(text="%d%%" % int(_ss * 100),
+                                    fg=("#2E7D32" if _ss >= thr else "#E65100"))
+                    else:
+                        _lbl.config(text="--%", fg="gray")
+                b = info.get("best") if info else None
+                if b is not None:
+                    bk, bs, bx, by, face = b
+                    fa = "朝右" if face == "R" else ("朝左" if face == "L" else "")
+                    self._role_live_var.set("实时锚点：X%d / Y%d · %d%% · %s %s" % (bx, by, int(bs * 100), _cn_map.get(bk, bk), fa))
+                    self._role_live_lbl.config(fg=("#2E7D32" if bs >= thr else "#E65100"),
+                                               bg=("#E8F5E9" if bs >= thr else "#FFF3E0"))
+                else:
+                    self._role_live_var.set("实时锚点：当前画面未识别到已采锚点")
+                    self._role_live_lbl.config(fg="#9E9E9E", bg="#F5F5F5")
+            except Exception:
+                pass
+            win.after(500, _live_tick)
+        win.after(300, _live_tick)
+
+        def on_close():
+            _apply_params(); self._close_window("_role_rec_window")
+        win.protocol("WM_DELETE_WINDOW", on_close)
+        tk.Button(win, text="保存并关闭", width=16, height=2, bg="#2196F3", fg="white",
+                  command=on_close).pack(pady=8)
 
     def _open_char_feature_window(self):
         """打开人物特征管理弹窗：左右分栏，左边特征列表(含偏移X/Y)，右边操作区"""
@@ -7698,8 +8268,8 @@ class MinimapRouteRecorder:
 
         # 8. 子标签页（人物特征弹窗/怪物数据）
         if _in(BTN_CHAR, x, y):
-            self._open_char_feature_window()
-            print("[鼠标] 打开人物特征管理弹窗")
+            self._open_role_recognize_window()
+            print("[鼠标] 打开角色识别窗(对齐心火:名字主锚点/脸镜像/宠物名冗余/跟踪参数)")
             return
         if _in(BTN_MONSTER, x, y):
             _debug_log("[鼠标] 点击怪物数据按钮")
@@ -11397,6 +11967,64 @@ class MinimapRouteRecorder:
                                 gdi32.TextOutW(hdc, fx + 7, fy - 11, txt, len(txt))
                                 gdi32.SelectObject(hdc, old_ffont)
 
+                            # === 新角色锚点:局部跟踪搜索范围框(白细框,全图重搜时不画)+识别到的锚点缩小多边形(识别不到不画) ===
+                            _rsb = data.get('role_search_box')
+                            if _rsb:
+                                _bx0, _by0, _bx1, _by1 = _rsb
+                                rpen = gdi32.CreatePen(0, 1, 0xFFFFFF)  # 白色1px=rx/ry局部搜索范围
+                                if rpen:
+                                    gdi_objs.append(rpen)
+                                old_rpen = gdi32.SelectObject(hdc, rpen)
+                                gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
+                                gdi32.Rectangle(hdc, int(_bx0), int(_by0), int(_bx1), int(_by1))
+                                gdi32.SelectObject(hdc, old_rpen)
+                            _role_colors = {"name": 0x00FFFF, "face_r": 0x0000FF00, "back": 0x00FF00FF,
+                                            "pet1": 0x0000FFFF, "pet2": 0x0000FFFF, "pet3": 0x0000FFFF}
+                            _role_cn = {_a[0]: _a[1] for _a in ROLE_ANCHORS}  # 模块全局,不经过self(回调内self异常)
+                            for _rk, (_rpts, _rscore) in (data.get('role_anchor_polys') or {}).items():
+                                if not _rpts:
+                                    continue
+                                _rc = _role_colors.get(_rk, 0xFFFFFF)
+                                apen = gdi32.CreatePen(0, 2, _rc)  # 名=青 脸=绿 后脑=品红 宠物=黄
+                                if apen:
+                                    gdi_objs.append(apen)
+                                old_apen = gdi32.SelectObject(hdc, apen)
+                                gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷只描边
+                                _p0 = _rpts[0]
+                                gdi32.MoveToEx(hdc, int(_p0[0]), int(_p0[1]), None)
+                                for _px, _py in _rpts[1:]:
+                                    gdi32.LineTo(hdc, int(_px), int(_py))
+                                gdi32.LineTo(hdc, int(_p0[0]), int(_p0[1]))  # 闭合
+                                gdi32.SelectObject(hdc, old_apen)
+                                afont = gdi32.CreateFontW(16, 0, 0, 0, 400, 0, 0, 0, 134, 3, 2, 1, 49, "微软雅黑")
+                                if afont:
+                                    gdi_objs.append(afont)
+                                old_afont = gdi32.SelectObject(hdc, afont)
+                                gdi32.SetTextColor(hdc, _rc); gdi32.SetBkMode(hdc, 1)
+                                _rtxt = _role_cn.get(_rk, _rk)  # 框旁只标锚点名(识别率%在角色识别面板看)
+                                gdi32.TextOutW(hdc, int(_p0[0]), int(_p0[1]) - 18, _rtxt, len(_rtxt))
+                                gdi32.SelectObject(hdc, old_afont)
+
+                            # 心火式两个实战范围框(都以人物为中心、随人移动):黄=怪物识别(YOLO)范围,紫=人物技能(攻击射程)范围
+                            for _rk2, _rc2, _rlab in (("yolo_crop", 0x0000FFFF, "怪物识别"),
+                                                      ("feat_crop", 0x00FF00FF, "技能范围")):
+                                _cb = data.get(_rk2)
+                                if _cb:
+                                    _cpen = gdi32.CreatePen(0, 2, _rc2)
+                                    if _cpen:
+                                        gdi_objs.append(_cpen)
+                                    old_cpen = gdi32.SelectObject(hdc, _cpen)
+                                    gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷只描边
+                                    gdi32.Rectangle(hdc, int(_cb[0]), int(_cb[1]), int(_cb[2]), int(_cb[3]))
+                                    gdi32.SelectObject(hdc, old_cpen)
+                                    cfont = gdi32.CreateFontW(15, 0, 0, 0, 400, 0, 0, 0, 134, 3, 2, 1, 49, "微软雅黑")
+                                    if cfont:
+                                        gdi_objs.append(cfont)
+                                    old_cfont = gdi32.SelectObject(hdc, cfont)
+                                    gdi32.SetTextColor(hdc, _rc2); gdi32.SetBkMode(hdc, 1)
+                                    gdi32.TextOutW(hdc, int(_cb[0]) + 3, int(_cb[1]) + 2, _rlab, len(_rlab))
+                                    gdi32.SelectObject(hdc, old_cfont)
+
                             # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
                             # 注：和人物特征点写法完全一样，不用self（wnd_proc回调中self会导致异常）
                             for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
@@ -14144,45 +14772,100 @@ class MinimapRouteRecorder:
         return fx, fy, float(best_v)
 
     def _get_player_screen_pos(self, frame):
-        """获取人物在游戏画面中的坐标: 多特征融合模板匹配(已含每特征offset到脚)。
-        2026-09-07用户定稿：匹配失败不设1秒宽限、也不清空——点停在最后消失位置，后台每帧继续全图搜，
-        _match_character内部ROI找不到会立即全图重搜(瞬移也允许远距同步)，一搜到新位置立刻同步。
-        另标注本帧匹配状态供边缘自救用(用户2026-09-07)：
-          _char_match_ok=True/False；丢失时 _char_lost_edge='left'/'right'(贴地图边)/None(中间,原地等重扫)。"""
-        # 0) 多点投票定脚(主流两段式)。0a)有上一脚→小窗快跟(位移门限,最省);
-        #    0b)首捕/小窗跟丢→小地图光点算屏幕大位置(粗锚点,抗装扮/特效),投票在其大窗内精定脚
-        _now_ms = time.time()*1000
-        _last = getattr(self, '_last_char_match_pos', None)
-        vote = self._vote_match_character(frame, _last, coarse=False) if _last is not None else None
-        if vote is None:
-            _seed = self.lock_screen_from_dot()
-            if _seed is not None:
-                vote = self._vote_match_character(frame, _seed, coarse=True)
-        if vote is not None:
-            self._last_char_match_pos = (vote[0], vote[1]); self._last_char_match_time = _now_ms
+        """人物坐标·新多锚点局部跟踪(2026-09-13对齐心火,替换旧整框投票;输出格式不变:脚点(x,y)/从未定位None)。
+        优先级 角色名→宠物1/2/3→后脑→面部:以上一锚点为中心开 rx×ry 局部窗快跟;连续 faststep 帧失配、
+        或距上次全图>research(ms) 就全图重搜校准;局部窗内相邻帧锚点跳变>maxmove 判瞬移误匹配丢弃;
+        面部原图/镜像谁高谁定朝向(_role_face)。找不到停在最后位置、后台继续全图搜、搜到立刻同步(沿用旧稳策略,
+        边缘自救靠_char_match_ok/_char_lost_edge,下游零改)。人物坐标=锚点中心本身(不做到脚补偿,单平台只看X、跨平台走引导线)。"""
+        tr = getattr(self, '_role_track', None)
+        if tr is None:
+            tr = {"last": None, "foot": None, "miss": 0, "last_full": 0.0, "face": None, "score": 0.0}
+            self._role_track = tr
+        if frame is None:
+            return tr["foot"]
+        # 一个已采锚点都没有→新链无数据(测试期不再回退旧整框链),返回最后点/None
+        if not any(self._role_has_anchor(_k) for _k in ROLE_ANCHOR_KEYS):
+            self._char_match_ok = False
+            return tr["foot"]
+        P = self._role_rec.get("params", ROLE_TRACK_DEFAULT) if self._role_rec else ROLE_TRACK_DEFAULT
+        thr = float(P.get("thr", 0.62)); rx = int(P.get("rx", 180)); ry = int(P.get("ry", 120))
+        maxmove = int(P.get("maxmove", 48)); faststep = int(P.get("faststep", 2)); research = float(P.get("research", 1500))
+        now = time.time() * 1000
+        last = tr["last"]
+        need_full = (last is None) or (now - tr["last_full"] > research) or (tr["miss"] >= faststep)
+        box = None if need_full else (last[0] - rx, last[1] - ry, last[0] + rx, last[1] + ry)
+        self._role_search_box = box  # 局部跟踪搜索范围框(全图重搜时=None不画),供蒙板可视化"在哪片区域找锚点"
+        # 两套互斥情形(用户2026-09-13):人名永远第一优先;人名丢时——正常打怪/行走找人脸、上梯子状态找后脑。
+        # 人脸和后脑同一时刻只匹配一个(互斥、只显示一个框),人名框两套都在;pet仅在管理窗评识别率、不参与跟踪。
+        _on_ladder = bool(getattr(self, '_ladder_precise_mode', False)) \
+            and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+        got = {}
+        _match_keys = ("name", "back") if _on_ladder else ("name", "face_r")
+        for k in _match_keys:
+            s, loc, face = self._role_match_in(frame, k, box)
+            if loc is not None:
+                got[k] = (s, loc, face)
+        # 可视化:识别到(过阈)的锚点用其采集多边形、以命中中心为不动点缩小一倍,供蒙板画框;没识别到不显示
+        ameta = self._role_rec.get("anchors", {}) if self._role_rec else {}
+        polys = {}
+        for _k, (_s, _loc, _f) in got.items():
+            if _s < thr:
+                continue
+            _m = ameta.get(_k)
+            if not _m:
+                continue
+            _w, _h, _pp = int(_m.get("w", 0)), int(_m.get("h", 0)), _m.get("poly")
+            if _w <= 0 or _h <= 0 or not _pp:
+                continue
+            _cx, _cy = _loc; _tlx, _tly = _cx - _w // 2, _cy - _h // 2
+            _g = [(_tlx + int(dx), _tly + int(dy)) for dx, dy in _pp]  # 采集原尺寸(用户:显示框加大一倍,不再缩小)
+            polys[_k] = (_g, float(_s))
+        self._role_anchor_polys = polys
+        if time.time() - getattr(self, '_role_diag_t', 0) > 0.5:  # 0.5s一次分数诊断,看谁稳谁飘
+            self._role_diag_t = time.time()
+            _debug_log("[角色跟踪] 模式=%s last=%s 分数[%s]" % (
+                "全图" if need_full else "局部", last,
+                " ".join("%s=%.2f" % (kk, got[kk][0]) for kk in got) or "无命中"))
+        # 定位仲裁(与上面人脸/后脑互斥同口径):人名为主,人名丢了按当前状态用 face_r(正常)或 back(上梯)兜底,不让定位框丢
+        _order = ("name", "back") if _on_ladder else ("name", "face_r")
+        _pick = None
+        for _pk in _order:
+            _pv = got.get(_pk)
+            if _pv is not None and _pv[0] >= thr:
+                _ploc = _pv[1]
+                # 局部窗内跳变超最大跳变=瞬移误匹配→跳过该源试下一个;全图重搜不限制
+                if last is not None and not need_full and np.hypot(_ploc[0] - last[0], _ploc[1] - last[1]) > maxmove:
+                    continue
+                _pick = (_pk, _pv); break
+        if _pick is not None:
+            _pk, (ps, (ax, ay), _pface) = _pick
+            tr["last"] = (ax, ay)
+            tr["foot"] = (int(ax), int(ay))  # 锚点在哪坐标就在哪(单平台只看X,不做到脚补偿)
+            tr["miss"] = 0; tr["score"] = ps
+            if need_full:
+                tr["last_full"] = now
+            _fv = got.get("face_r")  # 朝向优先由面部锚点判;面部没中就保持上一次朝向、不乱翻
+            if _fv is not None and _fv[0] >= thr:
+                tr["face"] = _fv[2]
+            self._role_face = tr["face"]
+            self._role_pos_src = _pk  # 当前定位源name/face_r/back(诊断用)
+            self._last_char_match_pos = tr["foot"]; self._last_char_match_time = now
             self._char_match_ok = True; self._char_lost_edge = None
-            return (vote[0], vote[1])
-        # 1) 投票没定出(首捕/瞬移重捕/小窗偶发凑不够票)→原多特征融合全图匹配兜底
-        match = self._match_character(frame)
-        if match:
-            mx, my, _ = match
-            self._char_match_ok = True
-            self._char_lost_edge = None
-            return (mx, my)  # 已含特征偏移，不再加全局偏移
-        # 2) 找不到：停在最后消失位置（无限期保持，不乱飞、不判丢），直到全图重新搜到再同步
+            return tr["foot"]
+        # 没定出:失配计数,全图没找到也重置全图计时(避免每帧全图);停在最后脚点继续等重搜
+        tr["miss"] += 1
+        if need_full:
+            tr["last_full"] = now
         self._char_match_ok = False
-        last_pos = getattr(self, '_last_char_match_pos', None)
-        # 判定丢失位置：最后脚X距画面左右边≤CHAR_EDGE_MARGIN=贴地图边缘(触发向中间自救)，否则=中间(原地等)
+        fp = tr["foot"]
         self._char_lost_edge = None
-        if last_pos is not None and frame is not None:
+        if fp is not None:
             _fw = frame.shape[1]
-            if last_pos[0] <= CHAR_EDGE_MARGIN:
+            if fp[0] <= CHAR_EDGE_MARGIN:
                 self._char_lost_edge = 'left'
-            elif last_pos[0] >= _fw - CHAR_EDGE_MARGIN:
+            elif fp[0] >= _fw - CHAR_EDGE_MARGIN:
                 self._char_lost_edge = 'right'
-        if last_pos:
-            return last_pos
-        # 3) 从未成功定位过才返回None
+            return fp
         return None
 
     def _draw_monster_overlay(self, frame, player_pos):
@@ -16472,6 +17155,7 @@ class MinimapRouteRecorder:
                     _yolo_crop = (max(0, _dyx1), max(_band_y1, _dyy1), min(_fw, _dyx2), min(_band_y2, _dyy2))
                     if _yolo_crop[2] <= _yolo_crop[0] or _yolo_crop[3] <= _yolo_crop[1]:
                         _yolo_crop = (0, _band_y1, _fw, _band_y2)
+                    self._disp_yolo_crop = _yolo_crop  # 怪物识别(YOLO推理)范围,供蒙板黄框可视化(对齐心火)
                     if _ch is not None:
                         _ftx1, _ftx2 = max(0, _ch[0] - _skr), min(_fw, _ch[0] + _skr)
                         _fty1, _fty2 = max(_band_y1, _ch[1] - _yupr), min(_band_y2, _ch[1] + _ydnr)
@@ -16480,6 +17164,7 @@ class MinimapRouteRecorder:
                     _feat_crop = (_ftx1, _fty1, _ftx2, _fty2)
                     if _feat_crop[2] <= _feat_crop[0] or _feat_crop[3] <= _feat_crop[1]:
                         _feat_crop = (0, _band_y1, _fw, _band_y2)
+                    self._disp_feat_crop = _feat_crop  # 人物技能(攻击射程atk1_distance+Y上下)范围,供蒙板紫框(对齐心火)
                     if _now_det - self._feat_last_t >= self._perf_val('feat_s'):  # 怪模板节流按CPU档(无模板直接[]零开销)
                         _tf0 = time.time()
                         self._feat_cache = self._match_monster(_frame, _feat_crop) if self._monster_templates else []
@@ -17963,7 +18648,8 @@ class MinimapRouteRecorder:
                                getattr(self, '_clear_window', None) is not None or
                                getattr(self, '_char_feature_window', None) is not None or
                                getattr(self, '_monster_feature_window', None) is not None or
-                               getattr(self, '_ladder_feature_window', None) is not None)
+                               getattr(self, '_ladder_feature_window', None) is not None or
+                               getattr(self, '_role_rec_window', None) is not None)
                     if has_win:
                         # 处理所有待处理事件（最多10ms，避免阻塞主循环），提高弹窗输入/移动响应速度
                         # 注意：必须循环调用dooneevent直到没有事件或超时，否则after定时器事件可能不被处理
@@ -18051,6 +18737,11 @@ class MinimapRouteRecorder:
                 # 无任何位置可外推：绿框保持上次搜索ROI显示
                 self._monster_overlay_data["char_match_roi"] = getattr(self, "_char_match_roi_rect", None)
             self._monster_overlay_data["monster_feature_matches"] = self._monster_feature_matches
+            # 新角色锚点:识别到的缩小多边形框 + 局部跟踪搜索范围框(每帧由检测线程写入,识别不到就为空)
+            self._monster_overlay_data["role_anchor_polys"] = getattr(self, "_role_anchor_polys", {})
+            self._monster_overlay_data["role_search_box"] = getattr(self, "_role_search_box", None)
+            self._monster_overlay_data["yolo_crop"] = getattr(self, "_disp_yolo_crop", None)  # 黄=怪物识别范围
+            self._monster_overlay_data["feat_crop"] = getattr(self, "_disp_feat_crop", None)  # 紫=技能范围
             _now_sync = time.time()
             if not hasattr(self, '_last_monster_sync_log') or _now_sync - self._last_monster_sync_log > 2:
                 self._last_monster_sync_log = _now_sync

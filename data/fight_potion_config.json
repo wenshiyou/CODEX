@@ -25,13 +25,9 @@
   "hp_key": "pgdn",
   "aoe_y_up": "-100",
   "aoe_y_down": "30",
-  "far_range_x": "1000",
-  "far_range_y_up": "300",
-  "far_range_y_down": "200",
+  "far_range_x": "300",
+  "far_range_y_up": "150",
+  "far_range_y_down": "30",
   "slope_jump_y_min": "-25",
-  "slope_jump_y_max": "-180",
-  "match_sim": {
-    "char": "0.6",
-    "monster": "0.70"
-  }
+  "slope_jump_y_max": "-180"
 }
