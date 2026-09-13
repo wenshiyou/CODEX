@@ -141,8 +141,8 @@
   "params": {
     "fps": 24,
     "thr": 0.62,
-    "rx": 180,
-    "ry": 120,
+    "rx": 280,
+    "ry": 130,
     "maxmove": 48,
     "faststep": 2,
     "research": 1500,

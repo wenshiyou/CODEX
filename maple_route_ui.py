@@ -1581,6 +1581,7 @@ class MinimapRouteRecorder:
         # 热键状态（保留以备鼠标回调复用_handle_hotkey）
         self._key_state = {vk: False for vk in [VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F12]}
         self._running = False  # 脚本运行状态，F10启动 F12停止
+        self._debug_overlay = True  # 调试显示总开关(F4切):True=画全部框/线,False=蒙板等同干净原画面(纯显示、不参与识别,不影响打怪)
         self._last_input_change = 0  # 输入框最后修改时间，用于3秒自动失焦
         # 偏移视觉反馈：设好偏移后等3秒，在人物偏移点位画黄点闪烁5次
         self._offset_feedback_start = 0  # 偏移修改时间戳
@@ -3577,6 +3578,20 @@ class MinimapRouteRecorder:
         except Exception:
             return np.zeros_like(vv, np.uint8)
 
+    def _role_anchor_pivot(self, key, tw, th):
+        """返回锚点'所描多边形主体'相对外接png左上角的中心偏移(顶点质心);没poly就回退外接png中心。
+        用户要求人脸/人名/后脑一律以'描出来的形状中心'为基点,而不是整张外接矩形的几何中心(形状偏画时会偏)。"""
+        try:
+            _r = self._role_rec or self._load_role_recognize()
+            _pp = (_r or {}).get("anchors", {}).get(key, {}).get("poly")
+            if _pp:
+                _ox = int(round(sum(p[0] for p in _pp) / len(_pp)))
+                _oy = int(round(sum(p[1] for p in _pp) / len(_pp)))
+                return _ox, _oy
+        except Exception:
+            pass
+        return tw // 2, th // 2
+
     def _role_match_in(self, frame, key, box=None):
         """在指定区域 box=(x0,y0,x1,y1)(None=整帧)内匹配单锚点→(score0~1, 锚点中心全局(x,y)或None, 朝向'L'/'R'/None)。
         名字/宠物名:区域V通道自适应二值成黑底白字再比(和采集OTSU笔画同源,抗半透明底板/换背景);
@@ -3610,9 +3625,25 @@ class MinimapRouteRecorder:
                     self._role_bin_cache = (_ck[0], _ck[1], scene)
                 res = cv2.matchTemplate(scene, tpl, cv2.TM_CCOEFF_NORMED)
                 _, mv, _, ml = cv2.minMaxLoc(res)
-                return float(mv), (x0 + ml[0] + tw // 2, y0 + ml[1] + th // 2), None
+                _ox, _oy = self._role_anchor_pivot(key, tw, th)  # 基点=所描名字形状中心,不是外接png中心
+                return float(mv), (x0 + ml[0] + _ox, y0 + ml[1] + _oy), None
             # 脸/后脑:灰度TM_CCOEFF_NORMED(减均值、抗明暗,假阳性低=稳版算法;曾试带mask的CCORR/SQDIFF彩色匹配,
             # 亮岩壁/UI会撞恒定0.84假分把定位框带飞,已回滚)。脸:朝右模板+水平镜像各配一次、谁分高判朝向。
+            # 脸/后脑:模板多边形外那圈黑会拉低CCOEFF相关分(固定图才55%)。不换算法、只把外圈填成"主体内平均灰度",
+            # CCOEFF减均值后外圈≈0贡献=软掩膜,主体分上来;算法仍是减均值的CCOEFF、抗明暗,不会像CCORR在亮区撞假高分。
+            if not (key == "name" or key.startswith("pet")):
+                try:
+                    _rec0 = self._role_rec or self._load_role_recognize()
+                    _pp0 = (_rec0 or {}).get("anchors", {}).get(key, {}).get("poly")
+                    if _pp0:
+                        _mk0 = np.zeros(tpl.shape[:2], np.uint8)
+                        cv2.fillPoly(_mk0, [np.array(_pp0, np.int32)], 255)
+                        if (_mk0 > 0).any():
+                            _mval = tpl[_mk0 > 0].mean()
+                            tpl = tpl.copy()
+                            tpl[_mk0 == 0] = int(_mval)  # 外圈填主体均值,减均值后近似零贡献
+                except Exception:
+                    pass
             gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
             res = cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED)
             _, sr, _, sl = cv2.minMaxLoc(res)
@@ -3622,7 +3653,8 @@ class MinimapRouteRecorder:
                 _, sl2, _, ll = cv2.minMaxLoc(res2)
                 if float(sl2) > best:
                     best, lx, ly, face = float(sl2), ll[0], ll[1], "L"
-            return best, (x0 + lx + tw // 2, y0 + ly + th // 2), face
+            _ox2, _oy2 = self._role_anchor_pivot(key, tw, th)  # 命中点=所描形状(脸/后脑)自身中心
+            return best, (x0 + lx + _ox2, y0 + ly + _oy2), face
         except Exception:
             return 0.0, None, None
 
@@ -3762,16 +3794,17 @@ class MinimapRouteRecorder:
         # 实时识别率:每500ms截一帧匹配已采锚点,顶部显示坐标/识别率/朝向(对齐心火顶部状态行)
         _cn_map = {k: c for k, c, _ in ROLE_ANCHORS}
 
+        self._role_live_on = True
         def _live_tick():
             try:
-                if not win.winfo_exists():
-                    return
+                _alive = bool(win.winfo_exists())
             except Exception:
-                return
+                _alive = False
+            if not _alive or not getattr(self, '_role_live_on', False):
+                return  # 窗口已关/正在关:停after链(旧版每500ms自己抓帧全图匹配,拖动/关窗时与tk交错会整程序闪退)
             try:
                 thr = float(self._role_rec.get("params", {}).get("thr", ROLE_TRACK_DEFAULT["thr"]))
-                info = self._role_eval_live()
-                scores = info.get("scores", {}) if info else {}
+                scores = getattr(self, "_role_last_scores", {}) or {}  # 直接读检测线程现成分数,不再自己抓帧匹配
                 for _k, _lbl in getattr(self, "_row_score_lbl", {}).items():  # 每行实时识别率
                     _t = scores.get(_k)
                     if _t is not None:
@@ -3780,9 +3813,10 @@ class MinimapRouteRecorder:
                                     fg=("#2E7D32" if _ss >= thr else "#E65100"))
                     else:
                         _lbl.config(text="--%", fg="gray")
-                b = info.get("best") if info else None
-                if b is not None:
-                    bk, bs, bx, by, face = b
+                _cand = [(v[0], k, v) for k, v in scores.items()]
+                if _cand:
+                    bs, bk, _t = max(_cand, key=lambda z: z[0])
+                    bx, by, face = _t[1][0], _t[1][1], _t[2]
                     fa = "朝右" if face == "R" else ("朝左" if face == "L" else "")
                     self._role_live_var.set("实时锚点：X%d / Y%d · %d%% · %s %s" % (bx, by, int(bs * 100), _cn_map.get(bk, bk), fa))
                     self._role_live_lbl.config(fg=("#2E7D32" if bs >= thr else "#E65100"),
@@ -3792,10 +3826,15 @@ class MinimapRouteRecorder:
                     self._role_live_lbl.config(fg="#9E9E9E", bg="#F5F5F5")
             except Exception:
                 pass
-            win.after(500, _live_tick)
+            try:
+                if win.winfo_exists() and getattr(self, '_role_live_on', False):
+                    win.after(500, _live_tick)
+            except Exception:
+                pass
         win.after(300, _live_tick)
 
         def on_close():
+            self._role_live_on = False  # 先停定时刷新链,再关窗,避免after回调访问已销毁控件
             _apply_params(); self._close_window("_role_rec_window")
         win.protocol("WM_DELETE_WINDOW", on_close)
         tk.Button(win, text="保存并关闭", width=16, height=2, bg="#2196F3", fg="white",
@@ -7572,8 +7611,13 @@ class MinimapRouteRecorder:
             _debug_log("[F3] _arbiter_live=%s" % self._arbiter_live)
             return
         if vk == VK_F4:
-            # F4=角色特征采集标注(摆框→3秒倒计时→2秒20张→逐张点特征+脚基点→特征集组落盘)
-            self._char_feature_capture()
+            # F4=调试显示总开关:开=画全部框/线(锚点橙框/白搜索框/黄怪物框/蓝技能框/怪物点等);关=蒙板等同干净原画面。
+            # 蒙板只负责显示、不参与识别,关掉不影响任何打怪逻辑。旧连拍采集已改由"人物特征"按钮的角色识别管理窗承担(方法保留备用)。
+            self._debug_overlay = not getattr(self, '_debug_overlay', True)
+            _msg = "调试显示 开(F4)" if self._debug_overlay else "调试显示 关(F4)·画面干净"
+            print("[F4]", _msg)
+            self._add_log(_msg)
+            _debug_log("[F4] _debug_overlay=%s" % self._debug_overlay)
             return
         if vk == VK_F5:
             if self.recording_ladder:
@@ -11900,7 +11944,8 @@ class MinimapRouteRecorder:
                                 txt_x = max(10, rect.right // 2 - 280)
                                 txt_y = 15  # 窗口最上方白边
                                 gdi32.TextOutW(hdc, txt_x, txt_y, step_txt, len(step_txt))
-                        data = self._monster_overlay_data
+                        # 调试总开关(F4):关时data置空→所有实战框/点/线都不画,蒙板只剩透明背景=干净原画面
+                        data = self._monster_overlay_data if getattr(self, '_debug_overlay', True) else {}
                         # 人物位置取数（黄点/怪物连线/框都依赖它；丢失会使后面绘制抛异常）
                         char_pos = data.get('char_pos') if data else None
                         cx = cy = 0
@@ -11978,9 +12023,9 @@ class MinimapRouteRecorder:
                                 gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
                                 gdi32.Rectangle(hdc, int(_bx0), int(_by0), int(_bx1), int(_by1))
                                 gdi32.SelectObject(hdc, old_rpen)
-                            _role_colors = {"name": 0x00FFFF, "face_r": 0x0000FF00, "back": 0x00FF00FF,
-                                            "pet1": 0x0000FFFF, "pet2": 0x0000FFFF, "pet3": 0x0000FFFF}
-                            _role_cn = {_a[0]: _a[1] for _a in ROLE_ANCHORS}  # 模块全局,不经过self(回调内self异常)
+                            # 三个角色锚点统一橙色框(用户:不要五颜六色);禁用品红0xFF00FF=蒙板透明色键、画了会被抠空看不见
+                            _role_colors = {"name": 0x00A5FF, "face_r": 0x00A5FF, "back": 0x00A5FF,
+                                            "pet1": 0x00A5FF, "pet2": 0x00A5FF, "pet3": 0x00A5FF}
                             for _rk, (_rpts, _rscore) in (data.get('role_anchor_polys') or {}).items():
                                 if not _rpts:
                                     continue
@@ -11994,20 +12039,13 @@ class MinimapRouteRecorder:
                                 gdi32.MoveToEx(hdc, int(_p0[0]), int(_p0[1]), None)
                                 for _px, _py in _rpts[1:]:
                                     gdi32.LineTo(hdc, int(_px), int(_py))
-                                gdi32.LineTo(hdc, int(_p0[0]), int(_p0[1]))  # 闭合
+                                gdi32.LineTo(hdc, int(_p0[0]), int(_p0[1]))  # 闭合(用户:框上不显示任何文字)
                                 gdi32.SelectObject(hdc, old_apen)
-                                afont = gdi32.CreateFontW(16, 0, 0, 0, 400, 0, 0, 0, 134, 3, 2, 1, 49, "微软雅黑")
-                                if afont:
-                                    gdi_objs.append(afont)
-                                old_afont = gdi32.SelectObject(hdc, afont)
-                                gdi32.SetTextColor(hdc, _rc); gdi32.SetBkMode(hdc, 1)
-                                _rtxt = _role_cn.get(_rk, _rk)  # 框旁只标锚点名(识别率%在角色识别面板看)
-                                gdi32.TextOutW(hdc, int(_p0[0]), int(_p0[1]) - 18, _rtxt, len(_rtxt))
-                                gdi32.SelectObject(hdc, old_afont)
 
                             # 心火式两个实战范围框(都以人物为中心、随人移动):黄=怪物识别(YOLO)范围,紫=人物技能(攻击射程)范围
+                            # 黄=怪物识别范围;技能范围用蓝(禁用品红0xFF00FF=透明色键,旧紫框被抠空才看不见,用户:换蓝)
                             for _rk2, _rc2, _rlab in (("yolo_crop", 0x0000FFFF, "怪物识别"),
-                                                      ("feat_crop", 0x00FF00FF, "技能范围")):
+                                                      ("feat_crop", 0x00FF0000, "技能范围")):
                                 _cb = data.get(_rk2)
                                 if _cb:
                                     _cpen = gdi32.CreatePen(0, 2, _rc2)
@@ -12271,7 +12309,8 @@ class MinimapRouteRecorder:
                     overlay.geometry("%dx%d+%d+%d" % (
                         wr['width'], wr['height'], wr['left'], wr['top']))
                 canvas.delete('all')
-                data = self._monster_overlay_data
+                # 调试总开关(F4):关时data置空,tk覆盖层也不画任何框/点
+                data = self._monster_overlay_data if getattr(self, '_debug_overlay', True) else {}
                 now_ms = time.time() * 1000
                 if data:
                     hp_marker = data.get('hp_marker')
@@ -14792,55 +14831,87 @@ class MinimapRouteRecorder:
         maxmove = int(P.get("maxmove", 48)); faststep = int(P.get("faststep", 2)); research = float(P.get("research", 1500))
         now = time.time() * 1000
         last = tr["last"]
-        need_full = (last is None) or (now - tr["last_full"] > research) or (tr["miss"] >= faststep)
+        # 失配时miss每帧+1、≥faststep就全图=几乎每帧全图(脸还镜像=每帧4次全图匹配),吃满CPU/GIL把主循环绘制拖到
+        # 400ms、帧率掉到10~15、动作中更抓不到锚点=死循环。给"miss触发的全图"加350ms最小间隔,期间只跑便宜局部窗,把帧率让回来。
+        _FULL_GAP_MS = 350.0
+        need_full = (last is None) or (now - tr["last_full"] > research) \
+            or ((tr["miss"] >= faststep) and (now - tr["last_full"] > _FULL_GAP_MS))
         box = None if need_full else (last[0] - rx, last[1] - ry, last[0] + rx, last[1] + ry)
         self._role_search_box = box  # 局部跟踪搜索范围框(全图重搜时=None不画),供蒙板可视化"在哪片区域找锚点"
-        # 两套互斥情形(用户2026-09-13):人名永远第一优先;人名丢时——正常打怪/行走找人脸、上梯子状态找后脑。
-        # 人脸和后脑同一时刻只匹配一个(互斥、只显示一个框),人名框两套都在;pet仅在管理窗评识别率、不参与跟踪。
-        _on_ladder = bool(getattr(self, '_ladder_precise_mode', False)) \
-            and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+        # 三锚点都匹配(用户2026-09-13终稿):人名永远第一;脸/后脑不靠梯子状态切换(手动挂绳脚本无状态可判),
+        # 二者谁分高用谁、只显示分高那个=天然互斥(平地脸朝镜头脸赢、梯子脸朝里后脑赢);pet仅管理窗评、不参与跟踪。
         got = {}
-        _match_keys = ("name", "back") if _on_ladder else ("name", "face_r")
+        _match_keys = ("name", "face_r", "back")
         for k in _match_keys:
             s, loc, face = self._role_match_in(frame, k, box)
             if loc is not None:
                 got[k] = (s, loc, face)
-        # 可视化:识别到(过阈)的锚点用其采集多边形、以命中中心为不动点缩小一倍,供蒙板画框;没识别到不显示
+        # 可视化:过阈锚点用其采集多边形、以命中中心为不动点画框。人名过阈就画;脸/后脑只画分高的那个(互斥、只显示一个)
         ameta = self._role_rec.get("anchors", {}) if self._role_rec else {}
+        _show_keys = set()
+        if got.get("name", (0.0,))[0] >= thr:
+            _show_keys.add("name")
+        _fbs = [(got[_k][0], _k) for _k in ("face_r", "back") if _k in got and got[_k][0] >= thr]
+        if _fbs:
+            _show_keys.add(max(_fbs)[1])  # 脸/后脑分高者胜
         polys = {}
-        for _k, (_s, _loc, _f) in got.items():
-            if _s < thr:
-                continue
+        for _k in _show_keys:
+            _s, _loc, _f = got[_k]
             _m = ameta.get(_k)
             if not _m:
                 continue
             _w, _h, _pp = int(_m.get("w", 0)), int(_m.get("h", 0)), _m.get("poly")
             if _w <= 0 or _h <= 0 or not _pp:
                 continue
-            _cx, _cy = _loc; _tlx, _tly = _cx - _w // 2, _cy - _h // 2
-            _g = [(_tlx + int(dx), _tly + int(dy)) for dx, dy in _pp]  # 采集原尺寸(用户:显示框加大一倍,不再缩小)
+            _cx, _cy = _loc  # loc=多边形质心;外接png左上角=质心-pivot,多边形才准确画在命中原位(显示不挪)
+            _pxo, _pyo = self._role_anchor_pivot(_k, _w, _h)
+            _tlx, _tly = _cx - _pxo, _cy - _pyo
+            _g = [(_tlx + int(dx), _tly + int(dy)) for dx, dy in _pp]  # 采集原尺寸、原位显示
             polys[_k] = (_g, float(_s))
         self._role_anchor_polys = polys
+        # 最新一帧各锚点分数/位置/朝向存出来,供「角色识别」管理窗直接显示(管理窗不再自己抓帧全图匹配,避免拖动/关窗时重活交错闪退、也省CPU)
+        self._role_last_scores = got
         if time.time() - getattr(self, '_role_diag_t', 0) > 0.5:  # 0.5s一次分数诊断,看谁稳谁飘
             self._role_diag_t = time.time()
             _debug_log("[角色跟踪] 模式=%s last=%s 分数[%s]" % (
                 "全图" if need_full else "局部", last,
                 " ".join("%s=%.2f" % (kk, got[kk][0]) for kk in got) or "无命中"))
-        # 定位仲裁(与上面人脸/后脑互斥同口径):人名为主,人名丢了按当前状态用 face_r(正常)或 back(上梯)兜底,不让定位框丢
-        _order = ("name", "back") if _on_ladder else ("name", "face_r")
+        # 定位仲裁:人名优先;人名丢了用脸/后脑里分高者兜底(谁分高谁更可能是真角色),不让定位框丢
+        _nv = got.get("name")
+        if _nv is not None and _nv[0] >= thr:
+            _cand = [("name", _nv)]
+        else:
+            _cand = sorted(((kk, got[kk]) for kk in ("face_r", "back") if kk in got and got[kk][0] >= thr),
+                           key=lambda kv: -kv[1][0])
+        # 人名在时学习"脸/后脑中心→人名中心"偏移(EMA平滑);人名丢、用脸/后脑定位时把命中点加该偏移映射回人名那条线,
+        # 于是三源的【实际基点】统一在人名位置、打怪不上下跳;但各锚点橙框仍画在命中原位(显示不动)。
+        _nloc = _nv[1] if (_nv is not None and _nv[0] >= thr) else None
+        for _kk in ("face_r", "back"):
+            if _nloc is not None and _kk in got and got[_kk][0] >= thr:
+                _dx, _dy = _nloc[0] - got[_kk][1][0], _nloc[1] - got[_kk][1][1]
+                _o = tr.get("off_" + _kk)
+                if _o is None:
+                    tr["off_" + _kk] = [float(_dx), float(_dy)]
+                else:  # EMA平滑,避免单帧抖动让基点飘
+                    _o[0] = _o[0] * 0.7 + _dx * 0.3; _o[1] = _o[1] * 0.7 + _dy * 0.3
         _pick = None
-        for _pk in _order:
-            _pv = got.get(_pk)
-            if _pv is not None and _pv[0] >= thr:
-                _ploc = _pv[1]
-                # 局部窗内跳变超最大跳变=瞬移误匹配→跳过该源试下一个;全图重搜不限制
-                if last is not None and not need_full and np.hypot(_ploc[0] - last[0], _ploc[1] - last[1]) > maxmove:
-                    continue
-                _pick = (_pk, _pv); break
+        for _pk, _pv in _cand:
+            _ploc = _pv[1]
+            if _pk == "name":
+                _bx, _by = float(_ploc[0]), float(_ploc[1])
+            else:  # 脸/后脑:实际基点偏移到人名位置;刚启动还没和人名同帧学到偏移时才暂用自身点
+                _o = tr.get("off_" + _pk)
+                _bx, _by = (_ploc[0] + _o[0], _ploc[1] + _o[1]) if _o else (float(_ploc[0]), float(_ploc[1]))
+            # 局部窗内离上一基点跳变>maxmove:弱匹配(<0.75)当误匹配丢弃;≥0.75强匹配=合法瞬移直接采信(背景假分到不了0.75)
+            if last is not None and not need_full \
+                    and np.hypot(_bx - last[0], _by - last[1]) > maxmove and _pv[0] < 0.75:
+                continue
+            _pick = (_pk, _pv, _bx, _by); break
         if _pick is not None:
-            _pk, (ps, (ax, ay), _pface) = _pick
+            _pk, (ps, _srcloc, _pf0), axf, ayf = _pick
+            ax, ay = int(round(axf)), int(round(ayf))  # 实际基点(三源已统一到人名那条线)
             tr["last"] = (ax, ay)
-            tr["foot"] = (int(ax), int(ay))  # 锚点在哪坐标就在哪(单平台只看X,不做到脚补偿)
+            tr["foot"] = (ax, ay)  # 单平台只看X,不做到脚补偿
             tr["miss"] = 0; tr["score"] = ps
             if need_full:
                 tr["last_full"] = now
@@ -18740,8 +18811,35 @@ class MinimapRouteRecorder:
             # 新角色锚点:识别到的缩小多边形框 + 局部跟踪搜索范围框(每帧由检测线程写入,识别不到就为空)
             self._monster_overlay_data["role_anchor_polys"] = getattr(self, "_role_anchor_polys", {})
             self._monster_overlay_data["role_search_box"] = getattr(self, "_role_search_box", None)
-            self._monster_overlay_data["yolo_crop"] = getattr(self, "_disp_yolo_crop", None)  # 黄=怪物识别范围
-            self._monster_overlay_data["feat_crop"] = getattr(self, "_disp_feat_crop", None)  # 紫=技能范围
+            # 黄/紫范围框直接按人物显示点几何算(不依赖B线程:上梯冻结B或未运行时也必须显示,用户2026-09-13)
+            try:
+                _rf0 = self._raw_frame
+                _Hh, _Ww = (_rf0.shape[:2] if _rf0 is not None else (749, 1276))
+                _by1 = DETECT_TOP_MARGIN; _by2 = max(DETECT_TOP_MARGIN + 1, _Hh - DETECT_BOTTOM_MARGIN)
+                _fcc = self._get_fight_config()
+                _skr = int(_fcc.get("atk1_distance", 150) or 150)
+                _yup = abs(int(_fcc.get("attack_y_up", -ATTACK_Y_UP)))
+                _ydn = abs(int(_fcc.get("attack_y_down", ATTACK_Y_DOWN)))
+                _fxr = int(_fcc.get("far_range_x", 0) or 0)
+                _fyup = int(_fcc.get("far_range_y_up", 0) or 0)
+                _fydn = int(_fcc.get("far_range_y_down", 0) or 0)
+                if _disp_pos:
+                    if _fxr > 0 and (_fyup > 0 or _fydn > 0):
+                        _yx1, _yx2 = max(0, _disp_pos[0] - _fxr), min(_Ww, _disp_pos[0] + _fxr)
+                        _yy1 = _disp_pos[1] - _fyup if _fyup > 0 else _by1
+                        _yy2 = _disp_pos[1] + _fydn if _fydn > 0 else _by2
+                    else:
+                        _yx1, _yx2, _yy1, _yy2 = 0, _Ww, _by1, _by2
+                    _ycrop = (max(0, _yx1), max(_by1, _yy1), min(_Ww, _yx2), min(_by2, _yy2))  # 黄=怪物识别范围
+                    _fcrop = (max(0, _disp_pos[0] - _skr), max(_by1, _disp_pos[1] - _yup),
+                              min(_Ww, _disp_pos[0] + _skr), min(_by2, _disp_pos[1] + _ydn))  # 紫=技能范围
+                else:
+                    _ycrop = _fcrop = None
+                self._monster_overlay_data["yolo_crop"] = _ycrop
+                self._monster_overlay_data["feat_crop"] = _fcrop
+            except Exception:
+                self._monster_overlay_data["yolo_crop"] = None
+                self._monster_overlay_data["feat_crop"] = None
             _now_sync = time.time()
             if not hasattr(self, '_last_monster_sync_log') or _now_sync - self._last_monster_sync_log > 2:
                 self._last_monster_sync_log = _now_sync
