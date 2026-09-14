@@ -368,12 +368,12 @@ os.makedirs(CHAR_TEMPLATE_DIR, exist_ok=True)
 CHAR_TEMPLATE_META = os.path.join(CHAR_TEMPLATE_DIR, "meta.json")
 CHAR_MAX_TEMPLATES = 10
 CHAR_MATCH_THRESHOLD = 0.70  # 全图人物匹配阈值(用户2026-09-05：0.75太高角色只到~0.7被拒→降回0.70)
-# ==================== 角色识别(2026-09-13对齐心火:小锚点多冗余+局部半径跟踪,替代旧整框/小块人物特征) ====================
+# ==================== 角色识别(2026-09-13:小锚点多冗余+局部半径跟踪,替代旧整框/小块人物特征) ====================
 ROLE_REC_DIR = os.path.join(DATA_DIR, "role_recognize")  # 全局角色锚点目录(只跟角色有关、不随地图方案变,采一次长期用,重采才覆盖)
 os.makedirs(ROLE_REC_DIR, exist_ok=True)
 ROLE_REC_FILE = os.path.join(ROLE_REC_DIR, "role_recognize.json")
 # 锚点定义(key,中文名,说明):角色名=主模板;面部只采朝右一张=人物主体(朝左由水平镜像自动生成,顺带判朝向);宠物名=被特效盖住时冗余
-# 心火成品只有:角色名/面部朝右/宠物名1-3/黑名单,没有"钻石"项(2026-09-13实机截图确认)
+# 锚点项:角色名/面部朝右/宠物名1-3/黑名单,没有"钻石"项(2026-09-13实机截图确认)
 ROLE_ANCHORS = [
     ("name",    "角色名(主模板)",  "主要模板·头顶名字,固定不变,优先用它"),
     ("face_r",  "面部·朝右",      "只采朝右一张=人物主体;朝左由它水平镜像自动生成(不采会换的衣服)"),
@@ -383,14 +383,14 @@ ROLE_ANCHORS = [
     ("pet3",    "宠物名3",        "第三个宠物名冗余(需先采2)"),
 ]
 ROLE_ANCHOR_KEYS = [_a[0] for _a in ROLE_ANCHORS]
-# 跟踪参数默认值=心火成品验证值(用户要求完整对齐;默认写死,角色识别面板可调、自动存盘)
+# 跟踪参数默认值(默认写死,角色识别面板可调、自动存盘)
 ROLE_TRACK_DEFAULT = {
     "fps": 24,         # 每秒跟踪次数
     "thr": 0.62,       # 锚点匹配阈值
     "rx": 180,         # 横向半径=局部跟踪窗半宽(以上一帧锚点为中心)
     "ry": 120,         # 纵向半径=局部跟踪窗半高
-    "maxmove": 48,     # 最大跳变(心火成品值):相邻帧锚点位移超此值判为瞬移到别人身上,丢弃
-    "faststep": 2,     # 快速失配(心火成品值):局部窗内连续失配多少帧后切全图搜索
+    "maxmove": 48,     # 最大跳变:相邻帧锚点位移超此值判为瞬移到别人身上,丢弃
+    "faststep": 2,     # 快速失配:局部窗内连续失配多少帧后切全图搜索
     "research": 1500,  # 全图搜索间隔(ms):局部跟丢后限频全屏找回,避免每帧全屏拖帧
     "hold": 90,        # 丢失保持(帧):刚丢先保持上一可信点,不立刻乱跳
 }
@@ -1061,7 +1061,7 @@ class MinimapRouteRecorder:
         # 独立窗口引用
         self._plan_window = None  # 方案管理窗口
         self._char_feature_window = None  # 人物特征管理弹窗(旧小块特征,已旁路保留可回滚)
-        # === 角色识别(2026-09-13对齐心火):全局锚点+跟踪参数,启动直接加载、重采才覆盖,不随地图方案变 ===
+        # === 角色识别(2026-09-13):全局锚点+跟踪参数,启动直接加载、重采才覆盖,不随地图方案变 ===
         self._role_rec_window = None   # 「角色识别」tk管理窗引用
         self._role_rec = None          # 角色识别数据 {anchors:{key:{file,poly,off_x,off_y}}, params:{...}}
         self._load_role_recognize()    # 启动即加载(无文件则给默认空壳)
@@ -3340,7 +3340,7 @@ class MinimapRouteRecorder:
         print("[导出] 整理完成 %d个方案（每方案一文件夹含best.onnx）→ %s" % (len(_wrote), _dir))
 
 
-    # ==================== 角色识别:全局数据读写(对齐心火,2026-09-13) ====================
+    # ==================== 角色识别:全局数据读写(2026-09-13) ====================
     def _role_char_dir(self, cid):
         """某角色套的锚点图目录 data/role_recognize/<cid>/"""
         d = os.path.join(ROLE_REC_DIR, str(cid))
@@ -3554,7 +3554,7 @@ class MinimapRouteRecorder:
             self._save_role_recognize()
 
     def _capture_role_anchor(self, key):
-        """角色识别·统一多边形描点采集(2026-09-13定稿,对齐心火:不另定基点;角色名/面部/后脑/宠物名全部同一流程)。
+        """角色识别·统一多边形描点采集(2026-09-13定稿:不另定基点;角色名/面部/后脑/宠物名全部同一流程)。
         流程:①左键点目标中心→以该点为中心取ROLE_MAG_SRC方块放大ROLE_MAG_ZOOM倍、放大框贴在点击点旁;
         ②在放大框内左键逐点,点满4点自动闭合(长方形点4角、不要求直角,多边形通杀);
         ③闭合后编辑:点白色边线=该处插新点并直接拖、拖白点改形、右键点白点删除;空格/回车确认,C重选中心,ESC取消。
@@ -4066,7 +4066,7 @@ class MinimapRouteRecorder:
                 except Exception: pass
 
     def _open_role_recognize_window(self):
-        """打开「角色识别」管理窗(2026-09-13对齐心火):全局锚点采集/移除+缩略图+8项跟踪参数。
+        """打开「角色识别」管理窗(2026-09-13):全局锚点采集/移除+缩略图+8项跟踪参数。
         入口=控制面板"人物特征"按钮BTN_CHAR(替代旧小块人物特征窗)。数据全局长期保存、启动直接加载,不随地图方案变。"""
         import tkinter as tk
         from tkinter import ttk, simpledialog, messagebox
@@ -4088,7 +4088,7 @@ class MinimapRouteRecorder:
         self._position_window(win, 600, 740)
         self._role_thumbs = []  # 持有PhotoImage引用防被GC导致缩略图不显示
 
-        tk.Label(win, text="角色识别（小锚点多冗余 · 局部半径跟踪 · 对齐心火）",
+        tk.Label(win, text="角色识别（小锚点多冗余 · 局部半径跟踪）",
                  font=("微软雅黑", 11, "bold")).pack(pady=(8, 2))
         self._role_live_var = tk.StringVar(value="实时锚点：（采好锚点、游戏画面可见角色时，这里显示坐标 / 识别率 / 朝向）")
         self._role_live_lbl = tk.Label(win, textvariable=self._role_live_var, font=("微软雅黑", 9, "bold"),
@@ -4152,8 +4152,8 @@ class MinimapRouteRecorder:
         self._role_anchor_frame = tk.Frame(win)
         self._role_anchor_frame.pack(fill="x", padx=8)
 
-        # ===== 跟踪参数区(默认心火成品值,可调,关窗统一落盘) =====
-        param_outer = tk.LabelFrame(win, text="角色跟踪参数（默认=心火成品值，可调）", font=("微软雅黑", 9, "bold"))
+        # ===== 跟踪参数区(可调,关窗统一落盘) =====
+        param_outer = tk.LabelFrame(win, text="角色跟踪参数（可调）", font=("微软雅黑", 9, "bold"))
         param_outer.pack(fill="x", padx=8, pady=6)
         self._role_param_vars = {}
         params = self._role_rec["params"]
@@ -4204,7 +4204,7 @@ class MinimapRouteRecorder:
                              font=("微软雅黑", 8)).pack(side="left")
                     sl = tk.Label(row, text="--%", width=7, anchor="w", fg="gray",
                                   font=("微软雅黑", 8, "bold"))
-                    sl.pack(side="left", padx=(8, 0)); self._row_score_lbl[key] = sl  # 每行实时识别率(对齐心火)
+                    sl.pack(side="left", padx=(8, 0)); self._row_score_lbl[key] = sl  # 每行实时识别率
                     try:  # 锚点缩略图
                         im = Image.open(self._role_anchor_path(key)); im.thumbnail((48, 48))
                         ph = ImageTk.PhotoImage(im); self._role_thumbs.append(ph)
@@ -4254,7 +4254,7 @@ class MinimapRouteRecorder:
         def on_close():
             self._role_live_do = None  # 先断开主循环刷新闭包,避免关窗后还去config已销毁控件
             _apply_params(); self._close_window("_role_rec_window")
-        # ===== 角色识别黑名单(放最下方:框内不采信任何锚点命中,防固定UI/图标误检;对齐心火) =====
+        # ===== 角色识别黑名单(放最下方:框内不采信任何锚点命中,防固定UI/图标误检) =====
         blk_outer = tk.LabelFrame(win, text="黑名单区域（默认只屏蔽人物锚点；勾选后怪物YOLO也屏蔽；可框多处同时生效）", font=("微软雅黑", 9, "bold"))
         blk_outer.pack(fill="x", padx=8, pady=4, side="bottom")
         blk_top = tk.Frame(blk_outer); blk_top.pack(fill="x", padx=6, pady=2)
@@ -8791,7 +8791,7 @@ class MinimapRouteRecorder:
         # 8. 子标签页（人物特征弹窗/怪物数据）
         if _in(BTN_CHAR, x, y):
             self._open_role_recognize_window()
-            print("[鼠标] 打开角色识别窗(对齐心火:名字主锚点/脸镜像/宠物名冗余/跟踪参数)")
+            print("[鼠标] 打开角色识别窗(名字主锚点/脸镜像/宠物名冗余/跟踪参数)")
             return
         if _in(BTN_MONSTER, x, y):
             _debug_log("[鼠标] 点击怪物数据按钮")
@@ -9073,7 +9073,7 @@ class MinimapRouteRecorder:
         except Exception as _be:
             _debug_log("[UI小地图] 打怪区域画线异常: %s" % _be)
 
-        # 【人物光点认定中心·用户2026-09-14 同心火】在find_player_dot算出的光点正中心叠红色十字+实心点。
+        # 【人物光点认定中心·用户2026-09-14】在find_player_dot算出的光点正中心叠红色十字+实心点。
         # 平台绿线/梯子都从此中心点吐出:红十字正好压住游戏自带黄光点=中心定准;压住录制线最新端=线从中心出,一眼验证100%重合。
         # 坐标空间:player_pos是小地图块原始像素,乘scale_x/y落到缩放后的map_display(和怪紫点同一画法)。
         if player_pos is not None:
@@ -12600,7 +12600,7 @@ class MinimapRouteRecorder:
                                 except Exception:
                                     pass
 
-                            # 心火式两个实战范围框(都以人物为中心、随人移动):黄=怪物识别(YOLO)范围,紫=人物技能(攻击射程)范围
+                            # 两个实战范围框(都以人物为中心、随人移动):黄=怪物识别(YOLO)范围,紫=人物技能(攻击射程)范围
                             # 黄=怪物识别范围;技能范围用蓝(禁用品红0xFF00FF=透明色键,旧紫框被抠空才看不见,用户:换蓝)
                             for _rk2, _rc2, _rlab in (("yolo_crop", 0x0000FFFF, "怪物识别"),
                                                       ("feat_crop", 0x00FF0000, "技能范围")):
@@ -15333,7 +15333,7 @@ class MinimapRouteRecorder:
         return fx, fy, float(best_v)
 
     def _get_player_screen_pos(self, frame):
-        """人物坐标·多锚点局部跟踪(2026-09-13对齐心火;输出格式不变:脚点(x,y)/从未定位None)。
+        """人物坐标·多锚点局部跟踪(2026-09-13;输出格式不变:脚点(x,y)/从未定位None)。
         实际参与定位的锚点=角色名name+面部face_r+后脑back(_match_keys);人名第一,人名丢了脸/后脑分高者兜底
         (宠物pet1/2/3按用户定稿不参与定位,只在管理窗显示识别率)。以上一锚点为中心开 rx×ry 局部窗快跟,搜索区在比对前
         几何扣除黑名单(_role_sub_rects,模板不扫黑名单);连续faststep帧失配或距上次全图>research(ms)就全图重搜;
@@ -17795,7 +17795,7 @@ class MinimapRouteRecorder:
                     _yolo_crop = (max(_px1, _dyx1), max(_band_y1, _dyy1), min(_px2, _dyx2), min(_band_y2, _dyy2))
                     if _yolo_crop[2] <= _yolo_crop[0] or _yolo_crop[3] <= _yolo_crop[1]:
                         _yolo_crop = (_px1, _band_y1, _px2, _band_y2)
-                    self._disp_yolo_crop = _yolo_crop  # 怪物识别(YOLO推理)范围,供蒙板黄框可视化(对齐心火)
+                    self._disp_yolo_crop = _yolo_crop  # 怪物识别(YOLO推理)范围,供蒙板黄框可视化
                     if _ch is not None:
                         _ftx1, _ftx2 = max(_px1, _ch[0] - _skr), min(_px2, _ch[0] + _skr)
                         _fty1, _fty2 = max(_band_y1, _ch[1] - _yupr), min(_band_y2, _ch[1] + _ydnr)
@@ -17804,7 +17804,7 @@ class MinimapRouteRecorder:
                     _feat_crop = (_ftx1, _fty1, _ftx2, _fty2)
                     if _feat_crop[2] <= _feat_crop[0] or _feat_crop[3] <= _feat_crop[1]:
                         _feat_crop = (_px1, _band_y1, _px2, _band_y2)
-                    self._disp_feat_crop = _feat_crop  # 人物技能(攻击射程atk1_distance+Y上下)范围,供蒙板紫框(对齐心火)
+                    self._disp_feat_crop = _feat_crop  # 人物技能(攻击射程atk1_distance+Y上下)范围,供蒙板紫框
                     if _now_det - self._feat_last_t >= self._perf_val('feat_s'):  # 怪模板节流按CPU档(无模板直接[]零开销)
                         _tf0 = time.time()
                         self._feat_cache = self._match_monster(_frame, _feat_crop) if self._monster_templates else []
