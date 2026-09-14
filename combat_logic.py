@@ -29,6 +29,10 @@ GROUP_SWITCH_MIN_MORE = 3   # (停用)另一簇比当前簇多≥3只才算"更�
 # 必须远小于层间Y差(LAYER_Y_GAP=150):真跨层怪Y差≈150,不会被这点放宽误纳同层。
 LOCK_HOLD_Y_BAND = 25
 
+# 一个整层的屏幕Y差(用户2026-09-15):怪和人Y差达到这个值=铁定在上下另一层,哪怕绿线same_platform判成同平台也不许破格当同层
+# (治"头顶整层怪被同录制平台破格→误cast原地空打、目标在左右横跳的抖动");缓坡/透视Y差小于此值仍可破格按同层走近打。
+LAYER_Y_GAP = 150
+
 # 跨层X滞回带宽(px,用户2026-09-11定稿"要不要上梯子必须走到X范围内再判,范围外先水平走过去"):
 # 新怪:X差>技能射程一律先按同层走近(pursue),只有X进技能射程仍Y超带才落cross找梯子/下台;
 # 已锁定目标用 skill_range+本滞回 作为"维持cross"宽线,吸收射程边界逐帧抖动,不在pursue/cross间横跳。
@@ -191,7 +195,9 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
         # 同层(Y在带/同录制平台)→cand;X还远(>技能射程,锁定目标含CROSS_X_HYST滞回)→也进cand先pursue走近;
         # 只有X已走进技能射程、Y仍超带且非同平台→才落cross找梯子/下台。治"同层远怪/缓坡Y略超→直接cross无梯站桩"。
         _x_cross_line = skill_range + (CROSS_X_HYST if _is_hold else 0)
-        _same_layer = y_ok or _same_pf
+        # 同录制平台破格加Y差硬上限(用户2026-09-15):差着整整一层(abs(dy)>=LAYER_Y_GAP)时_same_pf不算同层,
+        # 必须落cross去上梯/下台,杜绝"头顶一整层怪被当同层→cast原地空打+目标左右横跳抖动";缓坡(Y差<150)仍破格。
+        _same_layer = y_ok or (_same_pf and abs(dy) < LAYER_Y_GAP)
         if _same_layer or x_gap > _x_cross_line:
             cand.append((x_gap, cx, cy))   # 同层,或X还远(先水平走过去;走到X范围内仍Y超才跨层)
         elif allow_cross:

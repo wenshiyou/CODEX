@@ -5032,6 +5032,22 @@ class MinimapRouteRecorder:
             available = [i for i in available if i != self._random_route_id]
         return random.choice(available)
 
+    def _lock_recorded_ladder_endpoints(self, px, py):
+        """进to_ladder当下直接锁一把【小地图录制梯】(用户2026-09-15:梯子是小地图一点点录的,
+        每把天生带最上y_top/最下y_bottom和x)。按梯底端离人物光点Y近、再X近选一把,一次钉死端点;
+        到顶判定=人物光点中心Y与y_top重合(容差LADDER_TOP_ARRIVE_TOL),不需要屏幕白框、不需要借Y。钉到返回True。"""
+        lds = getattr(self, 'ladders', None)
+        if not lds:
+            return False
+        ld = min(lds, key=lambda t: (abs(float(t['y_bottom']) - float(py)), abs(float(t['x']) - float(px))))
+        self._climb_ladder_x = float(ld['x'])
+        self._climb_ladder_y_top = float(ld['y_top'])
+        self._climb_ladder_y_bottom = float(ld['y_bottom'])
+        self._climb_top_end_borrowed = True
+        _debug_log("[选梯·小地图] 光点(%.0f,%.0f)锁定录制梯x=%.0f 顶=%.0f 底=%.0f,到顶直接比光点Y与梯顶" % (
+            px, py, float(ld['x']), float(ld['y_top']), float(ld['y_bottom'])))
+        return True
+
     def _find_nearest_ladder(self, px, py, target_y, monster_x=None):
         """找最近的可用梯子（2026-09-11"锁定梯子"定稿：选梯那一下由怪发出 怪→梯→人,锁整把梯后不再依赖怪）
         硬门槛：连接端Y必须和目标层Y重合(±1)——上行看顶端y_top、下行看底端y_bottom,差>1=通向别的层直接排除(治在错梯下空跳)。
@@ -5152,6 +5168,10 @@ class MinimapRouteRecorder:
             self._key_up(VK_RIGHT)
         self._climb_state = "none"
         self._ladder_precise_mode = False   # 退出上梯:检测线程恢复正常120ms全检测档(用户2026-09-10方案B)
+        self._ladder_snap_x = None          # 出梯清空选中梯屏幕X,下把重新就近选(用户2026-09-15)
+        self._lad_snap_prev = None
+        self._lad_scr_enter_t = 0
+        self._climb_top_end_borrowed = False  # 到顶梯端Y是否已从录制梯借好(每把梯只借一次)
         self._climb_ladder_x = 0
         self._climb_ladder_y_top = 0      # 当前爬的梯子顶端Y（小地图，到顶验证用）
         self._climb_ladder_y_bottom = 0   # 当前爬的梯子底端Y（小地图，到底验证用）
@@ -6091,11 +6111,13 @@ class MinimapRouteRecorder:
         if self._climb_state == "descend":
             return self._descend_step(px, py, _now_ms)
         if self._climb_state == "to_ladder":
-            ldx = self._climb_ladder_x - px          # 梯子X-人物X（正=梯子在右）
-            _alx = abs(ldx)
             fight_cfg = self._get_fight_config()
             jump_key = fight_cfg.get("jump_key", "")
             now_ms = time.time() * 1000
+            # 只要目标是梯子就关怪扫(用户2026-09-15拍板·不等90px):一进to_ladder识别B立刻清空怪表,战斗决策算不到
+            # "技能范围内有怪"(不出cast)→近身解绑条件不成立、不会被身边怪拉回,下面屏幕选梯/朝梯走/对位/起跳全程不被打断;
+            # 到顶或3轮失败由_reset_climb把标志置False恢复扫描。决定跨层去梯那一刻(_try_platform_transition)也提前关,堵首帧空窗。
+            self._ladder_precise_mode = True
 
             # 起跳后统一流程优先（跑跳/直跳都走这里）
             if getattr(self, '_ladder_jump_phase', None) == 'post_jump':
@@ -6104,87 +6126,29 @@ class MinimapRouteRecorder:
             if getattr(self, '_ladder_jump_phase', None) == 'realign':
                 return self._ladder_realign_step(py, now_ms)
 
-            # === 小地图粗导航 + 主窗口屏幕对位【同时进行】(用户2026-09-14):不再卡"小地图差≤7才切换"的门槛,
-            # 每帧都尝试主窗口梯子匹配——朝梯150px内算到梯X就交屏幕分段(段1助跑→60-80跑跳带、<=60走直跳);这一帧没算到/无模板则自然落下面小地图分支继续朝梯X走,两者同向、同帧只走一个不打架 ===
-            if getattr(self, '_ladder_templates', None) \
+            # === 纯屏幕找梯对位(用户2026-09-15定稿:删掉小地图找梯/小地图粗导航,找梯-朝梯走-对位-起跳全程游戏窗口屏幕坐标) ===
+            # 选中梯屏幕X:主循环蒙板段已按(Y最近、X最近)选好的稳定白框_ladder_snap_x优先;本帧没选中才用模板现匹配兜底。
+            _sel_x = getattr(self, '_ladder_snap_x', None)
+            if _sel_x is None and getattr(self, '_ladder_templates', None) \
                     and self._raw_frame is not None and self._player_screen_pos:
-                # 锁定梯子、开始to_ladder即开精确模式(人物高帧+识别B彻底清空怪表)。不能等主窗口匹配到梯X/凑到屏幕90px才关:
-                # 主窗口要走近才匹配得上,此前靠小地图导航,这段若还扫怪,近身怪会触发"平地去梯途中出怪先打近身"解绑梯子、
-                # 上梯被打断、再也走不到起跳点(2026-09-14 23:27日志实锤)。故to_ladder全程关怪扫,到顶/3轮失败由_reset_climb统一恢复
-                self._ladder_precise_mode = True
-                _lk = getattr(self, '_combat_locked_target', None)
-                _lkx = _lk[0] if _lk else None
-                _tpl_x = self._match_ladder_screen_x(self._raw_frame, self._player_screen_pos,
-                                                     self._climb_direction, _lkx)
-                if _tpl_x is not None:
-                    self._lad_scr_last_t = now_ms          # 记屏幕分段成功时刻/稳定X,供丢帧粘滞
-                    self._lad_scr_last_x = _tpl_x
-                    return self._ladder_align_by_screen(_tpl_x, px, py, now_ms, jump_key)
-                # 模板偶发丢帧粘滞(用户2026-09-10):LADDER_SCR_STICK_MS内沿用上一次稳定梯X继续屏幕分段,
-                # 不让单帧没匹配到就掉回小地图"走到X差0原地直跳",保证助跑→自适应跑跳状态连续
-                _stick_x = getattr(self, '_lad_scr_last_x', None)
-                if _stick_x is not None and now_ms - getattr(self, '_lad_scr_last_t', 0) <= LADDER_SCR_STICK_MS:
-                    return self._ladder_align_by_screen(_stick_x, px, py, now_ms, jump_key)
-
-            # 冲过头弹回>7：重置点位重来
-            if _alx > 7 and (getattr(self, '_ladder_run_jumped', False) or getattr(self, '_ladder_vert_jumped', False)):
-                self._ladder_run_jumped = False
-                self._ladder_vert_jumped = False
-                _debug_log("[爬梯] 冲过头退回%.0f,重置抓梯点位重试" % _alx)
-
-            # ===== 水平对齐状态机(无屏幕模板回退路径;用户2026-09-10:全局小碎步只留屏幕直跳≤30一处,这里不再点动) =====
-            # 没到容差就【持续按住】朝梯正常走(不短按点动、不磨叽);直跳是关键动作,必须|X差|≤1且连续2帧停稳才跳;
-            # 持续按住但X一直没靠近(想动没动)按次数上限解卡回主线,不许卡边界死按/没对齐就跳。
-            if _alx <= LADDER_ALIGN_TOL:
-                _ak0 = getattr(self, '_lad_align_key_vk', None)  # 对准:抬起任何残留点动键+松左右
-                if _ak0 is not None:
-                    self._key_up(_ak0)
-                    self._lad_align_key_vk = None
-                if VK_LEFT in self._random_move_keys:
-                    self._key_up(VK_LEFT)
-                if VK_RIGHT in self._random_move_keys:
-                    self._key_up(VK_RIGHT)
-                self._lad_align_ok_frames = getattr(self, '_lad_align_ok_frames', 0) + 1
-                if self._lad_align_ok_frames >= LADDER_ALIGN_HOLD_FRAMES and not getattr(self, '_ladder_vert_jumped', False):
-                    self._ladder_vert_jumped = True
-                    self._climb_start_y = py
-                    self._press_game_key(jump_key, duration=80)
-                    _debug_log("[爬梯] 对齐准入通过(连续%d帧X差%.2f≤%d)→原地直跳" % (
-                        self._lad_align_ok_frames, ldx, LADDER_ALIGN_TOL))
-                    self._rlog("对齐重合直跳抓梯(X差%.1f),跳后50ms按↑" % ldx, log='behavior')
-                    self._ladder_jump_phase = 'post_jump'
-                    self._ladder_post_jump_step = 'delay1'
-                    self._ladder_post_jump_t = now_ms
+                _lk0 = getattr(self, '_combat_locked_target', None)
+                _lkx0 = _lk0[0] if _lk0 else None
+                _sel_x = self._match_ladder_screen_x(self._raw_frame, self._player_screen_pos,
+                                                     self._climb_direction, _lkx0)
+            if _sel_x is not None:
+                self._lad_scr_last_t = now_ms
+                self._lad_scr_last_x = _sel_x
+                return self._ladder_align_by_screen(_sel_x, px, py, now_ms, jump_key)   # 各分带持续朝梯走,不停
+            # 保命出口(不是补丁):进to_ladder连续LADDER_MERGE_WAIT_MS屏幕上一把梯都识别不到=没录梯图/没YOLO/不在梯旁,
+            # 松左右键回主线打怪,绝不永久空转;刚进、短暂丢帧则站住不发键(不再回退小地图按住乱走)。
+            if getattr(self, '_lad_scr_enter_t', 0) == 0:
+                self._lad_scr_enter_t = now_ms
+            if now_ms - self._lad_scr_enter_t >= LADDER_MERGE_WAIT_MS:
+                self._rlog("屏幕连续%.0fms找不到梯子,松键回主线打怪(不死等)" % LADDER_MERGE_WAIT_MS, LOG_RED, log='behavior')
+                self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
+                self._reset_climb(); self._decide_climb_fail_action()
                 return False
-            # _alx>1:持续按住朝梯(正常移动,非点动);周期性检测"想动没动",超次数上限回主线不死磕
-            self._lad_align_ok_frames = 0
-            if now_ms - getattr(self, '_lad_align_nudge_t', 0) >= LADDER_ALIGN_STALL_MS:
-                _ref = getattr(self, '_lad_align_ref_px', None)
-                if _ref is not None:
-                    _prev_alx = abs(self._climb_ladder_x - _ref)
-                    if _alx < _prev_alx - 0.5:
-                        self._lad_align_stall_t = 0       # 上一拍真靠近了,清卡住
-                        self._lad_align_stall_n = 0
-                    else:
-                        if self._lad_align_stall_t == 0:
-                            self._lad_align_stall_t = now_ms
-                        elif now_ms - self._lad_align_stall_t >= LADDER_ALIGN_STALL_MS:
-                            self._lad_align_stall_n += 1
-                            self._lad_align_stall_t = now_ms
-                            _debug_log("[对齐] 按住后X未靠近(%.1f→%.1f),解卡第%d次" % (
-                                _prev_alx, _alx, self._lad_align_stall_n))
-                            if self._lad_align_stall_n > LADDER_ALIGN_STALL_MAX:
-                                # 对不齐(被挡/梯坐标问题):回主线重选或打怪,绝不在此死循环
-                                self._rlog("梯子对齐卡住:按住%d拍仍不动,回主线重选(不死磕)" % LADDER_ALIGN_STALL_MAX,
-                                           LOG_RED, log='behavior')
-                                self._key_up(VK_LEFT)
-                                self._key_up(VK_RIGHT)
-                                self._reset_climb()
-                                self._decide_climb_fail_action()
-                                return False
-                self._lad_align_nudge_t = now_ms
-                self._lad_align_ref_px = px
-            self._hold_toward_ladder(ldx)   # 持续按住朝梯走(正常大步移动,不是点动小碎步)
+            self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
             return False
 
         if self._climb_state == "climbing":
@@ -6201,88 +6165,35 @@ class MinimapRouteRecorder:
                 if VK_DOWN not in self._random_move_keys:
                     self._key_down(VK_DOWN)
 
-            # === 上梯集合到顶判定(用户2026-09-14定稿:抓住后一直按住↑不停;先三背景点静止、再小地图光点重合梯端,两者都满足=到顶) ===
-            # 阶段1【主窗口】台子不平、不要求Y重合:人物基点Y 对 "抓住时冻结的记录坐标点Y",差≤CLIMB_TARGET_Y_TOL(20)且真爬过=到记录层高度
-            #   → 补按住方向键 CLIMB_TOP_HOLD_MS(300) 把人翻上不平的台面(补按期间本段开头一直按住,不松);
-            # 阶段2【小地图】补按满后,小地图光点Y 对锁梯连接端(上行梯顶/下行梯底)重合或单向越过(容差LADDER_TOP_ARRIVE_TOL)=最终到顶,当帧松键开主线。
-            # 真爬/假抓住只认小地图光点朝爬向的真位移(不再每帧截图对比背景,顺带省CPU);补按满但小地图仍没到=台面更高,退补按继续爬,不死等。
+            # === 到顶判定(用户2026-09-15极简定稿):抓住后本段开头已一直按住↑;只认【小地图光点重合梯端】
+            # (上行比y_top、下行比y_bottom,重合/单向越过容差LADDER_TOP_ARRIVE_TOL)=到顶,当帧松键、清旧怪重扫开打。
+            # 两步确认/主窗口补按/三背景点/假抓住这些补丁全部删除;只留一个总超时保命(没录到顶端点/异常时防永久卡梯)。
             _end_y = self._climb_ladder_y_top if self._climb_direction > 0 else self._climb_ladder_y_bottom
-            _real_dy = ((self._climb_start_y - py) if self._climb_direction > 0 else (py - self._climb_start_y)) \
-                if self._climb_start_y else 0
-            # 第一步"确认在爬"(只认小地图Y真位移+时间兜底):真移动锁存不可逆,纯时间兜底不算真动(假抓住也会到点)
-            _y_climbing = _real_dy >= 3
-            _confirm_to = bool(self._climb_action_time) and (now_ms - self._climb_action_time >= CLIMB_CONFIRM_FALLBACK_MS)
-            if _real_dy >= CLIMB_REAL_MOVE_PX:
-                self._climb_ever_moved = True
-            if _y_climbing or _confirm_to:
-                if not self._climb_move_confirmed:
-                    self._climb_move_confirmed = True
-                    _why_c = "人物Y移动" if _y_climbing else "%.0fms兜底" % CLIMB_CONFIRM_FALLBACK_MS
-                    _debug_log("[爬梯] 第一步通过(%s)=确认在爬(光点Y=%.0f)" % (_why_c, py))
-            # 小地图光点对梯端:重合/单向越过
-            _map_ok = False
+            if not _end_y:
+                # 兜底:入口没钉到端点就按当前光点现锁一把(永不因端点=0干等12s总超时);到顶只认小地图光点与梯端重合
+                self._lock_recorded_ladder_endpoints(px, py)
+                _end_y = self._climb_ladder_y_top if self._climb_direction > 0 else self._climb_ladder_y_bottom
+            _arrived = False
+            _arrive_why = ""
             if _end_y:
                 _map_ok = (py <= _end_y + LADDER_TOP_ARRIVE_TOL) if self._climb_direction > 0 \
                     else (py >= _end_y - LADDER_TOP_ARRIVE_TOL)
-            # 阶段1:主窗口Y差≤20(记录Y缺失时,用"小地图已到梯端"等价触发兜底,不死等)
-            _sp_v = self._player_screen_pos
-            _rec_y = getattr(self, '_climb_record_scr_y', None)
-            _near = (_real_dy >= CLIMB_REAL_MOVE_PX and _sp_v and _rec_y is not None
-                     and abs(_sp_v[1] - _rec_y) <= CLIMB_TARGET_Y_TOL) or bool(_map_ok)
-            if _near and not self._climb_top_hold:
-                self._climb_top_hold = True
-                self._climb_top_hold_t = now_ms
-                _debug_log("[爬梯] 主窗口Y差≤%d到记录高度(小地图到端=%s),补按方向键%dms再核对梯端(光点Y=%.0f)"
-                           % (CLIMB_TARGET_Y_TOL, _map_ok, CLIMB_TOP_HOLD_MS, py))
-            # 【上梯集合·第一道·用户2026-09-14】确认在爬后,用现成三背景点法测"主窗口背景不再变化",连续CLIMB_STILL_MS静止=背景到位(锁存)
-            if self._climb_move_confirmed and self._raw_frame is not None and _sp_v:
-                _fh, _fw = self._raw_frame.shape[:2]
-                _bc = self._pick_climb_boxes(_sp_v, _fh, _fw)
-                _ns, _nv = self._climb_boxes_still(self._raw_frame, _bc)
-                if _ns >= 1:
-                    if self._climb_bg_still_since == 0:
-                        self._climb_bg_still_since = now_ms
-                    elif not self._climb_bg_ok and now_ms - self._climb_bg_still_since >= CLIMB_STILL_MS:
-                        self._climb_bg_ok = True
-                        _debug_log("[爬梯] 第一道:三背景点连续%dms静止=背景不再变化(光点Y=%.0f)" % (CLIMB_STILL_MS, py))
-                elif _nv >= 1:
-                    self._climb_bg_still_since = 0   # 背景还在上下动=仍在爬,重新计时;空帧(n_valid=0)保持计时不打断
-            _arrived = False
-            _arrive_why = ""
-            # 【上梯集合到顶·用户2026-09-14】先背景静止(_climb_bg_ok)、再小地图光点重合梯端(_map_ok),两者都满足+补按翻台满=到顶松↑
-            if self._climb_top_hold and (now_ms - self._climb_top_hold_t) >= CLIMB_TOP_HOLD_MS \
-                    and _map_ok and self._climb_bg_ok:
-                _arrived = True
-                _arrive_why = "背景静止+光点到梯顶+补按%dms" % CLIMB_TOP_HOLD_MS
-            # 假抓住失败(用户2026-09-10):抓住满CLIMB_FAKE_GRAB_MS但小地图Y从没真移动(ever_moved=False)=根本没爬上梯,
-            # 松键回主线,绝不判到顶/不触发"到达新平台清锁"(旧bug:人原地没动却一遍遍"到第二层清锁")
-            if not _arrived and not self._climb_ever_moved and self._climb_action_time \
-                    and now_ms - self._climb_action_time >= CLIMB_FAKE_GRAB_MS:
-                _debug_log("[爬梯] 假抓住:起%.0fms小地图Y没真移动,判抓梯失败回主线(不判到顶)" % (now_ms - self._climb_action_time))
-                self._rlog("抓梯%dms没真爬上(假抓住),回主线打怪" % CLIMB_FAKE_GRAB_MS, LOG_RED, log='behavior')
-                for _vk in (VK_UP, VK_LEFT, VK_RIGHT):
-                    if _vk in self._random_move_keys:
-                        self._key_up(_vk)
-                self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS
-                self._reset_climb()
-                self._decide_climb_fail_action()
-                return False
-            # 爬梯总超时(防异常永久卡的安全网,不是到顶判据),到点按到顶收尾
+                if _map_ok:
+                    _arrived = True
+                    _arrive_why = "小地图光点重合梯端"
             if not _arrived and self._climb_action_time and now_ms - self._climb_action_time > CLIMB_TOTAL_TIMEOUT_MS:
                 _arrived = True
-                _arrive_why = "总超时%dms兜底收尾" % CLIMB_TOTAL_TIMEOUT_MS
+                _arrive_why = "总超时%dms保命收尾" % CLIMB_TOTAL_TIMEOUT_MS
             if _arrived:
-                # 到顶当帧松上下方向键出梯、清锁梯开主线开打
-                _debug_log("[爬梯] %s(光点Y=%.0f),松键开主线" % (_arrive_why, py))
+                _debug_log("[爬梯] %s(光点Y=%.0f 梯端Y=%.0f),松键开主线" % (_arrive_why, py, _end_y or 0))
                 self._rlog("%s,到顶开打" % _arrive_why, LOG_OK, log='behavior')
                 if VK_UP in self._random_move_keys:
                     self._key_up(VK_UP)
                 if VK_DOWN in self._random_move_keys:
                     self._key_up(VK_DOWN)
                 self._reset_climb()
-                # 梯子真正到顶出梯:清掉梯子上测的旧怪表+寻怪范围重扫重锁(防拿梯子上的下方旧怪判cross,一上去就下来)
+                # 到顶清梯子上测的旧怪表+寻怪范围重扫重锁(防拿下方旧怪判cross一上去就下来)
                 self._reset_lock_after_arrival('梯到顶')
-                return False
             return False
 
         # === 向上跳状态（跳跃键，检测y是否上升）===
@@ -6384,18 +6295,18 @@ class MinimapRouteRecorder:
         # === 正常移动（非攀爬状态）===
         # 需要上下层时：先找梯子（上行直接去梯子；下行先尝试下跳，下跳失败再走梯子）
         if abs(dy) > 8 and target_y < py:
-            ladder = self._find_nearest_ladder(px, py, target_y)
-            if ladder:
-                self._climb_state = "to_ladder"
-                self._climb_ladder_x = ladder["x"]
-                self._climb_ladder_y_top = ladder["y_top"]
-                self._climb_ladder_y_bottom = ladder["y_bottom"]
-                self._climb_target_y = target_y
-                self._climb_direction = 1 if target_y < py else -1
-                self._ladder_run_jump = False   # 新一轮抓梯：重置点位跳标记
-                self._ladder_vert_jump = False
-                _debug_log("[路线] 需上下层dy=%.0f，直接去梯子x=%.0f" % (dy, ladder["x"]))
-                return False
+            # 上行跨层(用户2026-09-15全图乱打):不再用小地图_find的"梯端Y和怪层±1对齐"门槛卡人,
+            # 怪在上方就直接进to_ladder;选哪把梯/对位/起跳全程屏幕就近(Y最近、X最近),梯顶端点选中后再借录制Y判到顶。
+            self._climb_state = "to_ladder"
+            self._climb_ladder_x = 0; self._climb_ladder_y_top = 0; self._climb_ladder_y_bottom = 0
+            self._lock_recorded_ladder_endpoints(px, py)   # 1+1:直接锁这把小地图录制梯的最上/最下点
+            self._climb_target_y = target_y
+            self._climb_direction = 1
+            self._ladder_run_jump = False
+            self._ladder_vert_jump = False
+            self._lad_scr_enter_t = 0
+            _debug_log("[路线] 目标在上层dy=%.0f,进to_ladder就近找梯上" % dy)
+            return False
 
         # 【用户2026-09-09补·下行跨层入口】旧代码这里只有 target_y<py(上行)半套;下行(target_y>py)只能靠后面兜底块、
         # 却被其 `not _combat_transit` 挡死(跨层进行中恒True)→怪在下方时既不跳也不选梯、人原地不动不跳(真机"下方尤其不动")。
@@ -6446,18 +6357,15 @@ class MinimapRouteRecorder:
                     _debug_log("[瞬移] 目标y=%.0f 当前y=%.0f，间距=%.0f，瞬移距离=%d，向上" % (
                         target_y, py, vertical_gap, tp_dist))
                     return False
-                # 3. 都不行 → 爬梯子
-                ladder = self._find_nearest_ladder(px, py, target_y)
-                if ladder:
-                    self._climb_state = "to_ladder"
-                    self._climb_ladder_x = ladder["x"]
-                    self._climb_ladder_y_top = ladder["y_top"]
-                    self._climb_ladder_y_bottom = ladder["y_bottom"]
-                    self._climb_target_y = target_y
-                    self._climb_direction = 1
-                    _debug_log("[爬梯] 目标y=%.0f 当前y=%.0f，找梯子x=%.0f，向上" % (
-                        target_y, py, ladder["x"]))
-                    return False
+                # 3. 都不行→爬梯子(屏幕就近选梯,不再卡小地图Y对齐门槛;用户2026-09-15)
+                self._climb_state = "to_ladder"
+                self._climb_ladder_x = 0; self._climb_ladder_y_top = 0; self._climb_ladder_y_bottom = 0
+                self._lock_recorded_ladder_endpoints(px, py)   # 1+1:直接锁这把小地图录制梯的最上/最下点
+                self._climb_target_y = target_y
+                self._climb_direction = 1
+                self._lad_scr_enter_t = 0
+                _debug_log("[爬梯] 目标y=%.0f 当前y=%.0f,进to_ladder屏幕就近找梯向上" % (target_y, py))
+                return False
 
             # --- 去下层(用户2026-09-09)：非跨层场景也统一走descend(先走到怪X直接下跳,跳不了走梯子),与跨层下行入口一致 ---
             else:
@@ -17115,6 +17023,7 @@ class MinimapRouteRecorder:
         （_reset_climb已在调用前把爬梯状态机清零；本函数丢弃跨层目标+松键+300~500ms冷却避免原地连跳）"""
         self._combat_transit = False
         self._transit_target = None
+        self._ladder_precise_mode = False   # 3轮失败回打怪:重开怪扫(保险,_reset_climb也会关)
         self._clear_locked_ladder('上梯失败')   # 失败=锁定梯另一自然终点,解绑回正常找怪(先锁下面Y相近的)
         self._climb_fail_decided = None
         self._transit_farm_until = 0
@@ -17172,6 +17081,7 @@ class MinimapRouteRecorder:
         if not self._combat_transit or not self._transit_target or not self._player_map_pos:
             self._combat_transit = False
             self._transit_target = None
+            self._ladder_precise_mode = False   # 异常出口也要重开怪扫(用户2026-09-15开关配对)
             return
         now_ms = time.time() * 1000
         # === 走台子模式（斜坡相连）：直接朝目标走，坡道自然上去；走不动(停滞1.5s/超时8s)自动降级走梯子 ===
@@ -17217,6 +17127,7 @@ class MinimapRouteRecorder:
                         self._no_transit_until = now_ms + 2000
                         self._combat_transit = False
                         self._transit_target = None
+                        self._ladder_precise_mode = False   # 空转达上限回打怪:重开怪扫
                         self._transit_walk_path = None
                         self._release_combat_move()
                         self._release_all_keys()
@@ -17225,6 +17136,7 @@ class MinimapRouteRecorder:
                         return
                     # 未达上限:空到达不算"到新平台",不重扫/不清锁定,松键回主线,下帧重新决策
                     self._combat_transit = False
+                    self._ladder_precise_mode = False   # 回主线:重开怪扫
                     self._release_combat_move()
                     self._release_all_keys()
                     return
@@ -17232,6 +17144,7 @@ class MinimapRouteRecorder:
                 # 到达最终目标平台：和梯子到达一样的收尾
                 self._combat_transit = False
                 self._transit_target = None
+                self._ladder_precise_mode = False   # 到达收尾:重开怪扫回打怪段
                 self._probe_side = random.choice([-1, 1])
                 self._probe_switched = False
                 self._climb_fail_count = 0
@@ -17310,6 +17223,7 @@ class MinimapRouteRecorder:
         if arrived:
             self._combat_transit = False
             self._transit_target = None
+            self._ladder_precise_mode = False   # 集合结束(到顶/到新平台):重开怪扫,切回打怪段
             # 到顶保护(用户2026-09-09)：跨层刚翻上平台的1秒内不启用跳高打，避免人没站稳被high_slope按跳从梯顶跳下来
             self._slope_resume_at = now_ms + 1000
             self._probe_side = random.choice([-1, 1])  # 新平台新一轮探测：先看左/右随机
@@ -17426,21 +17340,19 @@ class MinimapRouteRecorder:
                 target_mid = _path[-1]
                 _debug_log("[跨层] 绿线相连有交叉点(%.0f,%.0f)，走绿线组合路径(%d点)" % (inter[0], inter[1], len(_path)))
             else:
-                # 走梯子(怪不在绿线/绿线不相连):选梯那一下由当前怪【怪→梯→人】锁定正确梯;锁过后引路只认锁梯、不再依赖怪
+                # 走梯子(怪不在绿线/绿线不相连):用户2026-09-15全图乱打——跨层不在小地图锁"固定不换"的梯
+                # (锁了会和to_ladder屏幕就近选梯打架、还会误判上下行方向);只用怪当方向灯(见下),选哪把交屏幕(Y近X近)。
                 if monster_pf:
                     _debug_log("[跨层] 怪在绿线但人物不在绿线或绿线不相连，改走梯子")
-                if getattr(self, '_locked_ladder', None) is None:
-                    self._lock_target_ladder_for_cross(mpx, mpy, fx, fy)
-        # 【走梯引路终点=锁定梯连接端·用户2026-09-11】上行取梯顶端y_top/下行取底端y_bottom,到端=到层=开主线;
-        # 已锁梯就算本帧没cross怪(fx is None,怪空/脱检/刷新)也照样朝锁梯走,不被打断;没锁成才退回本帧怪再锁一次。
-        if target_mid is None and self._transit_via != 'walk':
-            _lad = getattr(self, '_locked_ladder', None)
-            if _lad is None and fx is not None:
-                _lad = self._lock_target_ladder_for_cross(mpx, mpy, fx, fy)
-            if _lad is not None:
-                _up = float(_lad["y_top"]) < mpy
-                _end_y = float(_lad["y_top"]) if _up else float(_lad["y_bottom"])
-                target_mid = (float(_lad["x"]), _end_y)
+        # 走梯引路目标(用户2026-09-15全图乱打):不锁小地图固定梯,只用当前cross怪的小地图位置当"方向灯",
+        # _move_to据此判怪在人上/下方(进to_ladder上行/下跳下行),真正选哪把梯全程屏幕就近(Y最近、X最近)。
+        if target_mid is None and self._transit_via != 'walk' and fx is not None:
+            try:
+                _fmp = self._get_monster_map_pos_verified(fx, fy)
+            except Exception:
+                _fmp = None
+            if _fmp is not None:
+                target_mid = (float(_fmp[0]), float(_fmp[1]))
         if target_mid is None and fx is None:
             # 没锁梯、本帧也没cross怪:选台模式→去下一个选中台子;全图模式(未选台)→原地等刷怪。
             if self._selected_platforms:
@@ -17465,10 +17377,8 @@ class MinimapRouteRecorder:
             self._trans_stall_diag('target_none(有cross怪但换算不出小地图目标点/怪不在绿线)', now,
                                    n_cands=len(cross_candidates), via=self._transit_via)
             return False
-        # 上高层必须能找到梯子路径，否则放弃本次跨层（走台子模式除外——斜坡可直接走上去）——2026-09-04
-        if self._transit_via == 'ladder' and target_mid[1] < mpy - 8 and self._find_nearest_ladder(mpx, mpy, target_mid[1]) is None:
-            _debug_log("[跨层] 目标在上层但无可用梯子，放弃本次跨层等刷怪")
-            return False
+        # 2026-09-15:删掉"上层必须先在小地图找到Y对齐梯子、否则放弃跨层"的门槛——全图乱打不预判梯通哪层,
+        # 上不上得去、上哪把交给to_ladder屏幕就近选梯(Y最近、X最近),这里只决定"要不要向上跨层"。
         # 目标已在附近（到达判定），不需要启动
         # 【2026-09-09修复already_near误杀跨层·真机3条跨层卡住诊断实锤】小地图scale_y很小(实测0.06),
         # 屏幕Y差150+的上层怪经_screen_to_map换算到小地图Y只差几px,会被这里误判"已到身边"而永不启动跨层
@@ -17505,6 +17415,10 @@ class MinimapRouteRecorder:
         self._release_combat_move()
         self._release_all_keys()
         self._combat_transit = True
+        if self._transit_via != 'walk':
+            # 一进梯子集合就关怪扫(用户2026-09-15:打完怪->松攻击键->上梯同时关识别,整段到顶/失败才开)。
+            # 同层farm走绿线walk是去找本层怪、仍要扫怪故不关;梯子集合全程不扫,战斗决策算不出怪、物理上不会争抢。
+            self._ladder_precise_mode = True
         self._transit_target = target_mid
         self._transit_walk_started = now          # 走台子计时起点
         self._transit_walk_from = self._player_map_pos  # 走台启动时人物坐标(到点判真移动,防空到达小碎步)
@@ -17781,10 +17695,11 @@ class MinimapRouteRecorder:
                 if self._detect_running:
                     print("[截图] 异常:", _e)
             # 自适应周期(用户2026-09-07 CPU94%)：最近0.4s见到怪、或正锁着怪/在战斗 → 150ms跟手；否则空闲300ms省电降占用
+            # 高帧档只在to_ladder/climbing用;但_ladder_precise_mode(=梯子集合段关怪扫)只允许由进/出集合
+            # 事件显式置位,绝不在此"看climb_state不对就自动关"——那会在刚决定cross、正平地朝梯走的空档
+            # 重开怪扫->冒出cast->争抢抖动(用户2026-09-15拔除该后门)。
             _precise_now = bool(getattr(self, '_ladder_precise_mode', False)) \
                 and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
-            if getattr(self, '_ladder_precise_mode', False) and not _precise_now:
-                self._ladder_precise_mode = False   # 保险:已离开上梯流程却残留高频标志,自动关恢复正常全检测
             _busy = (time.time() - self._last_monster_seen < 0.4) or bool(getattr(self, '_combat_locked_target', None))
             _elapse = (time.time() - _t0) * 1000   # 本轮检测实际耗时(先算,高帧自适应监管要用)
             if _precise_now:
@@ -18508,15 +18423,14 @@ class MinimapRouteRecorder:
         #  ·没有近身可直打怪(state=pursue/cross,都是范围外)→锚点不换不丢,一心_transit_step去上层;
         #  ·起跳抓梯后由上面 _climb_state!='none' 分支硬冻巡路优先,根本走不到这,近身怪也不打断。
         if self._combat_transit or getattr(self, '_climb_state', 'none') == 'to_ladder':
+            # 一条线串行(用户2026-09-15):一旦进入跨层/上梯段就只干这一件事,整段不再看打怪决策、
+            # 没有"近身刷怪就解绑回打"分支(它=1212左右争抢抖动的根源,已废)。只走_transit_step,
+            # 到顶/3轮失败这些"集合结束事件"里才松键+重开怪扫+切回打怪。攻击键进入即松(打完怪再上梯)。
             self._release_attack_key()
             if now < getattr(self, '_arrival_relock_until', 0):
                 self._release_combat_move()
                 return
             if self._ladder_backoff is not None and self._ladder_backoff_step(now):
-                return
-            if _dl['state'] == 'cast' and _dl.get('target'):
-                # 平地去梯途中近身刷出能直打的怪:三步走解绑回主线(用户2026-09-11,顺序不可乱)
-                self._abort_transit_for_nearby()
                 return
             self._transit_step()
             return
@@ -19679,60 +19593,36 @@ class MinimapRouteRecorder:
                             _monp = getattr(self, '_combat_locked_target', None)
                             _fw0 = self._raw_frame.shape[1] if self._raw_frame is not None else 0
                             _tri_on = _monp is not None and _fw0 > 0 and (-30 <= int(_monp[0]) <= _fw0 + 30)
-                            _choose = None   # (排序键, 白框中心X, 白框中心Y)
-                            _pick_src = None
-                            _tri_rows = []
-                            # 主方案【三点折线 怪→梯→人】:目标怪在本屏可见→X总程最短的白框,纯几何、不依赖会漂的倍率
-                            if _tri_on:
-                                _tri_rows = self._pick_ladder_by_triangle(
-                                    int(_monp[0]), int(_monp[1]), _white_marks, _psx, _psy, _cdir)
-                                if _tri_rows:
-                                    # 滞回:上帧选中梯没跑出保持带就继续钉它,不在两把近邻梯间横跳
-                                    _hold = [r for r in _tri_rows
-                                             if _prev is not None and abs(r[1] - _prev) <= LADDER_MARK_HOLD_X]
-                                    _row = _hold[0] if _hold else _tri_rows[0]
-                                    _choose, _pick_src = (_row[0], _row[1], _row[2]), '三点'
-                            # 兜底:怪不在屏/三点无候选→纯白框就近:按上下方向滤掉反方向梯后,选离人物基点最近的一把(滞回钉住)
-                            if _choose is None:
-                                _cand = []
-                                for (_wx, _wy) in _white_marks:
-                                    if _cdir > 0 and _wy > _psy + 40:
-                                        continue   # 上行却在脚下=另一把下行梯,排除
-                                    if _cdir < 0 and _wy < _psy - 40:
-                                        continue   # 下行却在头顶=另一把上行梯,排除
-                                    _cand.append((abs(_wx - _psx), _wx, _wy))
+                            # 选梯(用户2026-09-15定稿·全图乱打就近上):不判Y够不够得着、不做怪→梯→人折线、不做上下方向硬滤;
+                            # 所有白框按(|梯Y-角色Y|, |梯X-角色X|)升序——先和角色同高度(Y最近=当前够得上)、再就在边上(X最近)的第一把;
+                            # 滞回:上帧选中梯没跑出LADDER_MARK_HOLD_X带就继续钉住,不在近邻梯间横跳。
+                            _choose = None
+                            _cand_all = [(abs(_wy - _psy), abs(_wx - _psx), _wx, _wy) for (_wx, _wy) in _white_marks]
+                            if _cand_all:
                                 _mc = None
                                 if _prev is not None:
-                                    _h = [c for c in _cand if abs(c[1] - _prev) <= LADDER_MARK_HOLD_X]
-                                    if _h:
-                                        _mc = min(_h, key=lambda c: c[0])
-                                if _mc is None and _cand:
-                                    _mc = min(_cand, key=lambda c: c[0])
-                                if _mc is not None:
-                                    _choose, _pick_src = _mc, '就近'
+                                    _holdc = [c for c in _cand_all if abs(c[2] - _prev) <= LADDER_MARK_HOLD_X]
+                                    if _holdc:
+                                        _mc = min(_holdc, key=lambda c: (c[0], c[1]))
+                                if _mc is None:
+                                    _mc = min(_cand_all, key=lambda c: (c[0], c[1]))
+                                _choose = (_mc[0], _mc[2], _mc[3])
                             _snap = _choose is not None
                             if _snap:
                                 _rx, _ry = _choose[1], _choose[2]
-                                self._ladder_snap_x = _rx   # 选中白框的真实中心X,供对齐起跳(人物基点对到白框中心)
+                                self._ladder_snap_x = _rx      # 选中梯真实中心X,供屏幕对位起跳
                                 self._lad_snap_prev = _rx
                                 _sel = (_rx, _ry, True)
+                                # 到顶端点在进to_ladder时已由_lock_recorded_ladder_endpoints直接从小地图录制梯锁好,
+                                # 此处不再借Y(用户2026-09-15:到顶=光点Y与录制梯最上点重合)
                             else:
                                 self._ladder_snap_x = None
-                            # 观测日志(节流300ms):三点按 怪→梯→人 打每把梯总程;就近打离人距离
                             if _now_lm - getattr(self, '_snap_dbg_t', 0) >= 300:
                                 self._snap_dbg_t = _now_lm
-                                if _tri_on:
-                                    _detail = ' '.join('梯%d(怪→梯%d+梯→人%d=总%d%s)' % (
-                                        r[1], r[4], r[5], r[0], '间' if r[3] else '')
-                                        for r in _tri_rows[:4]) or '无同向候选'
-                                    _debug_log("[三点选梯·怪→梯→人] 怪X=%d 人X=%d 向%s|%s →来源%s 选中白框X=%s" % (
-                                        int(_monp[0]), _psx, ('上' if _cdir > 0 else '下'), _detail,
-                                        _pick_src or '无', _rx if _snap else None))
-                                else:
-                                    _allx = ','.join(str(wx) for wx, wy in _white_marks) or '无'
-                                    _debug_log("[白框就近选梯] 人X=%d 向%s|白框[%s]→%s 选中X=%s" % (
-                                        _psx, ('上' if _cdir > 0 else '下'), _allx,
-                                        _pick_src or '未选中(没扫到白框)', _rx if _snap else None))
+                                _allx = ','.join('%d/%d' % (wx, wy) for wx, wy in _white_marks) or '无'
+                                _debug_log("[就近选梯·Y近优先X近] 人=(%d,%d) 向%s 白框[%s]→选中X=%s" % (
+                                    _psx, _psy, ('上' if _cdir > 0 else '下'), _allx,
+                                    _rx if _snap else None))
                         except Exception:
                             _sel = None
                     self._monster_overlay_data["ladder_sel"] = _sel
