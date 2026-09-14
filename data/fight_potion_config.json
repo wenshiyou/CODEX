@@ -19,7 +19,7 @@
   "aoe_key": "z",
   "aoe_interval": "150",
   "aoe_distance": "230",
-  "attack_y_up": "-80",
+  "attack_y_up": "-100",
   "attack_y_down": "20",
   "mp_key": "end",
   "hp_key": "pgdn",
@@ -30,5 +30,6 @@
   "far_range_y_down": "200",
   "slope_jump_y_min": "-25",
   "slope_jump_y_max": "-180",
-  "hp_value": "35"
+  "hp_value": "35",
+  "group_priority": "1"
 }

@@ -1624,13 +1624,15 @@ class MinimapRouteRecorder:
         # 人物跟踪线程已删除（改用主循环共用截图，性能更好）
         # === 后台检测线程：把重活(截图+人物匹配+怪物匹配+YOLO+血条)拆到独立线程，主线程只读结果做移动/蒙板/战斗，
         #     避免主线程被拖累导致 YOLO/蒙板/小地图 几秒才刷一次（用户2026-09-05"主线太厚重要分解"）===
-        self._player_thread = None          # 识别A线程:唯一截图+人物匹配(高频)
-        self._recognize_thread = None       # 识别B线程:怪模板/YOLO/血条(低频,从帧槽取帧,自己不截图)
+        self._capture_thread = None         # 截图线程:全项目唯一全窗截图、写帧槽,不做识别(多线程重构:从A独立)
+        self._person_thread = None          # 人物识别线程:从帧槽取帧、高频出人物点(多线程重构:从A独立)
+        self._recognize_thread = None       # 怪物线程:怪模板/YOLO/血条(低频,从帧槽取帧,自己不截图)
         # 物理拆分帧槽:A每周期把最新截图写这里,B永远只取最新一帧;seq单调递增,B按seq只处理新帧不重复算
         self._latest_frame = None
         self._latest_frame_t = 0.0
         self._latest_frame_seq = 0
-        self._detect_running = False        # 线程运行标志
+        self._detect_running = False        # 常开层(截图+人物)运行标志:绑定游戏窗口即True
+        self._monster_running = False       # 运行层(怪物模板/YOLO/血条)标志:点"开始运行"才True、停止即False(方案B)
         self._detect_lock = threading.Lock()  # 截图/结果写入锁，保证与主线程/蒙板线程不打架
         self._raw_monsters = []             # 后台线程算出的原始合并怪列表 [(x1,y1,x2,y2,score)]
         self._raw_hp_bars = []              # 后台线程算出的血条 [(x,y,w,h)]
@@ -8145,7 +8147,7 @@ class MinimapRouteRecorder:
                 self._combat_move_dir = None
                 self._combat_active = False
                 self._combat_locked_target = None
-                self._stop_detection_thread()  # 停止后台检测线程
+                self._stop_runtime_detection()  # 停止运行层(怪物+监管+边界),保留常开截图+人物(方案B)
                 if self._random_running:
                     self._release_all_keys()
                     self._reset_climb()
@@ -17503,15 +17505,15 @@ class MinimapRouteRecorder:
                     _used_m[_j] = True
         return _merged_m
 
-    def _player_loop(self):
-        """识别A线程(物理拆分·用户2026-09-12):【唯一截图者】+高频人物匹配。自建mss,每周期截一张、
-        只在这帧上跑人物匹配(ROI很轻),把最新帧写进帧槽(_latest_frame/seq)供B取,并发布_raw_frame/_raw_char_pos。
-        重活(怪模板/YOLO/血条)全在_recognize_loop(B),A不做,故人物点不再被重活拖住、跟手。自己建mss避免与主线程共用。"""
+    def _capture_loop(self):
+        """截图线程(多线程重构·用户定稿):【全项目唯一截图者】,只做一件事——按周期截一张全窗图写进帧槽
+        (_latest_frame/seq/_t/_raw_frame),供人物/怪物/加药所有识别线程共用同一张,自己不做任何识别。
+        周期=上梯高帧(22~34ms自适应)/忙/闲CPU档;自建mss(BitBlt走GDI、释放GIL,可与人物/怪物识别真并行)。"""
         import mss as _mss_mod
         try:
             _sct = _mss_mod.mss()
         except Exception as _e:
-            print("[识别A] mss初始化失败:", _e)
+            print("[截图] mss初始化失败:", _e)
             return
         # 窗口矩形(客户区)获取
         self._detect_lock.acquire()
@@ -17519,7 +17521,7 @@ class MinimapRouteRecorder:
         self._detect_lock.release()
         last_rect = None
         # [CPU诊断] A线程只统计截图+人物耗时(怪模板/YOLO/血条在B线程各自统计)
-        _dt_grab = _dt_char = 0.0
+        _dt_grab = 0.0
         _dt_rounds = 0
         _dt_last_report = time.time()
         while self._detect_running:
@@ -17566,47 +17568,15 @@ class MinimapRouteRecorder:
                                     _debug_log("[真机抓帧] 完成 共%d张 -> %s" % (_gi + 1, self._grab_real_dir))
                         except Exception as _ge:
                             _debug_log("[真机抓帧] 异常:%s" % _ge)
-                        # 固定识别带(整窗坐标):只在 y∈[30,H-90] 识别人物,顶去标题栏、底去血蓝/技能UI栏,防UI误检
-                        _fh, _fw = _frame.shape[:2]
-                        _band_y1 = DETECT_TOP_MARGIN
-                        _band_y2 = max(_band_y1 + 1, _fh - DETECT_BOTTOM_MARGIN)
-                        # A只在这帧上跑人物匹配(ROI很轻);怪/血条由B从帧槽取同一帧另算,上梯高帧时A照常高频出人物
-                        _tc0 = time.time()
-                        # fps=每秒人物跟踪次数(面板可调):截图/帧槽仍按CPU档周期跑,只对人物匹配节流,未到节拍沿用上一人物点;
-                        # 上梯高帧对位豁免(必须跟手)。hold"丢失保持N帧"的帧=此跟踪节拍,故实际保持秒数≈hold/fps
-                        _in_precise = bool(getattr(self, '_ladder_precise_mode', False)) \
-                            and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
-                        try:
-                            _role_fps = int((self._role_rec or {}).get("params", {}).get("fps", 24) or 24)
-                        except Exception:
-                            _role_fps = 24
-                        if _in_precise or time.time() - getattr(self, '_role_last_track_t', 0) >= 1.0 / max(1, _role_fps):
-                            _ch = self._get_player_screen_pos(_frame)  # 到节拍才匹配(局部很轻,丢失才全图)
-                            self._role_last_track_t = time.time()
-                        else:
-                            _ch = self._raw_char_pos  # 未到节拍:沿用上一人物点,省一次匹配开销
-                        # 人物点落在顶部标题栏/底部UI带=误匹配(人物不可能站UI上),作废,避免拿假人物点算距离/锁怪
-                        if _ch is not None and not (_band_y1 <= _ch[1] <= _band_y2):
-                            _ch = None
-                        _dt_char += time.time() - _tc0
-                        # —— 物理拆分:怪模板/YOLO/血条/合并等重活全部移到_recognize_loop(B线程,从帧槽取这帧);
-                        #    A只高频出人物点+把最新帧写进帧槽,人物不再被重活拖住(用户2026-09-12) ——
-                        self._raw_char_pos = _ch
-                        self._latest_frame = _frame                       # 最新帧槽:原子引用替换,B永远只取最新一帧
+                        # 截图线程只写帧槽:人物/怪物/加药都在各自线程取这同一张帧,不在此做任何识别(多线程重构)
+                        self._latest_frame = _frame                       # 最新帧槽:原子引用替换,所有识别线程只取最新一帧
                         self._latest_frame_t = time.time()
                         self._latest_frame_seq = getattr(self, '_latest_frame_seq', 0) + 1
                         self._raw_frame = _frame                          # 供吃药/伤害/镜头/上梯对位复用,帧龄用_raw_frame_t判
                         self._raw_frame_t = self._latest_frame_t
-                        # 物理拆分:A只把人物部件合并进世界快照(怪/血条由B的update_parts合并,互不覆盖)
-                        try:
-                            self._snap_store.update_parts(player_screen=_ch, player_t=self._raw_frame_t)
-                        except Exception as _se:
-                            _debug_log("[识别A] 人物快照发布异常:%s" % _se)
-                        # 人物特征点(蒙板用)由_match_character内部已设,这里仅保险;怪特征点归B线程,不在此动
-                        self._char_feature_matches = getattr(self, '_char_feature_matches', [])
             except Exception as _e:
                 if self._detect_running:
-                    print("[识别A] 异常:", _e)
+                    print("[截图] 异常:", _e)
             # 自适应周期(用户2026-09-07 CPU94%)：最近0.4s见到怪、或正锁着怪/在战斗 → 150ms跟手；否则空闲300ms省电降占用
             _precise_now = bool(getattr(self, '_ladder_precise_mode', False)) \
                 and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
@@ -17642,12 +17612,12 @@ class MinimapRouteRecorder:
             _dt_rounds += 1
             _dt_now = time.time()
             if _dt_now - _dt_last_report >= 1.0:
-                _msg = "[识别A耗时] %d轮 周期%s 截图%d 人物%d (ms/秒)" % (
+                _msg = "[截图耗时] %d轮 周期%s 截图%d (ms/秒)" % (
                     _dt_rounds, "精" if _precise_now else ("忙" if _busy else "闲"),
-                    _dt_grab * 1000, _dt_char * 1000)
+                    _dt_grab * 1000)
                 print(_msg)
                 _debug_log(_msg)
-                _dt_grab = _dt_char = 0.0
+                _dt_grab = 0.0
                 _dt_rounds = 0
                 _dt_last_report = _dt_now
             _slack = _period - _elapse
@@ -17655,6 +17625,59 @@ class MinimapRouteRecorder:
                 _slack = LADDER_PRECISE_MIN_SLEEP_MS   # 高帧CPU监管兜底:哪怕本轮跑超时也强制让出3ms给GIL/主线UI,绝不吃满一个核
             if _slack > 0:
                 time.sleep(_slack / 1000.0)
+
+    def _person_loop(self):
+        """人物识别线程(多线程重构·用户定稿·三地基线程之一):自己【不截图】,只从截图线程帧槽取最新一帧,
+        按角色fps节拍(上梯高帧每帧)跑人物多锚点匹配,原子发布_raw_char_pos+人物世界快照。
+        人物识别不再被截图/怪物YOLO拖住、最跟手。按seq只处理新帧,没新帧轻睡10ms,全程try自保护绝不崩。"""
+        _last_seq = -1
+        _dt_char = 0.0
+        _dt_rounds = 0
+        _dt_last_report = time.time()
+        while self._detect_running:
+            try:
+                _frame = self._latest_frame               # 截图线程发布的最新帧(原子只读)
+                _seq = getattr(self, '_latest_frame_seq', 0)
+                if _frame is None or _seq == _last_seq:
+                    time.sleep(0.010)                      # 没新帧轻等,不空转
+                    continue
+                _last_seq = _seq
+                _fh, _fw = _frame.shape[:2]
+                _band_y1 = DETECT_TOP_MARGIN
+                _band_y2 = max(_band_y1 + 1, _fh - DETECT_BOTTOM_MARGIN)
+                # 上梯对位高帧豁免fps节流(必须跟手);否则按面板角色fps节流,未到节拍沿用上一人物点
+                _in_precise = bool(getattr(self, '_ladder_precise_mode', False)) \
+                    and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+                try:
+                    _role_fps = int((self._role_rec or {}).get("params", {}).get("fps", 24) or 24)
+                except Exception:
+                    _role_fps = 24
+                if _in_precise or time.time() - getattr(self, '_role_last_track_t', 0) >= 1.0 / max(1, _role_fps):
+                    _tc0 = time.time()
+                    _ch = self._get_player_screen_pos(_frame)   # 到节拍才匹配(局部很轻,丢失才全图)
+                    _dt_char += time.time() - _tc0
+                    self._role_last_track_t = time.time()
+                    # 人物点落在顶部标题栏/底部UI带=误匹配(人物不可能站UI上),作废
+                    if _ch is not None and not (_band_y1 <= _ch[1] <= _band_y2):
+                        _ch = None
+                    self._raw_char_pos = _ch                 # 原子发布:动作线程直接读最新人物点
+                    self._char_feature_matches = getattr(self, '_char_feature_matches', [])
+                    try:
+                        self._snap_store.update_parts(player_screen=_ch, player_t=time.time())
+                    except Exception as _se:
+                        _debug_log("[人物] 快照发布异常:%s" % _se)
+                _dt_rounds += 1
+                _rn = time.time()
+                if _rn - _dt_last_report >= 1.0:
+                    _debug_log("[人物耗时] %d帧 人物匹配%d (ms/秒)" % (_dt_rounds, _dt_char * 1000))
+                    _dt_char = 0.0
+                    _dt_rounds = 0
+                    _dt_last_report = _rn
+            except Exception as _e:
+                if self._detect_running:
+                    print("[人物] 异常:", _e)
+                    _debug_log("[人物] 异常:%s" % _e)
+            time.sleep(0.005)
 
     def _recognize_loop(self):
         """识别B线程(物理拆分·用户2026-09-12):【自己不截图】,只从A线程发布的最新帧槽取新帧,低频跑重活
@@ -17669,9 +17692,9 @@ class MinimapRouteRecorder:
             self._yolo_cache, self._yolo_last_t = [], 0.0
             self._feat_cache, self._feat_last_t = [], 0.0
             self._bars_cache, self._bars_last_t = [], 0.0
-        while self._detect_running:
+        while self._monster_running:   # 方案B:怪物线程只在"开始运行"期间跑,停止即退出(截图/人物常开不受影响)
             try:
-                # 硬重置版本号自清(清的全是怪/血条跨帧缓存,归B线程;A人物不清)
+                # 硬重置版本号自清(清的全是怪/血条跨帧缓存,归怪物线程;人物不清)
                 if self._detect_reset_seq != _seen_reset_seq:
                     _seen_reset_seq = self._detect_reset_seq
                     self._yolo_cache, self._feat_cache, self._bars_cache = [], [], []
@@ -17789,7 +17812,7 @@ class MinimapRouteRecorder:
                     _dt_rounds = 0
                     _dt_last_report = _rn
             except Exception as _e:
-                if self._detect_running:
+                if self._monster_running:
                     print("[识别B] 异常:", _e)
                     _debug_log("[识别B] 异常:%s" % _e)
             time.sleep(0.010)
@@ -17800,28 +17823,50 @@ class MinimapRouteRecorder:
         return int(self._perf_val('precise_ms'))
 
     def _start_detection_thread(self):
-        if self._player_thread and self._player_thread.is_alive():
+        # 常开层(方案B·用户定稿):截图+人物 绑定游戏窗口就常开,喂角色识别框/实时识别率/加药竖框,不随运行停
+        if (self._capture_thread and self._capture_thread.is_alive()) and \
+                (self._person_thread and self._person_thread.is_alive()):
             return
         self._detect_running = True
-        self._latest_frame = None           # 帧槽清空,B等A出新帧再算
-        self._latest_frame_seq = 0
-        self._player_thread = threading.Thread(target=self._player_loop, daemon=True, name="detect_player")
-        self._recognize_thread = threading.Thread(target=self._recognize_loop, daemon=True, name="detect_recognize")
-        self._player_thread.start()
-        self._recognize_thread.start()
-        self._start_move_watchdog()  # 移动监管线(独立线程,v1只监测打日志)
-        self._start_bound_guard()    # 打怪区域·四线边界守护(独立线程,小地图光点判越线)
-        print("[识别线程] 已启动 A=截图+人物(高频) / B=怪模板+YOLO+血条(低频)")
+        if self._latest_frame is None:
+            self._latest_frame_seq = 0
+        if not (self._capture_thread and self._capture_thread.is_alive()):
+            self._capture_thread = threading.Thread(target=self._capture_loop, daemon=True, name="detect_capture")
+            self._capture_thread.start()
+        if not (self._person_thread and self._person_thread.is_alive()):
+            self._person_thread = threading.Thread(target=self._person_loop, daemon=True, name="detect_person")
+            self._person_thread.start()
+        print("[识别线程] 常开层启动: 截图+人物(绑定窗口常开)")
+
+    def _start_runtime_detection(self):
+        # 运行层(方案B):怪物识别(模板+YOLO+血条)+移动监管+边界守护,点"开始运行"才启动、停止即停(幂等,主循环按_running收敛)
+        if not (self._recognize_thread and self._recognize_thread.is_alive()):
+            self._monster_running = True
+            self._recognize_thread = threading.Thread(target=self._recognize_loop, daemon=True, name="detect_monster")
+            self._recognize_thread.start()
+            print("[识别线程] 运行层启动: 怪物(模板+YOLO+血条)")
+        self._start_move_watchdog()  # 移动监管线(独立线程)
+        self._start_bound_guard()    # 打怪区域边界守护(独立线程)
+
+    def _stop_runtime_detection(self):
+        # 停运行层(怪物+监管+边界),保留常开层截图+人物(角色识别框/识别率继续显示)
+        self._monster_running = False
+        _th = self._recognize_thread
+        if _th and _th.is_alive():
+            _th.join(timeout=1.0)
+        self._recognize_thread = None
+        self._stop_move_watchdog()
+        self._stop_bound_guard()
 
     def _stop_detection_thread(self):
+        # 全停(解绑窗口/彻底关闭用):先停运行层,再停常开层截图+人物
+        self._stop_runtime_detection()
         self._detect_running = False
-        for _th in (self._player_thread, self._recognize_thread):  # A/B都join,先停截图B自然拿不到新帧退出
+        for _th in (self._capture_thread, self._person_thread):
             if _th and _th.is_alive():
                 _th.join(timeout=1.0)
-        self._player_thread = None
-        self._recognize_thread = None
-        self._stop_move_watchdog()  # 一并停移动监管线
-        self._stop_bound_guard()    # 一并停打怪区域边界守护
+        self._capture_thread = None
+        self._person_thread = None
 
     def _combat_tick(self):
         """人性化战斗：反应延迟→转身→走位→攻击，群攻3只起，带随机容错"""
@@ -19257,8 +19302,10 @@ class MinimapRouteRecorder:
             # 蒙板只要窗口绑定成功就启动（不依赖_running），确保加药竖框始终可见
             if self.hwnd and not self._monster_overlay_running:
                 self._start_monster_overlay()
-            # 窗口绑定成功就启动后台检测线程（人物/怪/YOLO/血条同帧算，主线程只读结果）
+            # 方案B:窗口绑定成功就常开截图+人物(喂角色识别框/实时识别率/加药竖框);点"开始运行"才起怪物识别+监管+边界(幂等收敛)
             self._start_detection_thread()
+            if self._running:
+                self._start_runtime_detection()
             # === 显示层速度外推：低帧率(6-7fps)下蒙板天然落后1帧≈160ms，按人物速度外推显示位置，
             #    绿框中心/特征点/黄点全部用外推后的显示位置，走路跟手不拖后腿。纯显示，不动匹配/搜索/打怪 ===
             self._seg_loop['7b'] = self._seg_loop.get('7b', 0) + time.time() - self._lk.get('tk_done', time.time())

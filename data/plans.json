@@ -12,9 +12,19 @@
           "id": "route_002",
           "name": "方案2",
           "selected": false
+        },
+        {
+          "id": "route_003",
+          "name": "方案3",
+          "selected": false
+        },
+        {
+          "id": "route_004",
+          "name": "方案4",
+          "selected": false
         }
       ]
     }
   ],
-  "current_id": "route_002"
+  "current_id": "route_003"
 }
