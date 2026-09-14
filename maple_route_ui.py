@@ -400,7 +400,6 @@ ROLE_TRACK_FIELDS = [  # (参数key,中文标签,是否小数)
     ("maxmove", "最大跳变", False), ("faststep", "快速失配", False),
     ("research", "全图搜索ms", False), ("hold", "丢失保持", False),
 ]
-ROLE_LOST_HOLD_MS = 400   # 丢失保持时间窗(2026-09-14③):丢锚点后旧点最多保持这么多ms就清空(原按hold拍数,低帧率会钉死约10秒)
 ROLE_POLY_CLOSE_DIST = 14  # 描点采集:鼠标靠近顶点/边线的命中距离(px)
 ROLE_MAX_CHARS = 10        # 角色方案最多保存10套(以角色为单位,每套内含该角色全部锚点),满了再建自动删最旧一套
 ROLE_CN_NUM = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十"]  # 默认命名 角色一..角色十
@@ -3791,7 +3790,7 @@ class MinimapRouteRecorder:
                     self._role_refresh_window()
             except Exception: pass
 
-    def _role_text_binarize(self, vv, mask=None, denoise=True, large=False):
+    def _role_text_binarize(self, vv, mask=None, denoise=True):
         """名字/宠物名统一二值化(采集与实时必须同源,否则真名字相似度被压低、背景纹理反成假阳性):
         V通道OTSU自动找"亮笔画/底"分界→黑底白字。denoise=连通域去面积<3碎点(仅采集小模板用);
         实时整窗必须传denoise=False——整帧连通域极慢,曾把帧率拖到1.3、主循环卡957ms致F12失灵/闪退。"""
@@ -3799,38 +3798,16 @@ class MinimapRouteRecorder:
             sel = vv[mask > 0] if mask is not None else vv
             if sel is None or sel.size < 8:
                 return np.zeros_like(vv)
-            # 第一步抠图按搜索尺度分(2026-09-14真机定):局部小窗/采集用OTSU,与模板name.png同源、小窗名字占比大,
-            # 实测局部name稳0.79;全图大块(large)用局部自适应——整块OTSU会被大片背景带偏阈值把名字抠残到0.50,
-            # 自适应不依赖整块直方图,冷启动/丢失后全图重捕能稳0.66-0.72过阈。两者抠出的都是亮笔画、字形一致。
-            if large:
-                _bh, _bw = vv.shape
-                _odd = lambda _v: _v if _v % 2 == 1 else _v - 1
-                _blk = max(3, min(15, _odd(_bh), _odd(_bw)))
-                try:
-                    if min(_bh, _bw) < 3:
-                        raise ValueError("small")
-                    _bin = cv2.adaptiveThreshold(vv, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
-                                                 cv2.THRESH_BINARY, _blk, 6)
-                    out = np.where((_bin > 0) & (mask > 0), 255, 0).astype(np.uint8) if mask is not None else _bin
-                except Exception:
-                    tval, _ = cv2.threshold(sel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                    out = (np.where((vv > tval) & (mask > 0), 255, 0).astype(np.uint8) if mask is not None
-                           else np.where(vv > tval, 255, 0).astype(np.uint8))
+            tval, _ = cv2.threshold(sel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            if mask is not None:
+                out = np.where((vv > tval) & (mask > 0), 255, 0).astype(np.uint8)
             else:
-                tval, _ = cv2.threshold(sel, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                if mask is not None:
-                    out = np.where((vv > tval) & (mask > 0), 255, 0).astype(np.uint8)
-                else:
-                    out = np.where(vv > tval, 255, 0).astype(np.uint8)
+                out = np.where(vv > tval, 255, 0).astype(np.uint8)
             if denoise:  # 连通域去碎点只在采集小模板上做;实时整窗做会拖垮帧率
                 _n, _lab, _st, _ = cv2.connectedComponentsWithStats(out)  # 去笔画外孤立碎点
                 for _i in range(1, _n):
                     if _st[_i, cv2.CC_STAT_AREA] < 3:
                         out[_lab == _i] = 0
-            try:  # 1px闭运算弥合笔画断裂(采集/实时同源都做),断笔/锯齿也能重合,稳住第二阶段
-                out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8))
-            except Exception:
-                pass
             return out
         except Exception:
             return np.zeros_like(vv, np.uint8)
@@ -3895,118 +3872,6 @@ class MinimapRouteRecorder:
             pass
         return tw // 2, th // 2
 
-    def _role_load_tpl(self, key):
-        """锚点模板只读一次并缓存(2026-09-14性能①:原_role_match_in每拍、每锚点都imdecode一次硬盘PNG=每秒二十多次磁盘IO,
-        现复用_role_tpl_c内存缓存;重录/移除锚点时会pop该key、下次自动读新图)。
-        text(name/pet)→单通道灰度(配V通道OTSU二值化场景);脸/后脑→BGR【彩色】(性能②颜色为主、形状为辅:多边形外圈填主体
-        平均颜色,TM_CCOEFF减均值后外圈≈0不贡献),脸另备一张水平彩色镜像用于定朝向。返回dict或None。"""
-        c = getattr(self, '_role_tpl_c', None)
-        if not isinstance(c, dict):
-            c = {}
-            self._role_tpl_c = c
-        hit = c.get(key)
-        if hit is not None:
-            return hit
-        try:
-            is_text = (key == "name") or key.startswith("pet")
-            tpl = cv2.imdecode(np.fromfile(self._role_anchor_path(key), dtype=np.uint8),
-                               cv2.IMREAD_GRAYSCALE if is_text else cv2.IMREAD_COLOR)
-            if tpl is None or tpl.size == 0:
-                return None
-            th, tw = tpl.shape[:2]
-            rec = {"is_text": is_text, "th": th, "tw": tw, "gray": None, "bgr": None, "bgr_flip": None}
-            if is_text:
-                rec["gray"] = tpl
-            else:
-                bgr = tpl
-                try:  # 多边形外圈填主体平均颜色(每通道分别填),CCOEFF减均值后外圈≈0贡献;取法与原灰度版一致
-                    _pp0 = (self._role_rec or {}).get("anchors", {}).get(key, {}).get("poly")
-                    if _pp0:
-                        _mk = np.zeros(bgr.shape[:2], np.uint8)
-                        cv2.fillPoly(_mk, [np.array(_pp0, np.int32)], 255)
-                        if (_mk > 0).any():
-                            bgr = bgr.copy()
-                            _mean = bgr[_mk > 0].reshape(-1, bgr.shape[2]).mean(axis=0)
-                            bgr[_mk == 0] = _mean
-                except Exception:
-                    pass
-                rec["bgr"] = bgr
-                if key == "face_r":
-                    rec["bgr_flip"] = cv2.flip(bgr, 1)
-            c[key] = rec
-            return rec
-        except Exception:
-            return None
-
-    def _role_text_score(self, scene_b, tpl_b):
-        """名字第二阶段识别(2026-09-14重点):二值黑底白字不再只靠CCOEFF一种比法。
-        把模板白色笔画当基准,逐位置算 命中率hit(模板笔画在该位置也为白的比例=召回)与
-        精度prec(窗口白像素里恰为笔画的比例,压制一片亮斑/底板亮边),合成F1笔画重合分(大漠找字/多点比色语义);
-        再与CCOEFF形状分融合(0.62*F1+0.38*coef,负相关按0),两者都高才高,抗OTSU阈值帧间漂移与断笔。
-        返回(融合分, 左上角x,y);全程matchTemplate向量化、不逐像素循环。"""
-        try:
-            sf = (scene_b > 0).astype(np.float32)
-            tf = (tpl_b > 0).astype(np.float32)
-            th, tw = tf.shape
-            if th > sf.shape[0] or tw > sf.shape[1]:
-                return -2.0, None
-            nT = float(tf.sum())
-            if nT < 4:
-                return -2.0, None
-            inter = cv2.matchTemplate(sf, tf, cv2.TM_CCORR)                    # 每位置同白像素数=交集
-            swhite = cv2.matchTemplate(sf, np.ones_like(tf), cv2.TM_CCORR)    # 每位置窗口内场景白像素数
-            hit = inter / nT                                                 # 召回:模板笔画被命中比例
-            prec = inter / np.maximum(swhite, 1.0)                           # 精度:白里多少恰是笔画(压亮斑)
-            f1 = np.where((hit + prec) > 1e-6, 2.0 * hit * prec / np.maximum(hit + prec, 1e-6), 0.0)
-            coef = np.clip(cv2.matchTemplate(scene_b, tpl_b, cv2.TM_CCOEFF_NORMED), 0.0, 1.0)  # 原形状分,负按0
-            fused = 0.62 * f1 + 0.38 * coef
-            _, mv, _, ml = cv2.minMaxLoc(fused)
-            return float(mv), ml
-        except Exception:
-            return -2.0, None
-
-    def _role_color_match(self, sub, tpl_bgr, full, sim=0.45, top_k=5, refine=12):
-        """脸/后脑仿大漠两级匹配(2026-09-14,颜色为主形状为辅;治3通道彩色全图滑窗拖慢到数百ms):
-        第一级只在R单通道做CCOEFF快速粗筛(实测比3通道彩色快约3.3倍)——局部小窗直接取峰;全图用NMS取top_k个候选峰;
-        第二级仅全图:对每个候选±refine的极小邻域跑原彩色CCOEFF精验、取最高(准度等同彩色全图,却只算几小块)。
-        返回(分数, 左上角x, 左上角y)坐标相对sub,或None。sim放宽松到0.45,是否采信交给外层thr/全图重捕门槛仲裁。"""
-        try:
-            if sub is None or tpl_bgr is None:
-                return None
-            th, tw = tpl_bgr.shape[:2]
-            if th > sub.shape[0] or tw > sub.shape[1]:
-                return None
-            res = cv2.matchTemplate(sub[:, :, 2], tpl_bgr[:, :, 2], cv2.TM_CCOEFF_NORMED)
-            if not full:  # 局部小窗:R峰即位置,最省
-                _, mv, _, ml = cv2.minMaxLoc(res)
-                if float(mv) < sim:
-                    return None
-                return float(mv), ml[0], ml[1]
-            suppr = max(th, tw); work = res.copy(); cands = []  # 全图:R粗筛+NMS取候选
-            for _ in range(top_k):
-                _, rv, _, rl = cv2.minMaxLoc(work)
-                if float(rv) < sim:
-                    break
-                cands.append((float(rv), rl))
-                work[max(0, rl[1] - suppr):rl[1] + suppr, max(0, rl[0] - suppr):rl[0] + suppr] = -1.0
-            H, W = sub.shape[:2]; best = None
-            for _rs, (lx, ly) in cands:  # 只在候选极小邻域彩色精验
-                x0, y0 = max(0, lx - refine), max(0, ly - refine)
-                x1, y1 = min(W, lx + tw + refine), min(H, ly + th + refine)
-                patch = sub[y0:y1, x0:x1]
-                if patch.shape[0] < th or patch.shape[1] < tw:
-                    continue
-                rr = cv2.matchTemplate(patch, tpl_bgr, cv2.TM_CCOEFF_NORMED)
-                _, cv_, _, cl = cv2.minMaxLoc(rr)
-                ax, ay = x0 + cl[0], y0 + cl[1]
-                if best is None or float(cv_) > best[0]:
-                    best = (float(cv_), ax, ay)
-            if best is None or best[0] < sim:
-                return None
-            return best
-        except Exception:
-            return None
-
     def _role_match_in(self, frame, key, box=None):
         """在指定区域 box=(x0,y0,x1,y1)(None=整帧)内匹配单锚点→(score0~1, 锚点中心全局(x,y)或None, 朝向'L'/'R'/None)。
         名字/宠物名:区域V通道自适应二值成黑底白字再比(和采集OTSU笔画同源,抗半透明底板/换背景);
@@ -4014,10 +3879,10 @@ class MinimapRouteRecorder:
         try:
             if not self._role_has_anchor(key):
                 return 0.0, None, None
-            _tc = self._role_load_tpl(key)  # ①内存缓存模板,不再每拍imdecode硬盘
-            if _tc is None:
+            tpl = cv2.imdecode(np.fromfile(self._role_anchor_path(key), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
+            if tpl is None or tpl.size == 0:
                 return 0.0, None, None
-            th, tw = _tc["th"], _tc["tw"]
+            th, tw = tpl.shape[:2]
             H, W = frame.shape[:2]
             if box is None:
                 # 全图重搜只搜活动带(拉黑顶部标题栏/底部血蓝技能UI栏),减小面积提速+防UI误匹配
@@ -4028,8 +3893,22 @@ class MinimapRouteRecorder:
             src = frame[y0:y1, x0:x1]
             if src.shape[0] < th or src.shape[1] < tw:
                 return 0.0, None, None
-            ox, oy = self._role_anchor_pivot(key, tw, th)  # 基点=所描形状中心(名字/脸/后脑统一);text/彩色模板已在_role_load_tpl备好
-            is_text = _tc["is_text"]
+            ox, oy = self._role_anchor_pivot(key, tw, th)  # 基点=所描形状中心(名字/脸/后脑统一)
+            is_text = (key == "name") or key.startswith("pet")
+            # 脸/后脑:模板多边形外圈填主体内平均灰度,CCOEFF减均值后外圈≈0贡献(固定图也能上分数);脸另备镜像定朝向
+            tpl_m = None
+            if not is_text:
+                try:
+                    _pp0 = (self._role_rec or {}).get("anchors", {}).get(key, {}).get("poly")
+                    if _pp0:
+                        _mk0 = np.zeros(tpl.shape[:2], np.uint8)
+                        cv2.fillPoly(_mk0, [np.array(_pp0, np.int32)], 255)
+                        if (_mk0 > 0).any():
+                            tpl = tpl.copy(); tpl[_mk0 == 0] = int(tpl[_mk0 > 0].mean())
+                except Exception:
+                    pass
+                if key == "face_r":
+                    tpl_m = cv2.flip(tpl, 1)
             # 核心:搜索矩形几何扣除黑名单→只在剩余子矩形上滑窗比对(模板根本不扫黑名单那片),逐子矩形取全局最佳
             subs = self._role_sub_rects((x0, y0, x1, y1), tw, th)
             best_s, best_xy, best_face = -2.0, None, None
@@ -4044,25 +3923,23 @@ class MinimapRouteRecorder:
                     _ck = (id(frame), (gx0, gy0, gx1, gy1))
                     scene = _binc.get(_ck)
                     if scene is None:
-                        scene = self._role_text_binarize(cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 2], denoise=False, large=(box is None))
+                        scene = self._role_text_binarize(cv2.cvtColor(sub, cv2.COLOR_BGR2HSV)[:, :, 2], denoise=False)
                         _binc[_ck] = scene
                         if len(_binc) > 48:
                             _binc.clear(); _binc[_ck] = scene
-                    mv, ml = self._role_text_score(scene, _tc["gray"])  # 第二阶段:F1笔画重合+CCOEFF融合
-                    if ml is not None and float(mv) > best_s:
+                    _, mv, _, ml = cv2.minMaxLoc(cv2.matchTemplate(scene, tpl, cv2.TM_CCOEFF_NORMED))
+                    if float(mv) > best_s:
                         best_s, best_xy, best_face = float(mv), (gx0 + ml[0] + ox, gy0 + ml[1] + oy), None
-                else:  # 脸/后脑:仿大漠两级快速匹配(R颜色粗筛+全图候选彩色精验,比整块彩色滑窗快约3倍);脸原图+镜像谁高定朝向
-                    _full = box is None
-                    ss, ll, ff = -2.0, None, "R"
-                    r1 = self._role_color_match(sub, _tc["bgr"], _full)
-                    if r1 is not None:
-                        ss, ll = r1[0], (gx0 + r1[1] + ox, gy0 + r1[2] + oy)
-                    if _tc.get("bgr_flip") is not None:
-                        r2 = self._role_color_match(sub, _tc["bgr_flip"], _full)
-                        if r2 is not None and r2[0] > ss:
-                            ss, ll, ff = r2[0], (gx0 + r2[1] + ox, gy0 + r2[2] + oy), "L"
-                    if ll is not None and ss > best_s:
-                        best_s, best_xy, best_face = ss, ll, ff
+                else:  # 脸/后脑:灰度比;脸再比镜像,谁高定朝向
+                    gray = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+                    _, sr, _, sl = cv2.minMaxLoc(cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED))
+                    ss, ll, ff = float(sr), sl, "R"
+                    if tpl_m is not None:
+                        _, s2, _, l2 = cv2.minMaxLoc(cv2.matchTemplate(gray, tpl_m, cv2.TM_CCOEFF_NORMED))
+                        if float(s2) > ss:
+                            ss, ll, ff = float(s2), l2, "L"
+                    if ss > best_s:
+                        best_s, best_xy, best_face = ss, (gx0 + ll[0] + ox, gy0 + ll[1] + oy), ff
             if best_xy is None:  # 搜索区被黑名单全部扣除/都放不下模板
                 return 0.0, None, None
             if self._role_blocked(best_xy[0], best_xy[1]):  # 双保险(几何扣除后理论不会命中框内)
@@ -15479,12 +15356,6 @@ class MinimapRouteRecorder:
         hold = int(P.get("hold", 90))  # 丢失保持(识别节拍数):丢了先沿用上一可信点,超过hold拍仍没找回才清空
         now = time.time() * 1000
         last = tr["last"]
-        tr.setdefault("lost_t", 0.0)  # ③丢失保持按毫秒(不按拍数)
-        _FH, _FW = frame.shape[:2]
-        # ③错点自救:上一锚点跑出画面(如陈旧点X>窗宽),围着它开局部窗必空→本轮按无last干净全图,不被窗外错点钉死
-        if last is not None and (last[0] < -20 or last[0] > _FW + 20
-                                 or last[1] < DETECT_TOP_MARGIN - 20 or last[1] > _FH - DETECT_BOTTOM_MARGIN + 20):
-            last = None
         # 失配时miss每帧+1、≥faststep就全图=几乎每帧全图(脸还镜像=每帧4次全图匹配),吃满CPU/GIL把主循环绘制拖到
         # 400ms、帧率掉到10~15、动作中更抓不到锚点=死循环。给"miss触发的全图"加350ms最小间隔,期间只跑便宜局部窗,把帧率让回来。
         _FULL_GAP_MS = 350.0
@@ -15496,19 +15367,11 @@ class MinimapRouteRecorder:
         # 宠物始终跟人、位置绑定,人名/脸/后脑全被特效挡住时用宠物名兜底定位(用户:采了就要参与定位,不是只在管理窗看分)。
         got = {}
         _AUX = ("face_r", "back", "pet1", "pet2", "pet3")
-        # 速度优先(2026-09-14④):人名永远先匹配。全图重搜(搜索区大、最贵)时人名一旦过阈就直接采用、跳过脸/后脑/宠物,
-        # 把全屏4次匹配降到1次;局部小跟踪窗(模板小、很便宜)仍全锚点匹配,保证三个锚点框/识别率都显示、"→人名线"偏移持续学习。
-        _ns, _nl, _nf = self._role_match_in(frame, "name", box)
-        if _nl is not None:
-            got["name"] = (_ns, _nl, _nf)
-        _skip_aux = need_full and (_nl is not None and _ns >= thr)  # 仅"全图且人名稳"才短路兜底锚点
-        if not _skip_aux:
-            for k in _AUX:
-                if not self._role_has_anchor(k):
-                    continue
-                s, loc, face = self._role_match_in(frame, k, box)
-                if loc is not None:
-                    got[k] = (s, loc, face)
+        _match_keys = ("name",) + _AUX
+        for k in _match_keys:
+            s, loc, face = self._role_match_in(frame, k, box)
+            if loc is not None:
+                got[k] = (s, loc, face)
         # 可视化:过阈锚点用其采集多边形、以命中中心为不动点画框。人名过阈就画;脸/后脑只画分高的那个(互斥、只显示一个)
         ameta = self._role_rec.get("anchors", {}) if self._role_rec else {}
         _show_keys = set()
@@ -15577,7 +15440,7 @@ class MinimapRouteRecorder:
             ax, ay = int(round(axf)), int(round(ayf))  # 实际基点(三源已统一到人名那条线)
             tr["last"] = (ax, ay)
             tr["foot"] = (ax, ay)  # 单平台只看X,不做到脚补偿
-            tr["miss"] = 0; tr["score"] = ps; tr["lost_t"] = 0.0  # ③找回即清丢失计时
+            tr["miss"] = 0; tr["score"] = ps
             if need_full:
                 tr["last_full"] = now
             _fv = got.get("face_r")  # 朝向优先由面部锚点判;面部没中就保持上一次朝向、不乱翻
@@ -15590,15 +15453,12 @@ class MinimapRouteRecorder:
             return tr["foot"]
         # 没定出:失配计数,全图没找到也重置全图计时(避免每帧全图);停在最后脚点继续等重搜
         tr["miss"] += 1
-        if tr.get("lost_t", 0.0) == 0.0:
-            tr["lost_t"] = now   # ③开始丢失的时刻
         if need_full:
             tr["last_full"] = now
         self._char_match_ok = False
         fp = tr["foot"]
         self._char_lost_edge = None
-        # ③丢失保持按固定时间窗ROLE_LOST_HOLD_MS,不再按hold拍数:低帧率下90拍会把错点钉约10秒,时间窗恒定400ms
-        if fp is not None and now - tr.get("lost_t", now) > ROLE_LOST_HOLD_MS:
+        if fp is not None and tr["miss"] > hold:  # 丢失保持到期:连续hold个识别节拍没找回→清空旧点,不再死停(后台仍全图重搜,搜到自动恢复)
             tr["foot"] = None; fp = None
         if fp is not None:
             _fw = frame.shape[1]

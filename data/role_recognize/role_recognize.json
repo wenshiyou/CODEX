@@ -1,12 +1,12 @@
 {
   "params": {
-    "fps": 25,
-    "thr": 0.65,
-    "rx": 280,
-    "ry": 150,
-    "maxmove": 200,
+    "fps": 24,
+    "thr": 0.62,
+    "rx": 180,
+    "ry": 120,
+    "maxmove": 48,
     "faststep": 2,
-    "research": 1000,
+    "research": 1500,
     "hold": 90
   },
   "blocklist": [],
