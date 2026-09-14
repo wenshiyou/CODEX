@@ -193,11 +193,16 @@ WINDOW_KEYWORDS = ["冒险岛", "MapleStory Worlds"]  # 自动绑定匹配冒险
 DETECT_TOP_MARGIN = 30
 DETECT_BOTTOM_MARGIN = 90
 _enum_result = []
+_SELF_PID = os.getpid()  # 脚本自身进程PID：自动枚举/准星绑定一律排除本进程窗口(控制面板/框选窗都是自己),禁止绑定自己
 
 @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 def _enum_windows_cb(hwnd, lparam):
     try:
         if user32.IsWindowVisible(hwnd):
+            _ppid = ctypes.c_ulong(0)
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(_ppid))
+            if _ppid.value == _SELF_PID:
+                return True  # 脚本自身窗口永不参与自动绑定
             length = user32.GetWindowTextLengthW(hwnd)
             if length > 0 and length < 500:
                 buf = ctypes.create_unicode_buffer(length + 1)
@@ -425,8 +430,8 @@ MONSTER_MAX_TEMPLATES = 10
 MONSTER_MATCH_THRESHOLD = 0.70  # 阈值0.70（和人物一样），匹配更稳定减少闪烁，移动时跟手不延迟
 
 # === 打怪搜索范围常量 ===
-GAME_W = 1276             # 游戏固定窗口宽度(用户2026-09-06游戏更新后定稿：全窗口写死1276x749，不区分客户区，不要运行时动态识别，避免窗口一变尺寸就漂移/识别变化)
-GAME_H = 749              # 游戏固定窗口高度(GetWindowRect全窗口含标题栏，用户2026-09-06更新后=1276x749；旧1290x756已废弃)
+GAME_W = 1280             # 游戏固定窗口宽度(用户2026-09-06游戏更新后定稿：全窗口写死1280x800，不区分客户区，不要运行时动态识别，避免窗口一变尺寸就漂移/识别变化)
+GAME_H = 800              # 游戏固定窗口高度(GetWindowRect全窗口含标题栏，用户2026-09-06更新后=1280x800；旧1290x756已废弃)
 COMBAT_FAR_RANGE = 1300   # 同平台寻怪X范围·默认值(用户2026-09-07：800→1300，左右各1300)；可在fight页"寻怪范围"弹窗自定义far_range_x
 FAR_RANGE_Y_UP_DEFAULT = 150   # 寻怪Y上方范围默认(怪脚Y比人物Y小多少算上方可检测)
 FAR_RANGE_Y_DOWN_DEFAULT = 150 # 寻怪Y下方范围默认(怪脚Y比人物Y大多少算下方可检测)
@@ -2089,7 +2094,7 @@ class MinimapRouteRecorder:
             print("[准星] pygame透明置顶窗口已隐藏")
 
     def _save_target_window_size(self):
-        """记录目标窗口大小（绑定成功后调用）。写死 GAME_W x GAME_H(1276x749)，不读当前窗口——用户要写死固定，窗口变大会被_ensure_window_size拉回。
+        """记录目标窗口大小（绑定成功后调用）。写死 GAME_W x GAME_H(1280x800)，不读当前窗口——用户要写死固定，窗口变大会被_ensure_window_size拉回。
         同时移除窗口的WS_THICKFRAME(可调大小边框)——用户改不了大小，但保留标题栏WS_CAPTION仍可拖动移动位置。"""
         if self.hwnd and self.window_rect:
             self._target_window_size = (GAME_W, GAME_H)
@@ -2099,7 +2104,7 @@ class MinimapRouteRecorder:
                 win32gui.SetWindowLong(self.hwnd, win32con.GWL_STYLE, style & ~win32con.WS_THICKFRAME)
             except Exception as e:
                 print("[窗口固定] 移除WS_THICKFRAME异常:", e)
-            self._ensure_window_size()  # 绑定后立即拉回指定尺寸1276x749(不等主循环30帧)，用户改不了大小
+            self._ensure_window_size()  # 绑定后立即拉回指定尺寸1280x800(不等主循环30帧)，用户改不了大小
 
     def _ensure_window_size(self):
         """检测窗口大小是否变动，变动则拉回目标大小"""
@@ -11898,7 +11903,7 @@ class MinimapRouteRecorder:
         # === ROI匹配失败或无上次位置 且 没有≥0.70可信预测：全图匹配所有特征（固定识别范围3,30到1365,738，减少匹配面积）===
         # 注意：ROI内0.40~0.69的低分命中不算可信，否则会把全图兜底挡住（人物丢失就永远找不回）——2026-09-04修复
         if not any(p[2] >= CHAR_MATCH_THRESHOLD for p in predictions):
-            # 游戏画面识别范围：写死固定窗口尺寸 GAME_W x GAME_H(1276x749，用户定稿不要动态识别，窗口变大也会被拉回，避免识别范围随窗口漂移)
+            # 游戏画面识别范围：写死固定窗口尺寸 GAME_W x GAME_H(1280x800，用户定稿不要动态识别，窗口变大也会被拉回，避免识别范围随窗口漂移)
             _ccx1, _ccy1 = 3, DETECT_TOP_MARGIN
             _cfh, _cfw = frame.shape[:2]
             _ccx2, _ccy2 = min(GAME_W, _cfw), min(GAME_H, _cfh)  # 固定容量到 1368x800，不超 frame
@@ -18939,7 +18944,7 @@ class MinimapRouteRecorder:
         while True:
             if self.frame_count <= 3: print("[冷启动] %.2fs 第%d帧开始" % (time.time()-self._boot_t, self.frame_count))
             try:
-                # [CPU优化2026-09-07] 主循环只需要小地图块，直接截小地图区域，不再每帧全屏抓1276x749。
+                # [CPU优化2026-09-07] 主循环只需要小地图块，直接截小地图区域，不再每帧全屏抓1280x800。
                 # 旧法每帧全屏抓屏，CPU忙时一次高达200-300ms，是整机CPU满载/掉帧/带不动闪退的主因；
                 # 全屏人物/怪/YOLO/血条检测全部在后台检测线程做，主线程只读结果。
                 _t0_cap = time.time()
@@ -19383,7 +19388,7 @@ class MinimapRouteRecorder:
             # 黄/紫范围框直接按人物显示点几何算(不依赖B线程:上梯冻结B或未运行时也必须显示,用户2026-09-13)
             try:
                 _rf0 = self._raw_frame
-                _Hh, _Ww = (_rf0.shape[:2] if _rf0 is not None else (749, 1276))
+                _Hh, _Ww = (_rf0.shape[:2] if _rf0 is not None else (800, 1280))
                 _by1 = DETECT_TOP_MARGIN; _by2 = max(DETECT_TOP_MARGIN + 1, _Hh - DETECT_BOTTOM_MARGIN)
                 _fcc = self._get_fight_config()
                 _skr = int(_fcc.get("atk1_distance", 150) or 150)
@@ -19543,6 +19548,17 @@ class MinimapRouteRecorder:
                     hwnd = user32.WindowFromPoint(cursor)
                     # GetAncestor取真正顶层窗口(GA_ROOT=2)
                     hwnd = user32.GetAncestor(hwnd, 2)
+                    # [2026-09-14] 禁止绑定脚本自身进程窗口(控制面板PLAY AND HAPPY/各类cv2框选窗都是本进程):
+                    # 准星误拖到自己面板上直接拒绝,否则截图/按键全发到脚本UI导致错乱
+                    _tpid = ctypes.c_ulong(0)
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(_tpid))
+                    if _tpid.value == os.getpid():
+                        self._add_log("不能绑定脚本自身窗口")
+                        _debug_log("[窗口绑定] 准星拖到脚本自身窗口(pid=%d hwnd=%s),已拒绝绑定" % (_tpid.value, hwnd))
+                        self._drag_crosshair = False
+                        self._crosshair_pos = self._crosshair_home
+                        self._destroy_crosshair_window()
+                        continue
                     _debug_log("跨线释放绑定 hwnd=%s" % hwnd)
                     _debug_log("前台绑定 hwnd=%s" % hwnd)
                     if hwnd:
