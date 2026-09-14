@@ -1020,7 +1020,13 @@ class MinimapRouteRecorder:
             self._hwnd_watch_last = 0.0        # 句柄看门狗上次检查时间(1秒节流,避免频繁EnumWindows)
             if self.hwnd:
                 self._update_window_rect()
-                self._detect_minimap()  # 恢复原来的自动检测，避免显示窗口变小
+                # [2026-09-14 根因修复·A:重启后录制线与光点错开] 启动优先读回上次保存的小地图裁剪框,
+                # 与录制时严格保持同一块内像素坐标系;读不到(首次/文件丢失)才三模板自动检测。
+                # 旧逻辑每次启动都_detect_minimap重算,三模板整数匹配帧间抖1~3px,而录制线/梯子是块内绝对
+                # 像素坐标,重启后裁剪框原点一抖旧线就整体错开(运行中因8px锁定不抖,故"刚录对、重启后错")。
+                # 兜底:运行期debug=False定时/丢光重定位仍在,与读回基准差≤8px锁定不动、真变>8px才更新。
+                if not self._load_region():
+                    self._detect_minimap()  # 无保存区域时才自动检测，避免显示窗口变小
                 self._save_target_window_size()
                 print("[窗口绑定] 自动绑定成功")
                 # 启动人物坐标跟踪线程（暂时注释，排查绑定问题）
@@ -2126,6 +2132,9 @@ class MinimapRouteRecorder:
                 self.minimap_rect = data["minimap"]
                 self._recalc_scale_from_region()
                 print("Loaded saved region:", self.map_area_rect["width"], "x", self.map_area_rect["height"])
+                _debug_log("[小地图] 启动读回保存裁剪框 %dx%d @(L%d,T%d),与录制保持同一块内像素坐标系(不三模板重算)" % (
+                    self.map_area_rect["width"], self.map_area_rect["height"],
+                    self.map_area_rect["left"], self.map_area_rect["top"]))
                 return True
         except Exception:
             pass
@@ -18842,7 +18851,11 @@ class MinimapRouteRecorder:
             self.hwnd = hwnd
             self._hwnd_auto = True  # 用户主动按标题重绑=自动模式,后续句柄变更由看门狗接管
             self._update_window_rect()
-            self._detect_minimap()
+            # [2026-09-14 根因修复·A] 同__init__:绑定窗口优先沿用已保存裁剪框(与录制同一块内坐标系),
+            # 磁盘无保存区域才三模板检测。否则每次重启/重绑都重算,实测top会抖8px、宽高抖3~4px,旧录制线整体错位。
+            # 准星换窗口绑定/手动R/刷新按钮仍走强制_detect_minimap(用户主动换目标或校正,不在此函数)。
+            if not self._load_region():
+                self._detect_minimap()
             self._save_target_window_size()
             self._add_log("窗口已绑定")
             print("[窗口绑定] 已绑定")
