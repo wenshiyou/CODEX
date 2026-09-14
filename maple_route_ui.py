@@ -12787,11 +12787,18 @@ class MinimapRouteRecorder:
                     if first_draw[0]:
                         _debug_log("[怪物蒙板] 窗口几何: %dx%d +%d+%d" % (_cur_geom[2], _cur_geom[3], _cur_geom[0], _cur_geom[1]))
                         first_draw[0] = False
-                    # 2026-09-07 CPU优化：只在几何变化时SetWindowPos(每次SetWindowPos都会触发重绘)
-                    if getattr(self, '_overlay_last_geom', None) != _cur_geom:
+                    # 载体尺寸硬锁死(用户2026-09-14:寻怪黄框跑到游戏窗外=载体蒙板变大/错位):
+                    # 每轮读蒙板"自身实际几何"与游戏外窗对比,只要不一致(被系统/其它逻辑改大或错位、或没跟上),
+                    # 50ms内立即SetWindowPos拉回=游戏外窗;一致才跳过(保留CPU优化、不多重绘)。
+                    _ob = ctypes.create_string_buffer(16)
+                    user32.GetWindowRect(hwnd, _ob)
+                    _osl, _ost, _osr, _osb = struct.unpack("llll", _ob.raw)
+                    _ov_geom = (_osl, _ost, _osr - _osl, _osb - _ost)
+                    if _ov_geom != _cur_geom:
                         user32.SetWindowPos(hwnd, -1, _cur_geom[0], _cur_geom[1],
                                             _cur_geom[2], _cur_geom[3], 0x0050)
                         self._overlay_last_geom = _cur_geom
+                        _debug_log("[怪物蒙板] 载体偏离游戏已拉回: 蒙板%s -> 游戏%s" % (_ov_geom, _cur_geom))
                 elif first_draw[0]:
                     _debug_log("[怪物蒙板] 警告：hwnd无效")
                     first_draw[0] = False
@@ -19388,7 +19395,9 @@ class MinimapRouteRecorder:
             # 黄/紫范围框直接按人物显示点几何算(不依赖B线程:上梯冻结B或未运行时也必须显示,用户2026-09-13)
             try:
                 _rf0 = self._raw_frame
-                _Hh, _Ww = (_rf0.shape[:2] if _rf0 is not None else (800, 1280))
+                _Hh, _Ww = (_rf0.shape[:2] if _rf0 is not None else (GAME_H, GAME_W))
+                # 载体=主蒙板=游戏外窗固定GAME_W x GAME_H;黄/蓝框坐标边界以载体为准,帧尺寸若漂移一律夹回,寻怪/技能框绝不画出窗外
+                _Ww = min(int(_Ww), GAME_W); _Hh = min(int(_Hh), GAME_H)
                 _by1 = DETECT_TOP_MARGIN; _by2 = max(DETECT_TOP_MARGIN + 1, _Hh - DETECT_BOTTOM_MARGIN)
                 _fcc = self._get_fight_config()
                 _skr = int(_fcc.get("atk1_distance", 150) or 150)
