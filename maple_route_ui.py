@@ -1642,6 +1642,7 @@ class MinimapRouteRecorder:
         self._latest_frame = None
         self._latest_frame_t = 0.0
         self._latest_frame_seq = 0
+        self.client_subrect = None        # 游戏画面(客户区)在外窗坐标系里的子矩形(x1,y1,x2,y2),由_update_window_rect动态算(用户2026-09-14)
         self._detect_running = False        # 常开层(截图+人物)运行标志:绑定游戏窗口即True
         self._monster_running = False       # 运行层(怪物模板/YOLO/血条)标志:点"开始运行"才True、停止即False(方案B)
         self._detect_lock = threading.Lock()  # 截图/结果写入锁，保证与主线程/蒙板线程不打架
@@ -1794,6 +1795,18 @@ class MinimapRouteRecorder:
         user32.GetWindowRect(self.hwnd, rect)
         l, t, r, b = struct.unpack("llll", rect.raw)
         self.window_rect = {"left": l, "top": t, "width": r - l, "height": b - t}
+        # 游戏画面(客户区)在"外窗坐标系"里的子矩形(x1,y1,x2,y2),动态随窗口样式/标题栏/DPI自适应。
+        # 蒙板仍盖整个外窗,但所有框/识别只在这块画面内生效,标题栏+边框那圈不画不识别(用户2026-09-14)。
+        try:
+            _cr = ctypes.create_string_buffer(16)
+            user32.GetClientRect(self.hwnd, _cr)
+            _cl0, _ct0, _crr, _cbb = struct.unpack("llll", _cr.raw)
+            _pt = POINT(0, 0)
+            user32.ClientToScreen(self.hwnd, ctypes.byref(_pt))
+            _ox, _oy = _pt.x - l, _pt.y - t
+            self.client_subrect = (_ox, _oy, _ox + (_crr - _cl0), _oy + (_cbb - _ct0))
+        except Exception:
+            self.client_subrect = (0, 0, r - l, b - t)  # 取不到就退回整个外窗,绝不因此崩
 
     # ==================== CPU性能三档(慢/普通/快,用户2026-09-11) ====================
     def _load_perf_level(self):
@@ -12206,6 +12219,10 @@ class MinimapRouteRecorder:
         gdi32.DeleteObject.argtypes = [ctypes.c_void_p]
         gdi32.SelectObject.restype = ctypes.c_void_p
         gdi32.SelectObject.argtypes = [wintypes.HDC, ctypes.c_void_p]
+        gdi32.CreateRectRgn.restype = ctypes.c_void_p
+        gdi32.CreateRectRgn.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        gdi32.SelectClipRgn.restype = ctypes.c_void_p
+        gdi32.SelectClipRgn.argtypes = [wintypes.HDC, ctypes.c_void_p]
         user32.FillRect.restype = ctypes.c_int
         user32.FillRect.argtypes = [wintypes.HDC, ctypes.c_void_p, wintypes.HBRUSH]
         gdi32.MoveToEx.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
@@ -12463,6 +12480,16 @@ class MinimapRouteRecorder:
                                 gdi32.TextOutW(hdc, txt_x, txt_y, step_txt, len(step_txt))
                         # 调试总开关(F4):关时data置空→所有实战框/点/线都不画,蒙板只剩透明背景=干净原画面
                         data = self._monster_overlay_data if getattr(self, '_debug_overlay', True) else {}
+                        # 做法2(用户2026-09-14):蒙板仍盖整个外窗,但实战框/点/线只允许画在游戏画面(客户区)子矩形内,
+                        # 标题栏+边框那圈一律裁掉→任何框都不伸出游戏画面。纯GDI显示裁剪,坐标与战斗判定一律不动;
+                        # 校准引导/基点在这之前已画完,不受裁剪影响。
+                        _clip_rgn = None
+                        _cs = getattr(self, 'client_subrect', None)
+                        if data and _cs:
+                            _clip_rgn = gdi32.CreateRectRgn(int(_cs[0]), int(_cs[1]), int(_cs[2]), int(_cs[3]))
+                            if _clip_rgn:
+                                gdi_objs.append(_clip_rgn)
+                                gdi32.SelectClipRgn(hdc, _clip_rgn)
                         # 人物位置取数（黄点/怪物连线/框都依赖它；丢失会使后面绘制抛异常）
                         char_pos = data.get('char_pos') if data else None
                         cx = cy = 0
@@ -12688,6 +12715,10 @@ class MinimapRouteRecorder:
                     except Exception as e:
                         _debug_log("[怪物蒙板] 绘制异常: %s" % e)
                     finally:
+                        try:
+                            gdi32.SelectClipRgn(hdc, None)  # 先解除裁剪区,下面才能DeleteObject成功,防GDI句柄泄漏
+                        except Exception:
+                            pass
                         for _obj in gdi_objs:
                             try:
                                 gdi32.DeleteObject(_obj)
@@ -17737,8 +17768,14 @@ class MinimapRouteRecorder:
                     and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
                 if not _precise:
                     _fh, _fw = _frame.shape[:2]
-                    _band_y1 = DETECT_TOP_MARGIN
-                    _band_y2 = max(_band_y1 + 1, _fh - DETECT_BOTTOM_MARGIN)
+                    # 识别物理边界=游戏画面(客户区)子矩形,标题栏/边框那圈不扫(用户2026-09-14);取不到退回整帧
+                    _csub = getattr(self, 'client_subrect', None)
+                    if _csub:
+                        _px1, _py1, _px2, _py2 = int(_csub[0]), int(_csub[1]), int(_csub[2]), int(_csub[3])
+                    else:
+                        _px1, _py1, _px2, _py2 = 0, 0, _fw, _fh
+                    _band_y1 = max(DETECT_TOP_MARGIN, _py1)
+                    _band_y2 = min(max(_band_y1 + 1, _fh - DETECT_BOTTOM_MARGIN), _py2)
                     _ch = self._raw_char_pos   # 用A最新人物点做范围裁剪(差一个A周期,寻怪范围有余量,不影响)
                     _now_det = time.time()
                     _fc = self._get_fight_config()
@@ -17749,24 +17786,24 @@ class MinimapRouteRecorder:
                     _far_y_up = int(_fc.get("far_range_y_up", 0) or 0)
                     _far_y_down = int(_fc.get("far_range_y_down", 0) or 0)
                     if _ch is not None and _far_x > 0 and (_far_y_up > 0 or _far_y_down > 0):
-                        _dyx1 = max(0, _ch[0] - _far_x)
-                        _dyx2 = min(_fw, _ch[0] + _far_x)
+                        _dyx1 = max(_px1, _ch[0] - _far_x)
+                        _dyx2 = min(_px2, _ch[0] + _far_x)
                         _dyy1 = _ch[1] - _far_y_up if _far_y_up > 0 else _band_y1
                         _dyy2 = _ch[1] + _far_y_down if _far_y_down > 0 else _band_y2
                     else:
-                        _dyx1, _dyx2, _dyy1, _dyy2 = 0, _fw, _band_y1, _band_y2
-                    _yolo_crop = (max(0, _dyx1), max(_band_y1, _dyy1), min(_fw, _dyx2), min(_band_y2, _dyy2))
+                        _dyx1, _dyx2, _dyy1, _dyy2 = _px1, _px2, _band_y1, _band_y2
+                    _yolo_crop = (max(_px1, _dyx1), max(_band_y1, _dyy1), min(_px2, _dyx2), min(_band_y2, _dyy2))
                     if _yolo_crop[2] <= _yolo_crop[0] or _yolo_crop[3] <= _yolo_crop[1]:
-                        _yolo_crop = (0, _band_y1, _fw, _band_y2)
+                        _yolo_crop = (_px1, _band_y1, _px2, _band_y2)
                     self._disp_yolo_crop = _yolo_crop  # 怪物识别(YOLO推理)范围,供蒙板黄框可视化(对齐心火)
                     if _ch is not None:
-                        _ftx1, _ftx2 = max(0, _ch[0] - _skr), min(_fw, _ch[0] + _skr)
+                        _ftx1, _ftx2 = max(_px1, _ch[0] - _skr), min(_px2, _ch[0] + _skr)
                         _fty1, _fty2 = max(_band_y1, _ch[1] - _yupr), min(_band_y2, _ch[1] + _ydnr)
                     else:
-                        _ftx1, _ftx2, _fty1, _fty2 = 0, _fw, _band_y1, _band_y2
+                        _ftx1, _ftx2, _fty1, _fty2 = _px1, _px2, _band_y1, _band_y2
                     _feat_crop = (_ftx1, _fty1, _ftx2, _fty2)
                     if _feat_crop[2] <= _feat_crop[0] or _feat_crop[3] <= _feat_crop[1]:
-                        _feat_crop = (0, _band_y1, _fw, _band_y2)
+                        _feat_crop = (_px1, _band_y1, _px2, _band_y2)
                     self._disp_feat_crop = _feat_crop  # 人物技能(攻击射程atk1_distance+Y上下)范围,供蒙板紫框(对齐心火)
                     if _now_det - self._feat_last_t >= self._perf_val('feat_s'):  # 怪模板节流按CPU档(无模板直接[]零开销)
                         _tf0 = time.time()
@@ -19396,9 +19433,15 @@ class MinimapRouteRecorder:
             try:
                 _rf0 = self._raw_frame
                 _Hh, _Ww = (_rf0.shape[:2] if _rf0 is not None else (GAME_H, GAME_W))
-                # 载体=主蒙板=游戏外窗固定GAME_W x GAME_H;黄/蓝框坐标边界以载体为准,帧尺寸若漂移一律夹回,寻怪/技能框绝不画出窗外
                 _Ww = min(int(_Ww), GAME_W); _Hh = min(int(_Hh), GAME_H)
-                _by1 = DETECT_TOP_MARGIN; _by2 = max(DETECT_TOP_MARGIN + 1, _Hh - DETECT_BOTTOM_MARGIN)
+                # 显示框物理边界=游戏画面(客户区)子矩形,标题栏/边框那圈不进(用户2026-09-14);取不到退回整帧
+                _csub2 = getattr(self, 'client_subrect', None)
+                if _csub2:
+                    _px1, _py1, _px2, _py2 = int(_csub2[0]), int(_csub2[1]), int(_csub2[2]), int(_csub2[3])
+                else:
+                    _px1, _py1, _px2, _py2 = 0, 0, _Ww, _Hh
+                _by1 = max(DETECT_TOP_MARGIN, _py1)
+                _by2 = min(max(_by1 + 1, _Hh - DETECT_BOTTOM_MARGIN), _py2)
                 _fcc = self._get_fight_config()
                 _skr = int(_fcc.get("atk1_distance", 150) or 150)
                 _yup = abs(int(_fcc.get("attack_y_up", -ATTACK_Y_UP)))
@@ -19408,14 +19451,14 @@ class MinimapRouteRecorder:
                 _fydn = int(_fcc.get("far_range_y_down", 0) or 0)
                 if _disp_pos:
                     if _fxr > 0 and (_fyup > 0 or _fydn > 0):
-                        _yx1, _yx2 = max(0, _disp_pos[0] - _fxr), min(_Ww, _disp_pos[0] + _fxr)
+                        _yx1, _yx2 = max(_px1, _disp_pos[0] - _fxr), min(_px2, _disp_pos[0] + _fxr)
                         _yy1 = _disp_pos[1] - _fyup if _fyup > 0 else _by1
                         _yy2 = _disp_pos[1] + _fydn if _fydn > 0 else _by2
                     else:
-                        _yx1, _yx2, _yy1, _yy2 = 0, _Ww, _by1, _by2
-                    _ycrop = (max(0, _yx1), max(_by1, _yy1), min(_Ww, _yx2), min(_by2, _yy2))  # 黄=怪物识别范围
-                    _fcrop = (max(0, _disp_pos[0] - _skr), max(_by1, _disp_pos[1] - _yup),
-                              min(_Ww, _disp_pos[0] + _skr), min(_by2, _disp_pos[1] + _ydn))  # 紫=技能范围
+                        _yx1, _yx2, _yy1, _yy2 = _px1, _px2, _by1, _by2
+                    _ycrop = (max(_px1, _yx1), max(_by1, _yy1), min(_px2, _yx2), min(_by2, _yy2))  # 黄=怪物识别范围
+                    _fcrop = (max(_px1, _disp_pos[0] - _skr), max(_by1, _disp_pos[1] - _yup),
+                              min(_px2, _disp_pos[0] + _skr), min(_by2, _disp_pos[1] + _ydn))  # 蓝=技能范围
                 else:
                     _ycrop = _fcrop = None
                 self._monster_overlay_data["yolo_crop"] = _ycrop
