@@ -534,7 +534,7 @@ TP_ATK_RELEASE_MS = 50    # 瞬移前置:先松主攻键再等50ms前摇(本游�
 # === 梯子特征模板（YOLO前过渡方案，用户2026-09-09定稿：随方案永久存盘，仅上梯近距在主窗口匹配梯子竖条X，辅助精准起跳）===
 LADDER_TPL_MAX = 10            # 每方案最多梯子模板数
 LADDER_TPL_DEFAULT_SIM = 0.70  # 梯子模板匹配默认相似度
-LADDER_TPL_ENTER_PX = 7        # 小地图|人-梯X差|≤此值才从"小地图粗导航"切到"主窗口梯子模板精对齐"(5→7放宽求稳:屏幕45~50跑跳带≈小地图4.5~5,确保跑跳带由屏幕逻辑接管)
+LADDER_TPL_ENTER_PX = 7        # [已不做硬门槛·保留] 用户2026-09-14起小地图粗导航与主窗口屏幕对位同时进行,不再用小地图差≤7卡切换(旧设计切进去已贴脸、越过75跑跳带);屏幕每帧尝试匹配、算到就接管
 LADDER_TPL_X_RANGE = 150       # 主窗口搜索X半宽：只朝目标怪所在那一侧扩150(怪在右只搜右/在左只搜左)
 LADDER_TPL_Y_NEAR = 20         # Y近人物侧留白(避开人物本体)
 LADDER_TPL_Y_FAR = 150         # Y远侧搜索距离(上行搜头顶/下行搜脚下)
@@ -557,6 +557,8 @@ LADDER_SCR_STALL_MAX = 3       # 想动没动解卡上限,超过回主线重选�
 LADDER_SCR_RUNJUMP_IDEAL = 85    # 理想腾空点≈85(跑跳带70~100中部,用户2026-09-11 22:38:区间改70~100;判据asdx≤IDEAL+v,主线~110ms一拍v大、IDEAL+v可覆盖到上限100,延迟大/速度快自动多提前)
 LADDER_SCR_RUNJUMP_TRIG_HI = 100  # 跑跳带上限:X差>100还太远,继续大步助跑不跳(用户2026-09-11 22:38:90→100,真机目测100处带速起跳仍上得去,同时补偿主线~110ms决策延迟)
 LADDER_SCR_RUNJUMP_TRIG_LO = 70  # 跑跳带下限:X差<70已贴太近、水平速度不足,不硬跑跳,交按住趋近→碎步→直跳(用户2026-09-11 22:38:65→70)
+LADDER_RUNJUMP_HI = 80         # 第一次上梯跑跳带上限(用户2026-09-14晚):屏幕人梯X差落入[60,80]、移动中跑跳
+LADDER_RUNJUMP_LO = 60         # 跑跳带下限;X差<=60不再跑跳,走直跳路径(按住趋近→三拍碎步对齐→<=5原地直跳);一进屏幕对位就已<=60=直接走直跳,不等跑跳
 LADDER_RUNJUMP_HORIZ_REL = 12    # 跑跳腾空后:人梯屏幕X差≤此值松开朝梯水平键、只留↑,防水平惯性把人冲过梯子抓空
 LADDER_SCR_STICK_MS = 150        # 屏幕精对齐粘滞:模板偶发丢帧时沿用上一次稳定梯X的最长时间,防状态掉回小地图走到X差0原地直跳
 LADDER_MERGE_WAIT_MS = 1500      # 红框(倍率)白框(特征)吸附合并等待上限(用户2026-09-10:必须合并才起跳):进屏幕对位后超过这么久仍没合并=白框没扫到/模板问题,放弃回主线,既不没合并硬跳、也不死等
@@ -632,6 +634,17 @@ LADDER_GRAB_UP_TOL = 2       # 抓梯成功阈值(镜头滚动原理·用户2026
 LADDER_GRAB_WINDOW_MS = 1000  # 直跳抓梯硬上限(用户2026-09-10:按住↑给足1秒再判成败,450→1000提高上梯成功率);成功靠Y变小实时触发、不用等满
 LADDER_GRAB_FAIL_MIN_MS = 1000 # 直跳起跳后至少这么久才允许"Y落回起跳=没抓住"判失败(用户2026-09-10:一直按住超过1秒再判,220→1000,避免上升/贴梯途中误判)
 LADDER_FAIL_REENTER_MS = 120  # 抓梯失败回主线后的极短冷却(2026-09-10替代原随机300~500:防同帧立刻又选同一梯空跳,又不发呆;本层有怪会被先锁去打)
+# === 梯子【失败集合】校准(用户2026-09-14定稿:直跳没抓住不回主线,最多3轮"朝梯移动当前剩余距离70%→停下→检测,达标就直跳";
+#   任一直跳后Y变小=抓住→接上梯集合、剩余轮次作废;3轮移动后仍没抓住→重新算怪距回主线打怪。移动用主窗口梯子屏幕X,和正常直跳同口径) ===
+LADDER_REALIGN_MAX_ROUNDS = 3     # 失败集合最多移动几轮(每轮=走剩余70%→停→检测→达标直跳)
+LADDER_REALIGN_RATIO = 0.70       # 每轮朝梯移动"本轮开始时剩余屏幕X差"的70%(离得远首轮多走,不碎步)
+LADDER_REALIGN_MIN_STEP = 6       # 单轮最少移动屏幕px(剩余太小时也保证真的挪一点,不会原地空转)
+LADDER_REALIGN_MOVE_CAP_MS = 320  # 单轮按住朝梯方向键的时长上限(实时走到本轮步长即提前抬键;防走过头/卡住死按)
+LADDER_REALIGN_GAP_MIN = 90       # 抬键后停顿时长随机下限ms(停稳再检测新距离)
+LADDER_REALIGN_GAP_MAX = 140      # 抬键后停顿时长随机上限ms
+LADDER_REALIGN_TOL = 5            # 达标=屏幕|人-梯X差|≤此值(复用LADDER_SCR_TOL口径5px)
+LADDER_REALIGN_HOLD_FRAMES = 2    # 达标需连续帧数(防抖,和正常屏幕直跳一致)
+LADDER_REALIGN_NO_TPL_MS = 1200   # 失败集合里连续多久拿不到梯子屏幕X(无模板/匹配不到)=回主线,不死等
 # === 梯子水平对齐·精细点动(用户2026-09-09定稿)：远距正常走,进3px内才1~2px点动挪到重合,关键动作(直跳)必须过准入标准 ===
 LADDER_ALIGN_FINE = 3        # |小地图X差|≤3进入精细点动区(>3仍正常按住方向走,像人不磨叽)
 LADDER_ALIGN_TOL = 1         # 直跳准入硬标准:|X差|必须≤1(用户:小于2、不等于2;杜绝2.x边界没对齐就跳)
@@ -5240,6 +5253,19 @@ class MinimapRouteRecorder:
         self._climb_ever_moved = False   # 复位真移动锁存,下次抓梯重新累计
         self._ladder_snap_x = None           # 红框(倍率)吸附白框(特征)锁定的真实屏幕X,出梯清空
         self._lad_snap_prev = None           # 上帧吸附的白框X(滞回防抖),出梯清空
+        # === 梯子失败集合(70%×3轮校准)状态复位(用户2026-09-14) ===
+        self._ladder_realign_round = 0       # 失败集合已开始的移动轮数(每进入一次move段+1,最多3)
+        self._ladder_realign_phase = None    # 'move'走剩余70% / 'gap'抬键停顿 / 'align'等连续达标帧
+        self._ladder_realign_t = 0           # 当前阶段开始时刻/本轮随机停顿截止
+        self._ladder_realign_gap_to = 0      # 本轮抬键停顿截止时刻ms
+        self._ladder_realign_from_x = None   # 本轮移动起点·人物屏幕X
+        self._ladder_realign_step = 0        # 本轮计划移动屏幕px(=进入时剩余*0.7)
+        self._ladder_realign_key_vk = None   # 本轮按住的方向键vk
+        self._ladder_realign_ok_frames = 0   # 达标连续帧计数
+        self._ladder_realign_no_tpl_since = 0  # 拿不到梯子屏幕X的起始时刻(超时回主线)
+        # === 上梯集合到顶·三背景点静止(第一道)状态复位(用户2026-09-14:先背景不动、再光点重合梯顶) ===
+        self._climb_bg_still_since = 0       # 三背景点连续静止起始时刻ms(0=还在动/未开始计)
+        self._climb_bg_ok = False            # 背景已确认静止CLIMB_STILL_MS(第一道,确认在爬之后才允许锁存)
 
     def _pre_teleport_release(self):
         """瞬移前置(用户2026-09-11):这个游戏攻击动作没停下前,瞬移等很多动作做不出来(攻击硬直会吞键)。
@@ -5307,53 +5333,33 @@ class MinimapRouteRecorder:
         step = getattr(self, '_ladder_post_jump_step', 'delay1')
         start_t = getattr(self, '_ladder_post_jump_t', now_ms)
 
-        # ===== 跑跳专用(用户2026-09-11 22:38改动作):方向键不松按跳 → 跳完(=跳键duration80ms自动抬起)那一刻左右水平键全松、同时只按住↑;
-        #       腾空头80ms仍保持朝梯水平键把助跑速度带进跳跃,跳完即收水平只留↑,靠起跳惯性滑到梯位抓梯(不再空中持续按水平、也不等贴脸才松) =====
-        if step == 'run_delay':
-            _rd = int(getattr(self, '_ladder_run_dir', 1) or 1)
-            _hvk = VK_RIGHT if _rd > 0 else VK_LEFT
-            _ovk = VK_LEFT if _rd > 0 else VK_RIGHT
-            if now_ms - start_t < RUNJUMP_UP_DELAY_MS:
-                # 腾空头80ms:只保持朝梯水平键(对侧先松防左右相抵),把助跑水平速度带进跳跃,这段先不按↑
-                if _ovk in self._random_move_keys:
-                    self._key_up(_ovk)
-                if _hvk not in self._random_move_keys:
-                    self._key_down(_hvk)                       # 保持朝梯=带水平惯性跃向梯子
-                return False
-            # 跳完(跳键80ms已自动抬起):跳键+左右水平键一起松,同时只按住↑不松
-            self._key_up(VK_LEFT)
-            self._key_up(VK_RIGHT)
-            if VK_DOWN in self._random_move_keys:
-                self._key_up(VK_DOWN)
-            if VK_UP not in self._random_move_keys:
-                self._key_down(VK_UP)
-            self._ladder_post_jump_step = 'run_check'
-            self._ladder_post_jump_t = now_ms
-            _debug_log("[爬梯·屏幕·跑跳] 跳完%dms:左右水平一起松、同时只按住↑(靠起跳惯性滑到梯位),1秒内对比地面基准Y=%.0f(当前%.0f)" % (
-                RUNJUMP_UP_DELAY_MS, self._climb_start_y, py))
-            return False
-        if step == 'run_check':
-            # 跳完已全松水平:run_check只确保↑按住,绝不再按左右(保险再松一次,防残留水平键二次发力/惯性把人冲过梯子)
+        # ===== 跑跳固定时序(用户2026-09-14):起跳当帧已松左右、按住↑;这里持续按住↑满RUNJUMP_GRAB_WINDOW_MS(=1秒),
+        #       期间不判Y;满1秒那一刻只和【起跳前站地Y】比——Y变小=抓住接上梯集合(climbing),没变小=放开↑进失败集合 =====
+        if step == 'run_hold':
+            # 全程只保持↑、左右绝不重按(防水平惯性冲过梯子)
             if VK_LEFT in self._random_move_keys:
                 self._key_up(VK_LEFT)
             if VK_RIGHT in self._random_move_keys:
                 self._key_up(VK_RIGHT)
             if VK_UP not in self._random_move_keys:
                 self._key_down(VK_UP)
+            if now_ms - start_t < RUNJUMP_GRAB_WINDOW_MS:
+                return False   # 按住↑未满1秒,不检测Y
+            # —— 满1秒:检测Y并放开↑ ——
+            if VK_UP in self._random_move_keys:
+                self._key_up(VK_UP)
             if py < self._climb_start_y - LADDER_GRAB_UP_TOL:
-                # Y变小=跑跳抓住:松水平(抓梯后按左右会横移/掉梯)、只留↑,转两步法持续爬到顶
+                # Y变小=跑跳抓住→接上梯集合(climbing段开头会重新按住↑一直爬到顶)
                 self._release_move_conflicts()
-                if VK_DOWN in self._random_move_keys:
-                    self._key_up(VK_DOWN)
-                if VK_UP not in self._random_move_keys:
-                    self._key_down(VK_UP)
                 self._climb_state = 'climbing'
                 self._climb_action_time = now_ms
                 self._climb_start_y = py
-                _ltrec = getattr(self, '_combat_locked_target', None)   # 跑跳抓住:冻结记录坐标点主窗口Y(到顶票2)
+                _ltrec = getattr(self, '_combat_locked_target', None)
                 self._climb_record_scr_y = _ltrec[1] if _ltrec else None
                 self._climb_move_confirmed = False
                 self._climb_still_since = 0
+                self._climb_bg_ok = False
+                self._climb_bg_still_since = 0
                 self._climb_top_hold = False
                 self._climb_top_hold_t = 0
                 self._climb_y_align_since = 0
@@ -5364,32 +5370,14 @@ class MinimapRouteRecorder:
                 self._ladder_backoff = None
                 self._ladder_jump_phase = None
                 self._ladder_post_jump_step = None
-                _debug_log("[爬梯·屏幕·跑跳] 抓住梯子Y上升(→%.0f),松水平只留↑转持续爬+两步法到顶" % py)
+                _debug_log("[爬梯·屏幕·跑跳] 按↑满1秒Y变小(%.0f→%.0f)=抓住,接上梯集合持续爬到顶" % (self._climb_start_y, py))
                 self._rlog("跑跳抓住梯子,持续向上到顶", LOG_OK, log='behavior')
                 return False
-            _run_el = now_ms - getattr(self, '_ladder_run_t0', start_t)
-            # 用户2026-09-10:失败别发呆等满窗——过最短时间后,只要Y已落回起跳高度(抛物线回落=没抓住)立刻判失败;
-            # 硬窗RUNJUMP_GRAB_WINDOW_MS仅兜底异常。抓住会先在上方触发Y变小锁存成功(不可逆),不会走到这。
-            _run_fell_back = _run_el >= RUNJUMP_GRAB_FAIL_MIN_MS and py >= self._climb_start_y - 1
-            if not _run_fell_back and _run_el < RUNJUMP_GRAB_WINDOW_MS:
-                return False                               # 还在上升/腾空窗口内,继续保持朝梯+↑,镜头回弹帧忽略
-            # 跑跳没抓住→【用户2026-09-10晚定稿:先跑跳、跑跳不上再贴脸直跳,不直接回主线】。走到这Y已回落=人已落地。
-            # 不_reset_climb:保留_climb_state='to_ladder',钉死"跑跳已用掉"(段2不再重复跑跳)、开放唯一一次直跳;只清空中post_jump,
-            # 下帧回到屏幕对位:35~70按住趋近→5~35三次碎步→≤5直跳(第2次起跳机会);那次直跳再失败由delay1/check分支回主线。
-            _debug_log("[爬梯·屏幕·跑跳] 没抓住(%dms回落%.0f→%.0f),降级贴脸对齐直跳(第2次起跳机会,不回主线)" % (
-                _run_el, self._climb_start_y, py))
-            self._rlog("跑跳没挂上(%dms),改走到梯下碎步对齐+直跳一次" % _run_el, log='behavior')
-            if VK_UP in self._random_move_keys:
-                self._key_up(VK_UP)
+            # 满1秒Y没变小=没抓住→松键进失败集合(70%×3轮校准直跳)
+            _debug_log("[爬梯·屏幕·跑跳] 按↑满1秒Y=%.0f未比起跳基准%.0f小=没抓住,放开↑进失败集合" % (py, self._climb_start_y))
             self._key_up(VK_LEFT)
             self._key_up(VK_RIGHT)
-            self._ladder_run_jumped = True     # 跑跳机会已用掉,段2不再跑跳
-            self._ladder_vert_jumped = False   # 开放后面唯一一次贴脸直跳
-            self._lad_scr_running = False
-            self._lad_scr_ok_frames = 0
-            self._ladder_jump_phase = None
-            self._ladder_post_jump_step = None
-            return False
+            return self._ladder_enter_realign(py, now_ms, "跑跳1秒没抓住")
 
         if step == 'delay1':
             # 起跳后延时再按↑：用户2026-09-10定稿,原地直跳/固定点跑跳统一跳后50ms按↑(原直跳100/固定点150),更早抓梯
@@ -5428,6 +5416,8 @@ class MinimapRouteRecorder:
             self._climb_record_scr_y = _ltrec2[1] if _ltrec2 else None
             self._climb_move_confirmed = False   # 两步法:刚抓住=第一步起步,先确认真的在爬,未确认前背景静止不算到顶
             self._climb_still_since = 0
+            self._climb_bg_ok = False           # 上梯集合第一道:刚抓住,背景静止重新计(用户2026-09-14)
+            self._climb_bg_still_since = 0
             self._climb_top_hold = False
             self._climb_top_hold_t = 0
             self._climb_y_align_since = 0
@@ -5444,23 +5434,160 @@ class MinimapRouteRecorder:
                 self._climb_ladder_y_top if self._climb_direction > 0 else self._climb_ladder_y_bottom, py),
                 log='behavior')
             return False
-        # 用户2026-09-10定稿:失败别在梯下发呆5秒、不数连续次数、不退开横走(补丁越少越稳)。
-        # 过最短时间LADDER_GRAB_FAIL_MIN_MS后,Y一旦落回起跳高度(跳了又落回原地=没抓住)立刻判失败回主线打怪;
-        # 硬窗LADDER_GRAB_WINDOW_MS仅兜底异常。抓住会先在上方触发Y变小锁存成功(不可逆),不会误判。
         _el = now_ms - start_t
         _fell_back = _el >= LADDER_GRAB_FAIL_MIN_MS and py >= self._climb_start_y - 1
         if not _fell_back and _el < LADDER_GRAB_WINDOW_MS:
             if VK_UP not in self._random_move_keys:
                 self._key_down(VK_UP)  # 还在上升/抓梯窗口内:继续按住↑等,镜头回弹帧忽略
             return False
-        _debug_log("[爬梯] 失败:起%dms Y未上升且已回落(%.0f→%.0f),松↑立刻回主线打怪(不计数/不退开)" % (
-            _el, self._climb_start_y, py))
-        self._rlog("起跳没抓住梯子(%dms已回落),回主线打怪" % _el, LOG_RED, log='behavior')
+        # 直跳没抓住(用户2026-09-14):不回主线,进【失败集合】移动剩余70%→停→达标直跳,最多3轮,轮满才回主线打怪
         if VK_UP in self._random_move_keys:
             self._key_up(VK_UP)
-        self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS  # 极短固定冷却防同帧重选同梯空跳,不发呆
-        self._reset_climb()
-        self._decide_climb_fail_action()
+        _debug_log("[爬梯] 直跳%dms后Y=%.0f回落基准%.0f=没抓住,进失败集合校准" % (_el, py, self._climb_start_y))
+        return self._ladder_enter_realign(py, now_ms, "直跳没抓住")
+
+    def _ladder_enter_realign(self, py, now_ms, why):
+        """进入/重回【梯子失败集合】(用户2026-09-14):起跳后Y没变小=没抓住梯子时调用,不回主线打怪。
+        每"开始一次70%移动"算一轮(move段内+1),最多LADDER_REALIGN_MAX_ROUNDS轮;已满轮仍要进=三次都没成,
+        松键、置短冷却、回主线重新算怪距。进入时保持_climb_state='to_ladder'、相位切realign(被_is_lock_frozen硬冻,不打怪不巡路)。"""
+        for _vk in (VK_UP, VK_LEFT, VK_RIGHT):
+            if _vk in self._random_move_keys:
+                self._key_up(_vk)
+        if self._ladder_realign_round >= LADDER_REALIGN_MAX_ROUNDS:
+            _debug_log("[失败集合] 已%d轮校准仍没抓住(%s),放弃回主线重新算怪距打怪"
+                       % (self._ladder_realign_round, why))
+            self._rlog("梯子校准%d轮没挂上,回主线打怪" % self._ladder_realign_round, LOG_RED, log='behavior')
+            self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS
+            self._reset_climb()
+            self._decide_climb_fail_action()
+            return False
+        # 锁存跑跳已用(失败集合只走对齐直跳)、开放重新直跳;相位realign硬冻,从move段开下一轮(move内round+1)
+        self._ladder_run_jumped = True
+        self._ladder_vert_jumped = False
+        self._lad_scr_running = False
+        self._ladder_precise_mode = True   # 失败集合全程彻底关怪物扫描,直到3轮失败_reset_climb/成功到顶才恢复(用户2026-09-14)
+        self._ladder_jump_phase = 'realign'
+        self._ladder_post_jump_step = None
+        self._ladder_realign_phase = 'move'
+        self._ladder_realign_from_x = None
+        self._ladder_realign_step = 0
+        self._ladder_realign_key_vk = None
+        self._ladder_realign_ok_frames = 0
+        self._ladder_realign_no_tpl_since = 0
+        self._ladder_realign_t = now_ms
+        _debug_log("[失败集合] 进校准(原因=%s,已用轮=%d/%d):下一轮走剩余70%%→停下→检测直跳"
+                   % (why, self._ladder_realign_round, LADDER_REALIGN_MAX_ROUNDS))
+        return False
+
+    def _realign_release_move(self):
+        """失败集合内统一抬掉左右移动键(幂等,不碰↑/攻击)。"""
+        for _vk in (VK_LEFT, VK_RIGHT):
+            if _vk in self._random_move_keys:
+                self._key_up(_vk)
+        self._ladder_realign_key_vk = None
+
+    def _ladder_realign_step(self, py, now_ms):
+        """【梯子失败集合】每帧(用户2026-09-14定稿):move走当前剩余屏幕X差的70%→gap抬键停稳→align连续达标就原地直跳;
+        直跳后交_ladder_post_jump_process判Y:Y变小=抓住接上梯集合,没变小再回本集合开下一轮;满3轮由enter回主线。坐标用主窗口屏幕X。"""
+        sp = self._player_screen_pos
+        # 取梯子屏幕X:优先吸附稳定值_ladder_snap_x,否则用梯子模板现匹配(和to_ladder屏幕对位同一来源)
+        if self._raw_frame is None or sp is None or not getattr(self, '_ladder_templates', None):
+            if self._ladder_realign_no_tpl_since == 0:
+                self._ladder_realign_no_tpl_since = now_ms
+            elif now_ms - self._ladder_realign_no_tpl_since >= LADDER_REALIGN_NO_TPL_MS:
+                _debug_log("[失败集合] 连续%dms无帧/无梯子模板,回主线" % LADDER_REALIGN_NO_TPL_MS)
+                return self._ladder_enter_realign(py, now_ms, "无梯子屏幕模板")
+            self._realign_release_move()
+            return False
+        # 每帧现匹配梯子屏幕X(人物横移时镜头会跟随、梯X会变,不能一直用旧吸附值);匹配不到才短期沿用上一次稳定值
+        _lk = getattr(self, '_combat_locked_target', None)
+        _lkx = _lk[0] if _lk else None
+        _mx = self._match_ladder_screen_x(self._raw_frame, sp, self._climb_direction, _lkx)
+        if _mx is not None:
+            tpl_x = _mx
+            self._lad_scr_last_x = _mx
+            self._lad_scr_last_t = now_ms
+        else:
+            _stick = getattr(self, '_lad_scr_last_x', None)
+            if _stick is not None and now_ms - getattr(self, '_lad_scr_last_t', 0) <= LADDER_SCR_STICK_MS:
+                tpl_x = _stick
+            else:
+                tpl_x = None
+        if tpl_x is None:
+            if self._ladder_realign_no_tpl_since == 0:
+                self._ladder_realign_no_tpl_since = now_ms
+            elif now_ms - self._ladder_realign_no_tpl_since >= LADDER_REALIGN_NO_TPL_MS:
+                _debug_log("[失败集合] 连续%dms匹配不到梯子白框,回主线" % LADDER_REALIGN_NO_TPL_MS)
+                return self._ladder_enter_realign(py, now_ms, "匹配不到梯子")
+            self._realign_release_move()
+            return False
+        self._ladder_realign_no_tpl_since = 0
+        spx = sp[0]
+        diff = tpl_x - spx                  # 带符号:正=梯子在人物右侧
+        adiff = abs(diff)
+        dir_vk = VK_RIGHT if diff > 0 else VK_LEFT
+        opp_vk = VK_LEFT if dir_vk == VK_RIGHT else VK_RIGHT
+        ph = self._ladder_realign_phase
+
+        if ph == 'move':
+            # 本轮起步:轮数+1,按"当前剩余"的70%定本轮步长(离得远多走、不碎步)
+            if self._ladder_realign_from_x is None:
+                self._ladder_realign_round += 1
+                self._ladder_realign_from_x = spx
+                self._ladder_realign_step = max(LADDER_REALIGN_MIN_STEP, adiff * LADDER_REALIGN_RATIO)
+                self._ladder_realign_t = now_ms
+                _debug_log("[失败集合] 第%d/%d轮:剩余%.0f屏幕px,本轮走70%%=%.0f"
+                           % (self._ladder_realign_round, LADDER_REALIGN_MAX_ROUNDS,
+                              adiff, self._ladder_realign_step))
+            if opp_vk in self._random_move_keys:
+                self._key_up(opp_vk)
+            if dir_vk not in self._random_move_keys:
+                self._key_down(dir_vk)
+            self._ladder_realign_key_vk = dir_vk
+            moved = abs(spx - self._ladder_realign_from_x)
+            if moved >= self._ladder_realign_step or adiff <= LADDER_REALIGN_TOL                     or now_ms - self._ladder_realign_t >= LADDER_REALIGN_MOVE_CAP_MS:
+                # 走到本轮步长/已达标/按满时长→抬键,进gap停稳
+                if dir_vk in self._random_move_keys:
+                    self._key_up(dir_vk)
+                self._ladder_realign_key_vk = None
+                self._ladder_realign_phase = 'gap'
+                self._ladder_realign_gap_to = now_ms + random.randint(LADDER_REALIGN_GAP_MIN,
+                                                                       LADDER_REALIGN_GAP_MAX)
+                _debug_log("[失败集合] 本轮移动%.0fpx后剩余%.0f,抬键停稳" % (moved, adiff))
+            return False
+
+        if ph == 'gap':
+            self._realign_release_move()
+            if now_ms >= self._ladder_realign_gap_to:
+                self._ladder_realign_phase = 'align'
+                self._ladder_realign_ok_frames = 0
+                self._ladder_realign_t = now_ms
+            return False
+
+        # align:停下检测新距离,连续达标=原地直跳;没达标且轮次没用完回move再走70%,满轮回主线
+        self._realign_release_move()
+        if adiff <= LADDER_REALIGN_TOL:
+            self._ladder_realign_ok_frames += 1
+            if self._ladder_realign_ok_frames >= LADDER_REALIGN_HOLD_FRAMES:
+                _jk = self._get_fight_config().get("jump_key", "")
+                self._climb_start_y = py    # 起跳前小地图Y=成败基准,起跳后Y变小=抓住接上梯集合
+                if _jk:
+                    self._press_game_key(_jk, duration=80)
+                self._ladder_vert_jumped = True
+                self._ladder_jump_phase = 'post_jump'
+                self._ladder_post_jump_step = 'delay1'
+                self._ladder_post_jump_t = now_ms
+                self._ladder_realign_phase = None
+                _debug_log("[失败集合] 第%d轮对齐达标(X差%.1f<=%d)→原地直跳,跳后判Y"
+                           % (self._ladder_realign_round, diff, LADDER_REALIGN_TOL))
+            return False
+        self._ladder_realign_ok_frames = 0
+        # gap已停稳:停下检测没达标就立刻进下一次70%移动(给150ms确认,防落地/滑行惯性误判);已满3轮回主线
+        if now_ms - self._ladder_realign_t >= 150:
+            if self._ladder_realign_round >= LADDER_REALIGN_MAX_ROUNDS:
+                return self._ladder_enter_realign(py, now_ms, "3轮移动仍对不齐")
+            self._ladder_realign_phase = 'move'
+            self._ladder_realign_from_x = None
         return False
 
 
@@ -5973,11 +6100,18 @@ class MinimapRouteRecorder:
             # 起跳后统一流程优先（跑跳/直跳都走这里）
             if getattr(self, '_ladder_jump_phase', None) == 'post_jump':
                 return self._ladder_post_jump_process(py, now_ms)
+            # 【失败集合】校准中(70%×3轮),与打怪/巡路互斥(用户2026-09-14)
+            if getattr(self, '_ladder_jump_phase', None) == 'realign':
+                return self._ladder_realign_step(py, now_ms)
 
-            # === 小地图近距→主窗口梯子模板"屏幕X精对齐"(用户2026-09-09,只用X;无模板/没匹配到自动回退下面小地图逻辑)===
-            if _alx <= LADDER_TPL_ENTER_PX and getattr(self, '_ladder_templates', None) \
+            # === 小地图粗导航 + 主窗口屏幕对位【同时进行】(用户2026-09-14):不再卡"小地图差≤7才切换"的门槛,
+            # 每帧都尝试主窗口梯子匹配——朝梯150px内算到梯X就交屏幕分段(段1助跑→60-80跑跳带、<=60走直跳);这一帧没算到/无模板则自然落下面小地图分支继续朝梯X走,两者同向、同帧只走一个不打架 ===
+            if getattr(self, '_ladder_templates', None) \
                     and self._raw_frame is not None and self._player_screen_pos:
-                self._ladder_precise_mode = True   # 已近梯切屏幕对位→检测线程进30Hz高频轻量档(方案B,出梯由_reset_climb关)
+                # 锁定梯子、开始to_ladder即开精确模式(人物高帧+识别B彻底清空怪表)。不能等主窗口匹配到梯X/凑到屏幕90px才关:
+                # 主窗口要走近才匹配得上,此前靠小地图导航,这段若还扫怪,近身怪会触发"平地去梯途中出怪先打近身"解绑梯子、
+                # 上梯被打断、再也走不到起跳点(2026-09-14 23:27日志实锤)。故to_ladder全程关怪扫,到顶/3轮失败由_reset_climb统一恢复
+                self._ladder_precise_mode = True
                 _lk = getattr(self, '_combat_locked_target', None)
                 _lkx = _lk[0] if _lk else None
                 _tpl_x = self._match_ladder_screen_x(self._raw_frame, self._player_screen_pos,
@@ -6067,7 +6201,7 @@ class MinimapRouteRecorder:
                 if VK_DOWN not in self._random_move_keys:
                     self._key_down(VK_DOWN)
 
-            # === 到顶两阶段判定(用户2026-09-11晚定稿;背景静止法从爬梯摘除,_pick_climb_boxes/_climb_boxes_still函数保留给别处用) ===
+            # === 上梯集合到顶判定(用户2026-09-14定稿:抓住后一直按住↑不停;先三背景点静止、再小地图光点重合梯端,两者都满足=到顶) ===
             # 阶段1【主窗口】台子不平、不要求Y重合:人物基点Y 对 "抓住时冻结的记录坐标点Y",差≤CLIMB_TARGET_Y_TOL(20)且真爬过=到记录层高度
             #   → 补按住方向键 CLIMB_TOP_HOLD_MS(300) 把人翻上不平的台面(补按期间本段开头一直按住,不松);
             # 阶段2【小地图】补按满后,小地图光点Y 对锁梯连接端(上行梯顶/下行梯底)重合或单向越过(容差LADDER_TOP_ARRIVE_TOL)=最终到顶,当帧松键开主线。
@@ -6100,13 +6234,26 @@ class MinimapRouteRecorder:
                 self._climb_top_hold_t = now_ms
                 _debug_log("[爬梯] 主窗口Y差≤%d到记录高度(小地图到端=%s),补按方向键%dms再核对梯端(光点Y=%.0f)"
                            % (CLIMB_TARGET_Y_TOL, _map_ok, CLIMB_TOP_HOLD_MS, py))
+            # 【上梯集合·第一道·用户2026-09-14】确认在爬后,用现成三背景点法测"主窗口背景不再变化",连续CLIMB_STILL_MS静止=背景到位(锁存)
+            if self._climb_move_confirmed and self._raw_frame is not None and _sp_v:
+                _fh, _fw = self._raw_frame.shape[:2]
+                _bc = self._pick_climb_boxes(_sp_v, _fh, _fw)
+                _ns, _nv = self._climb_boxes_still(self._raw_frame, _bc)
+                if _ns >= 1:
+                    if self._climb_bg_still_since == 0:
+                        self._climb_bg_still_since = now_ms
+                    elif not self._climb_bg_ok and now_ms - self._climb_bg_still_since >= CLIMB_STILL_MS:
+                        self._climb_bg_ok = True
+                        _debug_log("[爬梯] 第一道:三背景点连续%dms静止=背景不再变化(光点Y=%.0f)" % (CLIMB_STILL_MS, py))
+                elif _nv >= 1:
+                    self._climb_bg_still_since = 0   # 背景还在上下动=仍在爬,重新计时;空帧(n_valid=0)保持计时不打断
             _arrived = False
             _arrive_why = ""
-            if self._climb_top_hold and (now_ms - self._climb_top_hold_t) >= CLIMB_TOP_HOLD_MS and _map_ok:
-                # 补按满300ms 且 小地图光点重合/越过梯端(容差1px)=到顶。补按满但还没重合:保持按住继续爬、
-                # 【不反复退补按】(用户2026-09-11晚:小地图只作最终确认,不搞补按几次的死循环;方向键本段开头一直按住,12s总超时兜底)
+            # 【上梯集合到顶·用户2026-09-14】先背景静止(_climb_bg_ok)、再小地图光点重合梯端(_map_ok),两者都满足+补按翻台满=到顶松↑
+            if self._climb_top_hold and (now_ms - self._climb_top_hold_t) >= CLIMB_TOP_HOLD_MS \
+                    and _map_ok and self._climb_bg_ok:
                 _arrived = True
-                _arrive_why = "补按%dms+小地图光点到梯端" % CLIMB_TOP_HOLD_MS
+                _arrive_why = "背景静止+光点到梯顶+补按%dms" % CLIMB_TOP_HOLD_MS
             # 假抓住失败(用户2026-09-10):抓住满CLIMB_FAKE_GRAB_MS但小地图Y从没真移动(ever_moved=False)=根本没爬上梯,
             # 松键回主线,绝不判到顶/不触发"到达新平台清锁"(旧bug:人原地没动却一遍遍"到第二层清锁")
             if not _arrived and not self._climb_ever_moved and self._climb_action_time \
@@ -11452,35 +11599,39 @@ class MinimapRouteRecorder:
         # 70~100带内,running要等段2.5帧尾才补上=带内第一帧不跳、下帧已出带(真机5分钟只跳1次的根因)。改为 running 或 "朝梯方向键此刻正按住"
         # (小地图导航本就一直按住朝梯键=正在助跑)即算有水平速度;叠加 asdx≤IDEAL+v 自适应提前,快/延迟大v大就多提前。
         _moving_to_lad = _dir_vk in self._random_move_keys
+        # 第一次上梯分带(用户2026-09-14晚):屏幕X差[60,80]内、朝梯键按住、选中白框=移动中跑跳;X差<=60不跑跳(落下面趋近/碎步/段4走直跳三步)
         _rj_trig = (not getattr(self, '_ladder_run_jumped', False)) \
-            and (getattr(self, '_lad_scr_running', False) or _moving_to_lad) \
-            and LADDER_SCR_RUNJUMP_TRIG_LO <= asdx <= LADDER_SCR_RUNJUMP_TRIG_HI \
-            and asdx <= LADDER_SCR_RUNJUMP_IDEAL + max(_approach_v, 0.0) \
-            and _merged   # 已选中一把梯子白框才允许跑跳,没选中落下面趋近段继续靠近
+            and _moving_to_lad \
+            and LADDER_RUNJUMP_LO <= asdx <= LADDER_RUNJUMP_HI \
+            and _merged
         if _rj_trig:
             if _ak is not None:
                 self._key_up(_ak)
                 self._lad_scr_key_vk = None
-            self._key_up(_opp_vk)
-            self._key_down(_dir_vk)
+            # 用户2026-09-14固定时序:落入60-80跑跳带→按跳,【起跳同时松开左右键】、立刻只按住↑(满1秒后run_hold判Y)
+            self._key_up(VK_LEFT)
+            self._key_up(VK_RIGHT)
+            if VK_DOWN in self._random_move_keys:
+                self._key_up(VK_DOWN)
             self._ladder_run_jumped = True
-            self._lad_scr_running = False   # 助跑态消费掉,防止连续重复跑跳
+            self._lad_scr_running = False
             self._ladder_vert_jumped = False
             self._ladder_run_dir = 1 if sdx > 0 else -1
             self._ladder_run_t0 = now_ms
-            self._climb_start_y = py
+            self._climb_start_y = py            # 起跳前站地Y=1秒后判成败基准
             self._press_game_key(jump_key, duration=80)
-            _debug_log("[爬梯·屏幕·跑跳] 梯X=%d 人X=%d 差%.1f(上帧%s 周期趋近v=%.1f)自适应提前起跳→移动中跑跳(朝%s不松)" % (
-                tpl_x, spx, sdx, ("%.1f" % _prev_asdx) if _prev_asdx is not None else "NA",
-                _approach_v, "右" if sdx > 0 else "左"))
-            self._rlog("跑跳上梯(X差%.1f,移动中起跳,跳完80ms松左右只按↑)" % sdx, log='behavior')
+            if VK_UP not in self._random_move_keys:
+                self._key_down(VK_UP)
+            _debug_log("[爬梯·屏幕·跑跳] 60-80带起跳(梯X=%d 人X=%d 差%.1f):起跳即松左右、按住↑满%dms再判Y(基准Y=%.0f)" % (
+                tpl_x, spx, sdx, RUNJUMP_GRAB_WINDOW_MS, py))
+            self._rlog("跑跳上梯(60-80带X差%.1f起跳,松左右按↑1秒判Y)" % sdx, log='behavior')
             self._ladder_jump_phase = 'post_jump'
-            self._ladder_post_jump_step = 'run_delay'
+            self._ladder_post_jump_step = 'run_hold'
             self._ladder_post_jump_t = now_ms
             return False
-        # 段2.5:35<X差≤100却没被段2跑跳消费(没合并/速度判据没到/跑跳机会已用掉)→按住朝梯单调正常走:
-        # 没跑跳过就置回助跑态(还在70~100下帧段2补跑跳);已跑跳失败降级或已跌破70就一路按住走到≤35进段3碎步、≤5直跳。不reset、不转打怪、不左右摆。
-        if LADDER_SCR_BO_LO < asdx <= LADDER_SCR_BO_HI:
+        # 段2.5:X差>35却没被段2跑跳消费(没进60-80带/没选中白框/跑跳已用/已跌破60归直跳)→按住朝梯单调正常走:
+        # 80以上按住等进跑跳带;X差<=60归直跳路径,一路按住走到<=35进段3三拍碎步、<=5段4原地直跳。不reset、不转打怪、不左右摆(段1已挡>100)
+        if asdx > LADDER_SCR_BO_LO:
             if _ak is not None:
                 self._key_up(_ak)
                 self._lad_scr_key_vk = None
@@ -15808,7 +15959,7 @@ class MinimapRouteRecorder:
         cs = getattr(self, '_climb_state', 'none')
         if cs in ('climbing', 'jump_down', 'jump_up', 'teleport', 'descend'):
             return True
-        if cs == 'to_ladder' and getattr(self, '_ladder_jump_phase', None) == 'post_jump':
+        if cs == 'to_ladder' and getattr(self, '_ladder_jump_phase', None) in ('post_jump', 'realign'):
             return True
         return False
 
@@ -17763,9 +17914,19 @@ class MinimapRouteRecorder:
                     time.sleep(0.010)                       # 没新帧:轻等不空转
                     continue
                 _last_seq = _seq
-                # 上梯高帧:只高频出人物(A),B冻结重活、沿用上一次怪表(与拆分前同口径,残留标志不算数)
+                # 上梯末段(离梯≤90)/上梯集合/失败集合:B彻底关怪物识别(用户2026-09-14:不是沿用旧表而是清空,
+                # 主线 self._monsters=list(_raw_monsters) 拿空→算不到怪距→【技能范围内有怪】不成立→不打怪也不巡路,不与上梯抢主权)
                 _precise = bool(getattr(self, '_ladder_precise_mode', False)) \
                     and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+                if _precise:
+                    # 怪表/血条/各缓存全清(非沿用);到顶或3轮失败由_reset_climb把_ladder_precise_mode置False,下帧自然恢复扫描
+                    self._raw_monsters = []
+                    self._raw_hp_bars = []
+                    self._raw_cached_feature_monsters = []
+                    self._yolo_cache, self._feat_cache, self._bars_cache = [], [], []
+                    self._detect_last_monsters = None
+                    time.sleep(0.010)
+                    continue
                 if not _precise:
                     _fh, _fw = _frame.shape[:2]
                     # 识别物理边界=游戏画面(客户区)子矩形,标题栏/边框那圈不扫(用户2026-09-14);取不到退回整帧

@@ -1,10 +1,10 @@
 {
   "params": {
-    "fps": 24,
+    "fps": 30,
     "thr": 0.62,
     "rx": 180,
     "ry": 120,
-    "maxmove": 48,
+    "maxmove": 250,
     "faststep": 2,
     "research": 1500,
     "hold": 90
