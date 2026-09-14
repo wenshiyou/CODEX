@@ -17862,6 +17862,22 @@ class MinimapRouteRecorder:
                     except Exception as _se:
                         _debug_log("[识别B] 怪/血条快照发布异常:%s" % _se)
                     _dt_rounds += 1
+                # 梯子白框扫描【2026-09-14性能·从主线程7d搬到识别B线程异步跑】:主线程不再被多模板matchTemplate/
+                # dilate堵住(原近全屏范围单次数百ms、帧率掉到3~5、人物1秒才跟手)。精准(上梯)用小ROI高频档、非精准用
+                # far_range大ROI的250ms档(_scan_ladder_marks内部按_ladder_precise_mode自选范围);结果原子写_lad_marks_cache,
+                # 主线程选梯/蒙板只读,数据格式[(cx,cy,sim)]与节流口径完全不变,仅生产位置改后台、异步一拍(在原gap内)。
+                try:
+                    _lm_ch = self._raw_char_pos
+                    if _frame is not None and _lm_ch is not None:
+                        _lm_precise = bool(getattr(self, '_ladder_precise_mode', False)) and \
+                            getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+                        _lm_gap_s = (LADDER_PRECISE_MARK_MS if _lm_precise else LADDER_MARK_SCAN_MS) / 1000.0
+                        _lm_now = time.time()
+                        if _lm_now - getattr(self, '_lad_marks_scan_t', 0.0) >= _lm_gap_s:
+                            self._lad_marks_cache = self._scan_ladder_marks(_frame, _lm_ch)
+                            self._lad_marks_scan_t = _lm_now
+                except Exception:
+                    pass
                 _rn = time.time()   # B耗时统计每秒一条
                 if _rn - _dt_last_report >= 1.0:
                     _debug_log("[识别B耗时] %d新帧 怪模板%d YOLO%d 血条%d (ms/秒)" % (
@@ -19487,17 +19503,9 @@ class MinimapRouteRecorder:
                     # 红框与某白框重合/接近(LADDER_MARK_MATCH_X内)→强制吸附钉到白框真实位置=找到正确梯子,才准备起跳。
                     # 1) 特征白框:人物周围节流全扫(真实屏幕位置),控CPU不每帧匹配
                     _now_lm = time.time() * 1000
+                    # 梯子白框扫描已搬到识别B线程异步执行(见_recognize_loop),主线程只读缓存、不再同步多模板匹配堵帧
                     if not hasattr(self, '_lad_marks_cache'):
                         self._lad_marks_cache = []
-                        self._lad_marks_scan_t = 0
-                    _lm_gap = LADDER_PRECISE_MARK_MS if getattr(self, '_ladder_precise_mode', False) else LADDER_MARK_SCAN_MS
-                    if self._raw_frame is not None and self._player_screen_pos and \
-                            _now_lm - self._lad_marks_scan_t >= _lm_gap:
-                        try:
-                            self._lad_marks_cache = self._scan_ladder_marks(self._raw_frame, self._player_screen_pos)
-                        except Exception:
-                            self._lad_marks_cache = getattr(self, '_lad_marks_cache', [])
-                        self._lad_marks_scan_t = _now_lm
                     _white_marks = [(c[0], c[1]) for c in self._lad_marks_cache]
                     self._monster_overlay_data["ladder_marks"] = _white_marks
                     # 2) 选当前要上的梯子=只认特征/YOLO白框(用户2026-09-11:取消倍率红框、取消红白框合并,直接对白框中心)
