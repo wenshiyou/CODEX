@@ -10,7 +10,7 @@
     "hold": 90
   },
   "blocklist": [],
-  "blocklist_monster": true,
+  "blocklist_monster": false,
   "active": "c0",
   "_seq": 2,
   "characters": [
