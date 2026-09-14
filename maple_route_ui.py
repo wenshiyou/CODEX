@@ -609,8 +609,8 @@ SLOPE_MAGE_HIT_MS = 1000   # 法师(空中放不出技能):起跳后1000ms(已�
 SLOPE_MAGE_NEXT_MS = 1000  # 法师:主攻后再过1000ms才再跑跳
 SLOPE_MAGE_JITTER = 50     # 法师上述两个时间节点各±50ms随机
 CHAR_EDGE_MARGIN = 45     # 地图左右边缘区：人物脚X距画面边≤此值且特征匹配丢失=贴边,钳在边缘并标stale(不误判防卡),等全图重定位
-GREEN_SLOPE_LOOK = 45     # 录制绿线坡度前视窗口(小地图px,用户2026-09-07补充)：沿移动方向看前方45个小地图单位的绿线起伏(约合450屏幕px)
-GREEN_SLOPE_MIN = 6       # 绿线Y波动>6px才算坡(用户口径)：低向高(上坡)跑+跳,高向低(下坡)只走不跳；≤6当平地正常走
+GREEN_SLOPE_LOOK = 15     # 到坡脚触发前视窗口(小地图px,用户2026-09-14定稿"刚好要上坡才跳":45→15,1小地图px≈10屏幕px→约150屏幕px=2~3个身位,到坡脚跟前才起跳,不离坡老远空跳)
+GREEN_SLOPE_MIN = 5       # 绿线Y波动>5px才算坡(用户2026-09-14口径:6→5)：低向高(上坡)向前跑+跳,高向低(下坡)只走不跳；≤5当平地正常走
 DETECT_IDLE_MS = 400      # 自适应降频(2026-09-09提效700→400)：无怪/非战斗400ms≈2.5Hz,别睡太死,见到怪0.4s内回到DETECT_PERIOD_MS快周期跟手
 LAYER_Y_GAP = 150         # 用户2026-09-05：怪脚Y与人物Y差≤150px=同平台怪（超150=跨层/不同平台）；简单直接不靠绿线
 ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人物上方+60内可直打；>60够不着→走近)。用户2026-09-06：80→60
@@ -1495,6 +1495,10 @@ class MinimapRouteRecorder:
         self._char_disp_pos_time = 0                 # 上次同步时间戳(ms)
         self._char_disp_vel = (0.0, 0.0)             # 人物最近速度(px/s)，匹配失败宽限期内维持外推
         self._player_map_pos = None        # 玩家小地图坐标，用于判断当前平台
+        # 光点中心一次性微调(小地图块像素,默认0):小地图红十字与游戏黄光点视觉中心固定差多少就填多少;
+        # find_player_dot返回前叠加,绿线/梯子/导航/边界全部共用校准后的同一中心(用户2026-09-14)
+        self._dot_center_off_x = 0
+        self._dot_center_off_y = 0
         self._monster_hp_bars = []         # 检测到的怪物血条 [(x,y,w,h),...]
         self._hp_pot_wait_until = 0        # HP吃药等待到这个时间
         self._mp_pot_wait_until = 0        # MP吃药等待到这个时间
@@ -2232,17 +2236,23 @@ class MinimapRouteRecorder:
             "height": bottom - top - TITLE_PAD
         }
 
-        # 轻量模式：区域变化小于1px则不更新（防抖，确保小变化也能生效），不写文件不写图
+        # [2026-09-14 根因修复·保存后线与光点错位] 录制点=find_player_dot在"当时裁剪框"里的绝对像素坐标。
+        # 三模板是整数像素匹配,帧间会抖1~3px;旧规则差>1px就整块换框→新光点坐标系平移、旧录制点整体错位
+        # (表现:录制当下重合,保存后继续跑/重启时裁剪框被重定位→绿线梯子和光点错开)。
+        # 现锁定裁剪基准:自动(debug=False)重定位时,与已锁定基准任一边差≤_RECT_LOCK_TOL一律视为帧间抖动,
+        # 保持旧框直接return(不换框/不写region/不清光点锚点),保证录制点与光点永远同一像素坐标系;
+        # 仅真换图·拖窗·UI缩放(任一边差>8px)才接受新框。手动按R(debug=True)/鼠标框定不走此分支,照常重设。
+        _RECT_LOCK_TOL = 8
         if not debug:
             old = self.map_area_rect
-            if old is not None and (abs(old["left"] - new_map["left"]) <= 1 and
-                abs(old["top"] - new_map["top"]) <= 1 and
-                abs(old["width"] - new_map["width"]) <= 1 and
-                abs(old["height"] - new_map["height"]) <= 1):
-                return
             if old is not None:
-                print("[自动刷新] 小地图区域变化: %dx%d -> %dx%d" % (
-                    old["width"], old["height"], new_map["width"], new_map["height"]))
+                _dmax = max(abs(old["left"] - new_map["left"]), abs(old["top"] - new_map["top"]),
+                            abs(old["width"] - new_map["width"]), abs(old["height"] - new_map["height"]))
+                if _dmax <= _RECT_LOCK_TOL:
+                    return  # 小抖动:锁定基准不动=坐标系恒定(关键:不清last_player_pos,光点最近邻锚点连续)
+                print("[自动刷新] 小地图区域显著变化(%dpx>%d)才重定: L%dT%d %dx%d -> L%dT%d %dx%d" % (
+                    _dmax, _RECT_LOCK_TOL, old["left"], old["top"], old["width"], old["height"],
+                    new_map["left"], new_map["top"], new_map["width"], new_map["height"]))
 
         self.minimap_rect = new_minimap
         self.map_area_rect = new_map
@@ -6760,26 +6770,51 @@ class MinimapRouteRecorder:
         return np.zeros((MAP_H, FIXED_W, 3), dtype=np.uint8)
 
     def find_player_dot(self, map_area):
-        """【模块B】检测小地图上人物黄色光点（纯色识别：只认中心色 ffff88，加偏色±5，在小地图块内找唯一中心，取中心点）
-        原理：人物光点中心颜色 = ffff88 (BGR 136,255,255)，加一点偏色容差, 在map_area(整个小地图块)内找该色像素, 取质心作为光点中心。
-        返回：(x, y) 光点中心坐标；找不到返回None"""
+        """【模块B】检测小地图上人物黄色光点(四角芒星)的几何中心。
+        [2026-09-14 定稿·真机诊断] 光点是上下左右对称的黄色芒星(约8x8、20~40像素),中心最亮色=ffff88。
+        旧版只认 ffff88→一帧仅命中1~2像素,这1~2像素随芒星闪烁/抗锯齿在星内抖1~2px、还偏上,
+        录制的平台绿线/梯子(全部由本中心点聚合)因此"刚录对、过一会就错位漂移"。
+        现改:亮黄阈值圈住整颗芒星→连通域→取外接矩形几何中心(真机实测比像素质心稳,芒角亮灭不上下跳);优先锁定离上一帧最近的团(自己不瞬移,
+        避免串到别的黄点),无历史/最近团过远才取最大团;面积区间滤碎点与异常大亮块。
+        返回:(x,y)小地图块坐标;空图沿用上一帧;无合格团返回None(主循环丢点/重定位契约不变)。"""
         bgr = map_area  # BGR原图(小地图块)
-        # [健壮性2026-09-12] 截图瞬时失败(开关cv2窗口/游戏失焦)会传入None或空数组,
-        # cv2.inRange对空图直接抛异常会闪退整个主程序;空图沿用上一光点、不清空
+        # [健壮性] 截图瞬时失败传入None/空数组时沿用上一光点、不清空,绝不因inRange空图闪退
         if bgr is None or getattr(bgr, "size", 0) == 0:
             return getattr(self, "last_player_pos", None)
-        # 中心色 ffff88 = BGR(136,255,255)；加偏色±5 -> B 131~141
-        mask = cv2.inRange(bgr, np.array([131, 250, 250]), np.array([141, 255, 255]))
-        ys, xs = np.where(mask > 0)
-        if len(xs) > 0:
-            cx = int(xs.mean())  # 中心X(该色像素质心)
-            cy = int(ys.mean())  # 中心Y
-            if getattr(self, 'frame_count', 0) % 10 == 0:
-                _debug_log("[光点检测] ffff88纯色定位 center=(%d,%d) 像素数=%d" % (cx, cy, len(xs)))
-            self.last_player_pos = (cx, cy)  # 更新上次位置
-            return (cx, cy)  # 返回光点中心
-        self.last_player_pos = None  # 没找到，清空上次位置
-        return None  # 返回None
+        # 亮黄:R/G≥220、B≤205 → 圈住整颗黄芒星(中心ffff88、芒角亮黄都在内),排除土黄背景(G仅~170)
+        mask = cv2.inRange(bgr, np.array([0, 220, 220]), np.array([205, 255, 255]))
+        _n, _lab, _st, _ce = cv2.connectedComponentsWithStats(mask, 8)
+        cands = []  # (面积, 中心x, 中心y)
+        for _k in range(1, _n):
+            _a = int(_st[_k, cv2.CC_STAT_AREA])
+            if _a < 6 or _a > 220:   # 自己光点约20~40:滤单像素碎点与异常大亮块(UI亮区)
+                continue
+            # [2026-09-14 稳中心] 用外接矩形几何中心、不用像素质心:真机站定40帧实测,芒星上下芒角随帧亮灭,
+            # 像素质心Y在87.7~87.9反复跳(红十字上下跳),外接盒只取最上/最下/最左/最右边界、对称芒星边界稳定,Y恒定0抖动。
+            _cxh = _st[_k, cv2.CC_STAT_LEFT] + _st[_k, cv2.CC_STAT_WIDTH] / 2.0
+            _cyh = _st[_k, cv2.CC_STAT_TOP] + _st[_k, cv2.CC_STAT_HEIGHT] / 2.0
+            cands.append((_a, float(_cxh), float(_cyh)))
+        if not cands:
+            # 本帧无合格团:不清除last_player_pos(留作下帧最近邻锚点),但仍返回None交主循环丢点逻辑
+            return None
+        _last = getattr(self, "last_player_pos", None)
+        if _last is not None:
+            cands.sort(key=lambda c: (c[1] - _last[0]) ** 2 + (c[2] - _last[1]) ** 2)  # 离上一帧最近=自己
+            _ax, _ay = cands[0][1], cands[0][2]
+            if (_ax - _last[0]) ** 2 + (_ay - _last[1]) ** 2 > 28 * 28:  # 最近团也>28px=锚点失效,改取最大团
+                cands.sort(reverse=True)
+                _ax, _ay = cands[0][1], cands[0][2]
+        else:
+            cands.sort(reverse=True)  # 首帧无历史:取最大团
+            _ax, _ay = cands[0][1], cands[0][2]
+        # 整颗芒星连通域质心(对称星=视觉几何中心);_dot_center_off=最后1px级手动微调,默认0
+        cx = int(round(_ax)) + int(getattr(self, '_dot_center_off_x', 0) or 0)
+        cy = int(round(_ay)) + int(getattr(self, '_dot_center_off_y', 0) or 0)
+        if getattr(self, 'frame_count', 0) % 10 == 0:
+            _debug_log("[光点] 中心=(%d,%d) 候选团=%d 面积=%s" % (
+                cx, cy, len(cands), str(sorted([c[0] for c in cands], reverse=True)[:4])))
+        self.last_player_pos = (cx, cy)  # 更新上次位置(下帧最近邻锚点)
+        return (cx, cy)  # 录制绿线/梯子/导航/边界共用的唯一中心点
 
     # ==================== 打怪区域·小地图四线安全框(用户2026-09-11定稿) ====================
     def _bound_map_size(self):
@@ -7093,7 +7128,7 @@ class MinimapRouteRecorder:
     def _platform_slope_ahead(self, px, py, dir_sign, look=GREEN_SLOPE_LOOK):
         """沿当前录制绿线看前方 look 个小地图单位的地形起伏(用户2026-09-07补充)。
         前提：人物正站在某条录制绿线上(_get_current_manual_platform)。
-        - 窗口内绿线Y波动≤GREEN_SLOPE_MIN(6)=平地小抖动→返回None正常走；
+        - 窗口内绿线Y波动≤GREEN_SLOPE_MIN(5)=平地小抖动→返回None正常走；
         - 'up'=低向高(前方小地图Y变小=上坡)→调用方跑+跳；
         - 'down'=高向低(前方Y变大=下坡)→调用方只走不跳；
         dir_sign=+1向右/-1向左；py=人物当前小地图Y(近端基准)。"""
@@ -9009,7 +9044,16 @@ class MinimapRouteRecorder:
         except Exception as _be:
             _debug_log("[UI小地图] 打怪区域画线异常: %s" % _be)
 
-        # 人物光点：只保留游戏自带的原始光点，不自己画（find_player_dot负责检测光点位置）
+        # 【人物光点认定中心·用户2026-09-14 同心火】在find_player_dot算出的光点正中心叠红色十字+实心点。
+        # 平台绿线/梯子都从此中心点吐出:红十字正好压住游戏自带黄光点=中心定准;压住录制线最新端=线从中心出,一眼验证100%重合。
+        # 坐标空间:player_pos是小地图块原始像素,乘scale_x/y落到缩放后的map_display(和怪紫点同一画法)。
+        if player_pos is not None:
+            _dcx = int(player_pos[0] * scale_x)
+            _dcy = int(player_pos[1] * scale_y)
+            if 0 <= _dcx < render_w and 0 <= _dcy < render_h:
+                cv2.line(map_display, (_dcx - 6, _dcy), (_dcx + 6, _dcy), (0, 0, 255), 1)  # 红十字横
+                cv2.line(map_display, (_dcx, _dcy - 6), (_dcx, _dcy + 6), (0, 0, 255), 1)  # 红十字竖
+                cv2.circle(map_display, (_dcx, _dcy), 2, (0, 0, 255), -1)                 # 中心红实心点
 
         # 光点锁定可视化框已移除（与校准/正常模式绿框重复，保留后者即可）
         # 随机模式运行状态（已被倍率显示替代）
@@ -9058,8 +9102,16 @@ class MinimapRouteRecorder:
         # 【模块B】自动校准按钮（同屏三点校准）
         # draw_asset(frame, self._ui_calib_auto, *BTN_CALIB_AUTO)
         # X/Y倍率按钮：按压特效改用统一的 _pressed_btn 圆角变暗(与平台/梯子一致)，见下方"按钮点击特效"
-        # 第三个框显示当前方案名或"随机"
-        plan_label = "随机" if self.route_mode == "随机" else "方案%d" % self.current_route
+        # 第三个框显示当前方案【名字】或"随机"。
+        # [修2026-09-14] 旧版写死"方案%d"%current_route=底层文件编号;新建方案补最小空id(route_001/002)
+        # 而名字按列表个数起(方案5/方案6),id与名字错位→实际用"方案6"(id=route_002)却显示"方案2"。
+        # 改为查当前方案的name显示,和方案列表/用户认知永远一致;查不到才退回底层编号。
+        if self.route_mode == "随机":
+            plan_label = "随机"
+        else:
+            _cur_plan, _ = self._find_plan(num_to_plan_id(self.current_route))
+            plan_label = (_cur_plan.get("name") if _cur_plan and _cur_plan.get("name")
+                          else ("方案%d" % self.current_route))
         try:
             _ppb = ImageDraw.Draw(Image.new("RGB", (1, 1))).textbbox((0, 0), plan_label, font=self._log_font)
             plw = _ppb[2] - _ppb[0]; plh = _ppb[3] - _ppb[1]
