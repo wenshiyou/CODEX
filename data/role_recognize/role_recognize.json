@@ -1,6 +1,6 @@
 {
   "params": {
-    "fps": 30,
+    "fps": 24,
     "thr": 0.62,
     "rx": 180,
     "ry": 120,
@@ -9,7 +9,14 @@
     "research": 1500,
     "hold": 90
   },
-  "blocklist": [],
+  "blocklist": [
+    [
+      10,
+      700,
+      1257,
+      88
+    ]
+  ],
   "blocklist_monster": false,
   "active": "c0",
   "_seq": 2,
