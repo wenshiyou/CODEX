@@ -37,9 +37,19 @@
           "id": "route_007",
           "name": "方案7",
           "selected": false
+        },
+        {
+          "id": "route_008",
+          "name": "方案8",
+          "selected": false
+        },
+        {
+          "id": "route_009",
+          "name": "方案9",
+          "selected": false
         }
       ]
     }
   ],
-  "current_id": "route_006"
+  "current_id": "route_009"
 }
