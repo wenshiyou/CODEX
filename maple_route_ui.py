@@ -444,7 +444,7 @@ LADDER_PRECISE_PERIOD_MAX = 45    # 高帧自适应退避上限:机器再慢周�
 LADDER_PRECISE_OVERLOAD_N = 3     # 连续几轮"单轮耗时逼近周期、留不出MIN_SLEEP"=过载,降帧一档
 LADDER_PRECISE_RELAX_N = 15       # 连续约多少轮都很轻松(≈0.3-0.4s)=性能够,升回一档直到目标周期
 LADDER_PRECISE_STEP_MS = 3        # 高帧自适应每档退避/回升的步长ms
-LADDER_PRECISE_MARK_MS = 30       # 高帧下梯子特征白框扫描节流(在主线程;梯子静止不必跟检测同频45Hz,30ms≈33Hz足够跟手且省主线程模板匹配,用户2026-09-11CPU监管)
+LADDER_PRECISE_MARK_MS = 20       # 高帧下梯子特征白框扫描节流(在识别线程;用户2026-09-15加快30→20≈50Hz,选梯更跟手;CPU有自适应退避兜底)
 YOLO_FAST_S = 0.20        # YOLO扫描·找怪档(2026-09-09 CPU优化0.15→0.20=5Hz:cv2.dnn CPU推理是最大头,找怪5Hz仍快;原6.7Hz把整机顶到86%)
 YOLO_SLOW_S = 0.30        # YOLO扫描·战斗档(2026-09-09 CPU优化0.22→0.30≈3.3Hz:正打近身怪时3.3Hz够判存活/换目标,配合DNN多线程单次更快)
 BARS_SCAN_S = 0.25        # 怪物血条扫描节流(2026-09-09 CPU优化0.20→0.25=4Hz)：判存活4Hz足够,配合出手后130ms反馈窗口
@@ -460,11 +460,11 @@ PERF_DIALOG_H = 262        # 高(标题50+三选项120+底部说明)
 PERF_PROFILES = {
     # 检测忙/闲周期ms、YOLO找怪/战斗间隔s、血条s、怪模板s、上梯高帧目标周期ms、UI waitKey ms、边界守护轮询ms
     "slow":   dict(detect_busy_ms=180, detect_idle_ms=600, yolo_fast_s=0.32, yolo_slow_s=0.45,
-                   bars_s=0.40, feat_s=0.32, precise_ms=34, ui_wait_ms=40, bound_poll_ms=90),
+                   bars_s=0.40, feat_s=0.32, precise_ms=30, ui_wait_ms=40, bound_poll_ms=90),
     "normal": dict(detect_busy_ms=120, detect_idle_ms=400, yolo_fast_s=0.20, yolo_slow_s=0.30,
-                   bars_s=0.25, feat_s=0.20, precise_ms=28, ui_wait_ms=25, bound_poll_ms=60),
+                   bars_s=0.25, feat_s=0.20, precise_ms=24, ui_wait_ms=25, bound_poll_ms=60),
     "fast":   dict(detect_busy_ms=90,  detect_idle_ms=300, yolo_fast_s=0.15, yolo_slow_s=0.22,
-                   bars_s=0.20, feat_s=0.15, precise_ms=22, ui_wait_ms=15, bound_poll_ms=50),
+                   bars_s=0.20, feat_s=0.15, precise_ms=18, ui_wait_ms=15, bound_poll_ms=50),
 }
 # 推理线程/频率不在此写死:运行时按性能档+os.cpu_count()定(见_perf_val/_perf_onnx_threads),四核→少线程并自动放慢YOLO帧率,八核→多线程维持跟手
 POST_STRIKE_CHECK_MS = 450 # 攻击后反馈检测窗口(用户2026-09-11:130→450)：首次出手满450ms后才看血条/伤害判"打死没/是不是空怪";怪多/特效/掉帧(实测帧率曾掉到1-3fps)时130ms拿不到出手后稳定帧、真怪被当空怪清掉→一圈怪轮流锁左右抖;另须拿到出手之后的新帧才判,避免用出手前旧帧误丢真怪
@@ -539,7 +539,6 @@ LADDER_TPL_Y_FAR = 150         # Y远侧搜索距离(上行搜头顶/下行搜�
 LADDER_MARK_SCAN_MS = 250      # 常驻白框:人物周围特征全扫节流(ms),控CPU不每帧匹配
 LADDER_MARK_NMS_X = 28         # 特征白框NMS:两命中中心X差≤此值视为同一把梯(合并同梯多峰)
 LADDER_MARK_MATCH_X = 32       # 红框(倍率选中,会漂)与白框(特征真实)中心X差≤此值=重合/大约同位置→强制吸附到白框,锁定正确梯子才准起跳(用户2026-09-09)
-LADDER_MARK_HOLD_X = 45        # 吸附滞回带:已吸住某白框后,只要它没跑出此X带就继续钉它(比吸附带宽,防两把近邻梯间横跳)
 LADDER_MARK_SIDE_NEUTRAL = 12  # 左右同边判定的中性带(屏幕px):白框离人物这么近视为"正在脚下",不做左右硬删
 LADDER_SCR_NUDGE = 35         # 仅下行方式二用:|X差|>35按住朝梯正常走,5~35三次碎步递减,≤LADDER_SCR_TOL(5)才按↓(上行不用它,上行用LADDER_SCR_FAST_PX)
 LADDER_SCR_FAST_PX = 100      # 上行分段(用户2026-09-11 22:38改:真机目测离梯70~100起跳都上得去,且补偿主线~110ms一拍的延迟、往远放;主窗口屏幕px,X差按绝对值):>100大步助跑;70~100移动中跑跳;35~70按住趋近;5~35三次碎步修正;≤5原地直跳
@@ -1484,6 +1483,7 @@ class MinimapRouteRecorder:
         self._combat_held_keys = set()     # 持续按住的方向键（流畅移动用）
         self._combat_move_dir = None       # 当前持续移动方向 "left"/"right"/None
         self._combat_locked_target = None  # 锁定的目标 (cx, cy)，打死才换，不中途切换
+        self._ladder_target_mon_x = None  # 进上梯集合时冻结的目标怪屏幕X(关怪扫后锁定怪会清空,选梯/找梯以它为固定终点参照)
         self._combat_lock_tier = None      # 锁定类别 in=技能范围内/out=同层范围外/cross=跨层(两类锁怪维持依据,每帧由决策回存)
         # === 模块A：打怪优化新增状态变量 ===
         self._combat_active = False         # 【战斗活跃标志】技能范围内有怪时=True，此时暂停巡路移动，专心打怪
@@ -5158,7 +5158,7 @@ class MinimapRouteRecorder:
         self._climb_state = "none"
         self._ladder_precise_mode = False   # 退出上梯:检测线程恢复正常120ms全检测档(用户2026-09-10方案B)
         self._ladder_snap_x = None          # 出梯清空选中梯屏幕X,下把重新就近选(用户2026-09-15)
-        self._lad_snap_prev = None
+        self._ladder_target_mon_x = None   # 出梯清冻结目标怪屏幕X
         self._lad_scr_enter_t = 0
         self._climb_top_end_borrowed = False  # 到顶梯端Y是否已从录制梯借好(每把梯只借一次)
         self._climb_ladder_x = 0
@@ -5260,8 +5260,7 @@ class MinimapRouteRecorder:
         self._climb_min_y = 0
         self._climb_ystop_since = 0
         self._climb_ever_moved = False   # 复位真移动锁存,下次抓梯重新累计
-        self._ladder_snap_x = None           # 红框(倍率)吸附白框(特征)锁定的真实屏幕X,出梯清空
-        self._lad_snap_prev = None           # 上帧吸附的白框X(滞回防抖),出梯清空
+        self._ladder_snap_x = None           # 每帧实时选中梯的真实屏幕X,出梯清空
         # === 梯子失败集合(70%×3轮校准)状态复位(用户2026-09-14) ===
         self._ladder_realign_round = 0       # 失败集合已开始的移动轮数(每进入一次move段+1,最多3)
         self._ladder_realign_phase = None    # 'move'走剩余70% / 'gap'抬键停顿 / 'align'等连续达标帧
@@ -5509,8 +5508,7 @@ class MinimapRouteRecorder:
             self._realign_release_move()
             return False
         # 每帧现匹配梯子屏幕X(人物横移时镜头会跟随、梯X会变,不能一直用旧吸附值);匹配不到才短期沿用上一次稳定值
-        _lk = getattr(self, '_combat_locked_target', None)
-        _lkx = _lk[0] if _lk else None
+        _lkx = getattr(self, '_ladder_target_mon_x', None)   # 固定终点怪X(关怪扫后锁定怪已清空)
         _mx = self._match_ladder_screen_x(self._raw_frame, sp, self._climb_direction, _lkx)
         if _mx is not None:
             tpl_x = _mx
@@ -5600,10 +5598,12 @@ class MinimapRouteRecorder:
         return False
 
 
-    def _enter_to_ladder_up(self, px, py, now_ms):
+    def _enter_to_ladder_up(self, px, py, now_ms, monster_screen_x=None):
         """cross上层怪·纯屏幕上梯集合入口(用户2026-09-15):先_reset_climb清掉上一把全部相位(零残留),再置to_ladder。
-        锁录制梯端点只用于到顶比y_top;选哪把梯/对位/跑跳直跳全程在主游戏窗口屏幕就近完成,不用怪的小地图坐标。"""
+        锁录制梯端点只用于到顶比y_top;选哪把梯/对位/跑跳直跳全程在主游戏窗口屏幕就近完成,不用怪的小地图坐标。
+        monster_screen_x=目标怪屏幕X,冻结为固定终点参照(关怪扫后锁定怪会清空;选梯第一键离它近,次序不随人物走动变)。"""
         self._reset_climb()
+        self._ladder_target_mon_x = monster_screen_x   # reset会清None,必须在reset之后冻结
         self._release_move_conflicts()
         self._climb_state = "to_ladder"
         self._climb_ladder_x = 0
@@ -6116,8 +6116,7 @@ class MinimapRouteRecorder:
             _sel_x = getattr(self, '_ladder_snap_x', None)
             if _sel_x is None and getattr(self, '_ladder_templates', None) \
                     and self._raw_frame is not None and self._player_screen_pos:
-                _lk0 = getattr(self, '_combat_locked_target', None)
-                _lkx0 = _lk0[0] if _lk0 else None
+                _lkx0 = getattr(self, '_ladder_target_mon_x', None)   # 固定终点怪X(关怪扫后锁定怪已清空,不能用)
                 _sel_x = self._match_ladder_screen_x(self._raw_frame, self._player_screen_pos,
                                                      self._climb_direction, _lkx0)
             if _sel_x is not None:
@@ -12774,7 +12773,7 @@ class MinimapRouteRecorder:
                                         gdi32.SelectObject(hdc, _o_sp)
                                     gdi32.SetTextColor(hdc, 0x0000FF)
                                     gdi32.SetBkMode(hdc, 1)
-                                    _stxt = "梯X:%d 锁定" % _sx
+                                    _stxt = "梯X:%d" % _sx
                                     gdi32.TextOutW(hdc, _sx - 25, _sy - 78, _stxt, len(_stxt))
                                 for (x1, y1, x2, y2, score) in data.get('monsters', []):
                                     mx, my = (x1 + x2) // 2, (y1 + y2) // 2
@@ -17275,7 +17274,7 @@ class MinimapRouteRecorder:
             self._transit_target = None
             going_up = fy < spy
             if going_up:
-                self._enter_to_ladder_up(mpx, mpy, now)
+                self._enter_to_ladder_up(mpx, mpy, now, fx)  # fx=目标怪屏幕X,冻结作选梯固定参照
                 print("[跨层] 上层怪(屏幕人Y%.0f 怪Y%.0f),进纯屏幕上梯集合" % (spy, fy))
             else:
                 self._reset_climb()
@@ -17603,6 +17602,15 @@ class MinimapRouteRecorder:
                         self._snap_store.update_parts(player_screen=_ch, player_t=time.time())
                     except Exception as _se:
                         _debug_log("[人物] 快照发布异常:%s" % _se)
+                # 停止态(没在运行打怪)低频扫梯子白框供蒙板常开显示;运行态由识别B线程扫,门控互斥、不同时写缓存(用户2026-09-15)
+                if not self._monster_running and self._raw_char_pos is not None:
+                    _lm_now = time.time()
+                    if _lm_now - getattr(self, '_lad_marks_scan_t', 0.0) >= LADDER_MARK_SCAN_MS / 1000.0:
+                        try:
+                            self._lad_marks_cache = self._scan_ladder_marks(_frame, self._raw_char_pos)
+                            self._lad_marks_scan_t = _lm_now
+                        except Exception:
+                            pass
                 _dt_rounds += 1
                 _rn = time.time()
                 if _rn - _dt_last_report >= 1.0:
@@ -17648,19 +17656,19 @@ class MinimapRouteRecorder:
                     time.sleep(0.010)                       # 没新帧:轻等不空转
                     continue
                 _last_seq = _seq
-                # 上梯末段(离梯≤90)/上梯集合/失败集合:B彻底关怪物识别(用户2026-09-14:不是沿用旧表而是清空,
-                # 主线 self._monsters=list(_raw_monsters) 拿空→算不到怪距→【技能范围内有怪】不成立→不打怪也不巡路,不与上梯抢主权)
+                # 选梯/上下梯阶段(用户2026-09-15):检测B只保留【梯子识别】(人物识别由常开的人物线程负责),
+                # 关怪模板/YOLO=清怪表,主线 self._monsters=list(_raw_monsters) 拿空→算不到怪距→不打怪不巡路、不与上/下梯抢主权。
+                # 覆盖上梯to_ladder/climbing与下梯descend;到顶或3轮失败由_reset_climb把_ladder_precise_mode置False自然恢复。
+                # 玩家HP/MP加药在主线程_check_auto_potion独立常开(直接用截图A),不经过这里,上梯照常吃药、绝不在此关玩家血条。
                 _precise = bool(getattr(self, '_ladder_precise_mode', False)) \
-                    and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+                    and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing', 'descend')
                 if _precise:
-                    # 怪表/血条/各缓存全清(非沿用);到顶或3轮失败由_reset_climb把_ladder_precise_mode置False,下帧自然恢复扫描
+                    # 只清怪物位置/检测缓存,不碰任何血条;【不再continue】——落到本循环尾部做梯子白框高频扫描。
+                    # (旧写法continue把尾部梯子扫描也跳过→选梯/爬梯时_lad_marks_cache冻结不更新=选梯反而不实时,已修)
                     self._raw_monsters = []
-                    self._raw_hp_bars = []
                     self._raw_cached_feature_monsters = []
-                    self._yolo_cache, self._feat_cache, self._bars_cache = [], [], []
+                    self._yolo_cache, self._feat_cache = [], []
                     self._detect_last_monsters = None
-                    time.sleep(0.010)
-                    continue
                 if not _precise:
                     _fh, _fw = _frame.shape[:2]
                     # 识别物理边界=游戏画面(客户区)子矩形,标题栏/边框那圈不扫(用户2026-09-14);取不到退回整帧
@@ -17765,7 +17773,7 @@ class MinimapRouteRecorder:
                     _lm_ch = self._raw_char_pos
                     if _frame is not None and _lm_ch is not None:
                         _lm_precise = bool(getattr(self, '_ladder_precise_mode', False)) and \
-                            getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+                            getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing', 'descend')
                         _lm_gap_s = (LADDER_PRECISE_MARK_MS if _lm_precise else LADDER_MARK_SCAN_MS) / 1000.0
                         _lm_now = time.time()
                         if _lm_now - getattr(self, '_lad_marks_scan_t', 0.0) >= _lm_gap_s:
@@ -19336,6 +19344,14 @@ class MinimapRouteRecorder:
             except Exception:
                 self._monster_overlay_data["yolo_crop"] = None
                 self._monster_overlay_data["feat_crop"] = None
+            # 梯子白框【常开显示】(用户2026-09-15:不按运行也要看到梯子检测,静止画面还乱跳=检测源头漂)。
+            # 白框由识别B线程(运行态)/人物线程(停止态)互斥扫描写_lad_marks_cache,这里只读下发;停止态没有"选中",清掉残留红框
+            if not hasattr(self, '_lad_marks_cache'):
+                self._lad_marks_cache = []
+            self._monster_overlay_data["ladder_marks"] = [(c[0], c[1]) for c in self._lad_marks_cache]
+            if not self._running:
+                self._monster_overlay_data["ladder_sel"] = None
+                self._monster_overlay_data["ladder_rect"] = None
             _now_sync = time.time()
             if not hasattr(self, '_last_monster_sync_log') or _now_sync - self._last_monster_sync_log > 2:
                 self._last_monster_sync_log = _now_sync
@@ -19352,56 +19368,42 @@ class MinimapRouteRecorder:
                     self._monster_overlay_data["monsters"] = self._monsters
                     self._monster_overlay_data["monster_hp_bars"] = self._monster_hp_bars
                     self._monster_overlay_data["locked_target"] = getattr(self, '_combat_locked_target', None)
-                    # === 梯子双框(用户2026-09-09定稿) ===
-                    # 白框=特征识别的真实梯子位置(常驻、可多把);红框=倍率推算的当前选中梯(会漂),都是120高x50宽。
-                    # 红框与某白框重合/接近(LADDER_MARK_MATCH_X内)→强制吸附钉到白框真实位置=找到正确梯子,才准备起跳。
-                    # 1) 特征白框:人物周围节流全扫(真实屏幕位置),控CPU不每帧匹配
+                    # === 梯子选框(用户2026-09-15:不锁定,每帧实时选) ===
+                    # 白框【下发蒙板】已挪到常开层(不按运行也显示,便于肉眼检查检测稳不稳);运行态这里只取最新白框供下面实时选梯
                     _now_lm = time.time() * 1000
-                    # 梯子白框扫描已搬到识别B线程异步执行(见_recognize_loop),主线程只读缓存、不再同步多模板匹配堵帧
                     if not hasattr(self, '_lad_marks_cache'):
                         self._lad_marks_cache = []
                     _white_marks = [(c[0], c[1]) for c in self._lad_marks_cache]
-                    self._monster_overlay_data["ladder_marks"] = _white_marks
-                    # 2) 选当前要上的梯子=只认特征/YOLO白框(用户2026-09-11:取消倍率红框、取消红白框合并,直接对白框中心)
+                    # 2) 每帧【实时】选当前要上的梯子=只认特征/YOLO白框(用户2026-09-15:不锁定、不滞回、不黏住;
+                    # 人物走动镜头跟随,锁屏幕X锁不住、人梯一起滚相对距离不变=白锁,所以每帧用最新白框+最新人物位重算)
                     _sel = None
                     if getattr(self, '_climb_state', 'none') != 'none' and self._player_screen_pos:
                         try:
                             _psx, _psy = self._player_screen_pos
                             _cdir = int(getattr(self, '_climb_direction', 1) or 1)
-                            _prev = getattr(self, '_lad_snap_prev', None)
-                            _monp = getattr(self, '_combat_locked_target', None)
-                            _fw0 = self._raw_frame.shape[1] if self._raw_frame is not None else 0
-                            _tri_on = _monp is not None and _fw0 > 0 and (-30 <= int(_monp[0]) <= _fw0 + 30)
-                            # 选梯(用户2026-09-15定稿·全图乱打就近上):不判Y够不够得着、不做怪→梯→人折线、不做上下方向硬滤;
-                            # 所有白框按(|梯Y-角色Y|, |梯X-角色X|)升序——先和角色同高度(Y最近=当前够得上)、再就在边上(X最近)的第一把;
-                            # 滞回:上帧选中梯没跑出LADDER_MARK_HOLD_X带就继续钉住,不在近邻梯间横跳。
-                            _choose = None
-                            _cand_all = [(abs(_wy - _psy), abs(_wx - _psx), _wx, _wy) for (_wx, _wy) in _white_marks]
-                            if _cand_all:
-                                _mc = None
-                                if _prev is not None:
-                                    _holdc = [c for c in _cand_all if abs(c[2] - _prev) <= LADDER_MARK_HOLD_X]
-                                    if _holdc:
-                                        _mc = min(_holdc, key=lambda c: (c[0], c[1]))
-                                if _mc is None:
-                                    _mc = min(_cand_all, key=lambda c: (c[0], c[1]))
-                                _choose = (_mc[0], _mc[2], _mc[3])
-                            _snap = _choose is not None
+                            _tmonx = getattr(self, '_ladder_target_mon_x', None)  # 进梯时冻结的目标怪屏幕X(固定终点,不是锁梯)
+                            # 有固定终点怪X:键=(|梯X-怪X|, |梯Y-人Y|)——怪不动、梯是世界固定物,谁离怪近的次序不随人物走动变,天然不横跳;
+                            # 无冻结怪X(选台/掉台):退回(|梯Y-人Y|, |梯X-人X|)=先同高度、再在边上。每帧直接min,不带上帧结果。
+                            if _tmonx is not None:
+                                _cand_all = [(abs(_wx - _tmonx), abs(_wy - _psy), _wx, _wy) for (_wx, _wy) in _white_marks]
+                            else:
+                                _cand_all = [(abs(_wy - _psy), abs(_wx - _psx), _wx, _wy) for (_wx, _wy) in _white_marks]
+                            _snap = bool(_cand_all)
+                            _rx = None
                             if _snap:
-                                _rx, _ry = _choose[1], _choose[2]
-                                self._ladder_snap_x = _rx      # 选中梯真实中心X,供屏幕对位起跳
-                                self._lad_snap_prev = _rx
+                                _mc = min(_cand_all, key=lambda c: (c[0], c[1]))
+                                _rx, _ry = _mc[2], _mc[3]
+                                self._ladder_snap_x = _rx      # 当帧选中梯真实中心X(下帧重算,不黏住),供屏幕对位起跳
                                 _sel = (_rx, _ry, True)
-                                # 到顶端点在进to_ladder时已由_lock_recorded_ladder_endpoints直接从小地图录制梯锁好,
+                                # 到顶端点在进to_ladder时已由_lock_recorded_ladder_endpoints从小地图录制梯取好,
                                 # 此处不再借Y(用户2026-09-15:到顶=光点Y与录制梯最上点重合)
                             else:
                                 self._ladder_snap_x = None
                             if _now_lm - getattr(self, '_snap_dbg_t', 0) >= 300:
                                 self._snap_dbg_t = _now_lm
                                 _allx = ','.join('%d/%d' % (wx, wy) for wx, wy in _white_marks) or '无'
-                                _debug_log("[就近选梯·Y近优先X近] 人=(%d,%d) 向%s 白框[%s]→选中X=%s" % (
-                                    _psx, _psy, ('上' if _cdir > 0 else '下'), _allx,
-                                    _rx if _snap else None))
+                                _debug_log("[实时选梯·怪X近优先人Y近] 人=(%d,%d) 怪X=%s 向%s 白框[%s]→选中X=%s" % (
+                                    _psx, _psy, _tmonx, ('上' if _cdir > 0 else '下'), _allx, _rx))
                         except Exception:
                             _sel = None
                     self._monster_overlay_data["ladder_sel"] = _sel

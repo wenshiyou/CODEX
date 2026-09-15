@@ -9,7 +9,7 @@
   "buff1_delay": "500",
   "buff_random": "0",
   "char_x_offset": "0",
-  "char_y_offset": "313131",
+  "char_y_offset": "3131365",
   "buff3_cd": "5",
   "scale_x_offset": "0",
   "scale_y_offset": "0.01",
@@ -30,5 +30,9 @@
   "far_range_y_down": "100",
   "slope_jump_y_min": "-25",
   "slope_jump_y_max": "-150",
-  "hp_value": "35"
+  "hp_value": "35",
+  "match_sim": {
+    "char": "0.70",
+    "monster": "0.70"
+  }
 }
