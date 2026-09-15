@@ -25,14 +25,10 @@
   "hp_key": "pgdn",
   "aoe_y_up": "-100",
   "aoe_y_down": "10",
-  "far_range_x": "400",
-  "far_range_y_up": "300",
-  "far_range_y_down": "100",
+  "far_range_x": "500",
+  "far_range_y_up": "350",
+  "far_range_y_down": "350",
   "slope_jump_y_min": "-25",
   "slope_jump_y_max": "-150",
-  "hp_value": "35",
-  "match_sim": {
-    "char": "0.70",
-    "monster": "0.70"
-  }
+  "hp_value": "35"
 }

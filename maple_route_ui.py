@@ -18858,6 +18858,11 @@ class MinimapRouteRecorder:
                 if new_h != cur:
                     self.hwnd = new_h
                     self._update_window_rect()
+                    # [根因修复2026-09-15] 看门狗自动重绑路径此前漏调_save_target_window_size(另三条绑定路径
+                    # __init__/_bind_window/准星绑定都调了),导致"脚本先开游戏后开/换频道重建窗口"时目标尺寸永远停在
+                    # 初始None、_ensure_window_size每30帧见None直接return不拉回,窗口被改成1296x839也回不到1280x800。
+                    # 此处对齐另三条路径:写死1280x800+移除可调边框+立即拉回。
+                    self._save_target_window_size()
                     try:
                         self._detect_minimap(debug=False)
                     except Exception as _me:
