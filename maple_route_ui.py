@@ -541,11 +541,9 @@ LADDER_MARK_NMS_X = 28         # 特征白框NMS:两命中中心X差≤此值视
 LADDER_MARK_MATCH_X = 32       # 红框(倍率选中,会漂)与白框(特征真实)中心X差≤此值=重合/大约同位置→强制吸附到白框,锁定正确梯子才准起跳(用户2026-09-09)
 LADDER_MARK_SIDE_NEUTRAL = 12  # 左右同边判定的中性带(屏幕px):白框离人物这么近视为"正在脚下",不做左右硬删
 LADDER_SCR_NUDGE = 35         # 仅下行方式二用:|X差|>35按住朝梯正常走,5~35三次碎步递减,≤LADDER_SCR_TOL(5)才按↓(上行不用它,上行用LADDER_SCR_FAST_PX)
-LADDER_SCR_FAST_PX = 100      # 上行分段(用户2026-09-11 22:38改:真机目测离梯70~100起跳都上得去,且补偿主线~110ms一拍的延迟、往远放;主窗口屏幕px,X差按绝对值):>100大步助跑;70~100移动中跑跳;35~70按住趋近;5~35三次碎步修正;≤5原地直跳
+LADDER_SCR_FAST_PX = 100      # 上行分段(用户2026-09-15定稿,主窗口屏幕px按绝对值):>300瞬移;>100按住大步助跑;60~80移动中跑跳;60<X差≤100按住趋近等进跑跳带;X差≤60直接进【三步直跳集合】(走剩余70%→停→连续对齐直跳,最多3轮,不再用碎步)
 LADDER_SCR_TOL = 5            # 屏幕对位最终准入(上下行共用,用户2026-09-10晚:10→5治"10太宽、没碎步贴近就原地跳"):上行|X差|≤5且连续2帧=原地直跳;下行|X差|≤5且连续2帧=按↓下移;5~35必须先走三次碎步贴近
-LADDER_SCR_HOLD_FRAMES = 2     # 屏幕对齐连续多少帧才原地直跳
-LADDER_SCR_STALL_MS = 700      # 屏幕点动后多久没靠近=想动没动
-LADDER_SCR_STALL_MAX = 3       # 想动没动解卡上限,超过回主线重选不死磕
+LADDER_SCR_HOLD_FRAMES = 2     # 屏幕对齐连续多少帧才直跳(下行方式二共用保留;上行0-60已改走三步直跳)
 # === 上梯分段(用户2026-09-10晚定稿:先跑跳、跑跳不上再贴脸直跳,全用主窗口屏幕px,目标X用双框吸附稳定值_ladder_snap_x防抖动) ===
 # >100按住大步助跑(置running) → 助跑中X差落入70~100【移动中跑跳·第1次起跳】(朝梯键不松按跳,跳完80ms跳键和左右一起松、同时只按住↑,1秒内Y变小=抓住;
 #   贴脸X差≈0水平速度为0跑跳跳不上,必须在70~100带速度提前跳,区间已含主线~110ms延迟补偿) → 跑跳没挂上不回主线、留to_ladder,35~70按住正常趋近
@@ -563,21 +561,17 @@ LADDER_RUNJUMP_LO = 60         # 跑跳带下限;X差<=60不再跑跳,走直跳�
 LADDER_RUNJUMP_HORIZ_REL = 12    # 跑跳腾空后:人梯屏幕X差≤此值松开朝梯水平键、只留↑,防水平惯性把人冲过梯子抓空
 LADDER_SCR_STICK_MS = 150        # 屏幕精对齐粘滞:模板偶发丢帧时沿用上一次稳定梯X的最长时间,防状态掉回小地图走到X差0原地直跳
 LADDER_MERGE_WAIT_MS = 1500      # 红框(倍率)白框(特征)吸附合并等待上限(用户2026-09-10:必须合并才起跳):进屏幕对位后超过这么久仍没合并=白框没扫到/模板问题,放弃回主线,既不没合并硬跳、也不死等
-LADDER_SCR_SLOW_NUDGE = 30     # 碎步区(10~40)内的兜底按键快慢档分界(主用下方递减拍,此处仅_lad_scr_key_hold缺失时兜底)
-LADDER_SCR_NUDGE_HOLD_RANGE = (170, 200)  # 碎步三拍·单拍按住时间上限随机区间ms(用户2026-09-10晚定稿:延时统一170-200;定长点动=按住中实时检测,达标/走到步长/按满时间任一满足即抬键)
+LADDER_SCR_NUDGE_HOLD_RANGE = (170, 200)  # 碎步三拍·单拍按住时间上限随机区间ms(用户2026-09-10晚定稿:延时统一170-200;定长点动=按住中实时检测,达标/走到步长/按满时间任一满足即抬键;下行方式二共用保留)
 LADDER_SCR_NUDGE_STEP_PX = (100, 80, 60)  # 碎步三拍·单拍最多一口气移动的屏幕px(用户:第1拍100/第2拍80/第3拍60递减,越近越保守防冲过头;若按住中已实时达标≤TOL则立即抬、不必走满)
 LADDER_SCR_NUDGE_GAP_RANGE = (100, 110)  # 每拍【松开后】到下一拍前的停顿时长随机区间ms(用户:中间延时100-110随机,拟人不机械;时序=按住→达标/到步长/到时间抬起→停gap→检测→再按)
 LADDER_SCR_NUDGE_HOLD_MS = (100, 60, 40)  # 碎步三拍·每拍按住方向键时长基准ms(用户2026-09-11晚定稿100/60/40递减,原170-200太长对不准;各±JITTER随机)
 LADDER_SCR_NUDGE_JITTER = 5               # 每拍按住时长±随机ms(100±5/60±5/40±5,拟人不机械)
 LADDER_SCR_NUDGE_MAX_TRIES = 3 # 碎步最多按几拍(用户2026-09-10:首拍150起、每拍×0.75,最多再按3次;3次还没进≤10直跳区=对不上,直接回主线打怪不死磕)
 LADDER_SCR_ALIGN_MAX = 35      # 三次碎步修正区上限(用户2026-09-10晚:40→35):|人-梯X差|10~35=碎步对位区,≤10才原地直跳;35以上按住正常走、不碎步
-LADDER_SCR_BO_LO = 35          # 按住趋近区下沿(=碎步上限):35<X差≤100没赶上/没跑成跑跳就按住朝梯正常走;≤35进三次碎步
-LADDER_SCR_BO_HI = 100         # 按住趋近区上沿(=跑跳带上限,用户2026-09-11 22:38:90→100):跑跳在段2已优先,落这=没合并/没跳成→按住继续趋近
 LADDER_SCR_OUT_EXTRA = 50      # 朝梯子外侧(远离梯方向)多退50屏幕px,脱离尴尬区回主线打怪,打完再上梯
 RUNJUMP_UP_DELAY_MS = 80       # 跑跳:移动中起跳后多少ms"松掉左右水平键、同时只按住↑"(用户2026-09-11 22:38定稿:50→80,对齐跳键duration=80=跳完那一刻;新动作=方向键不松按跳→跳完跳键和左右一起松→同时只按↑不松,靠起跳惯性滑到梯位抓梯,不再空中持续按水平趋近)
 RUNJUMP_GRAB_WINDOW_MS = 1000  # 跑跳抓梯硬上限(用户2026-09-10:按住↑给足1秒再判成败,600→1000,提高上梯成功率);成功靠Y变小实时触发、不用等满
 RUNJUMP_GRAB_FAIL_MIN_MS = 1000 # 跑跳起跳后至少这么久才允许用"Y落回起跳高度"判失败(用户2026-09-10:一直按住超过1秒再判,300→1000,避免上升/贴梯途中误判失败)
-LADDER_NUDGE_KEY_SMALL_MS = 38 # ≤35超慢挪时一次点动的按键ms(2026-09-10:28→38,单次多挪一点、减少一抽一抽的碎片感;仍短于按住冲过中线)
 
 # === 爬梯登顶·绑定人物基点的三背景点（用户2026-09-09定稿，替代小地图Y对梯端/人怪同Y对比）===
 # 三个采样小框固定在人物基点的 右上/右下/左下，随人物一起移动，测"人物相对地图背景有没有动"，与镜头如何滚动无关。
@@ -645,13 +639,15 @@ LADDER_REALIGN_MOVE_CAP_MS = 320  # 单轮按住朝梯方向键的时长上限(�
 LADDER_REALIGN_GAP_MIN = 90       # 抬键后停顿时长随机下限ms(停稳再检测新距离)
 LADDER_REALIGN_GAP_MAX = 140      # 抬键后停顿时长随机上限ms
 LADDER_REALIGN_TOL = 5            # 达标=屏幕|人-梯X差|≤此值(复用LADDER_SCR_TOL口径5px)
+LADDER_REALIGN_LOCK_PX = 10       # 三步直跳方向锁死区(用户2026-09-15):本轮move内|人梯X差|≤此值的识别抖动不许左右翻向,真走过头>此值才改向(真机人X一帧跳28px致按键左右抵消、按住零位移)
 LADDER_REALIGN_HOLD_FRAMES = 2    # 达标需连续帧数(防抖,和正常屏幕直跳一致)
+LADDER_DEBUG_DIFF_PX = 200        # 诊断(用户2026-09-15):人梯屏幕|X差|≤此值才开始每秒打印一次"人X-梯X"
+LADDER_DEBUG_DIFF_MS = 1000       # 诊断:"人X-梯X"打印节流1秒1条
 LADDER_REALIGN_NO_TPL_MS = 1200   # 失败集合里连续多久拿不到梯子屏幕X(无模板/匹配不到)=回主线,不死等
 # === 梯子水平对齐·精细点动(用户2026-09-09定稿)：远距正常走,进3px内才1~2px点动挪到重合,关键动作(直跳)必须过准入标准 ===
 LADDER_ALIGN_FINE = 3        # |小地图X差|≤3进入精细点动区(>3仍正常按住方向走,像人不磨叽)
 LADDER_ALIGN_TOL = 1         # 直跳准入硬标准:|X差|必须≤1(用户:小于2、不等于2;杜绝2.x边界没对齐就跳)
 LADDER_ALIGN_HOLD_FRAMES = 2 # 连续2帧都≤1才算停稳对准(防光点抖动/滑过误判),达到才允许原地直跳
-LADDER_NUDGE_KEY_MS = 52     # 点动一次方向键保持ms(非阻塞跨帧抬起,2026-09-10:45→52略增单次位移,动作更连贯)
 LADDER_NUDGE_CYCLE_MS = 150  # 点动节拍:每150ms最多点一下(2026-09-10:200→150缩短抬键停顿,减少肉眼可见的小碎片/抽动感),节拍间隔用来观测"到底动没动"
 LADDER_ALIGN_STALL_MS = 600  # 精细区"指令朝梯走但X一直没靠近"持续这么久=想动没动(卡住)
 LADDER_ALIGN_STALL_MAX = 3   # 卡住解卡尝试上限:每次先全松再干净重点,超过仍不动=这把梯对不齐,回主线重选/打怪不死磕
@@ -1377,19 +1373,10 @@ class MinimapRouteRecorder:
         self._ladder_tpl_matches = []   # 最近梯子模板匹配候选(调试/蒙板显示)
         self._ladder_tpl_dbg = None     # 最近一次主窗口梯子匹配调试信息{roi,cands,best,ppx,sim,t}(蒙板白竖线/识别不到红框,用户2026-09-09)
         self._ladder_feature_window = None  # 梯子特征管理弹窗
-        # 主窗口梯子模板"屏幕X精对齐"状态（每次爬梯由_reset_climb清零）
-        self._lad_scr_ok_frames = 0
-        self._lad_scr_key_vk = None
-        self._lad_scr_key_t = 0
-        self._lad_scr_nudge_t = 0
-        self._lad_scr_ref_spx = None
-        self._lad_scr_stall_t = 0
-        self._lad_scr_stall_n = 0
-        self._lad_scr_nudge_n = 0
-        self._lad_scr_key_hold = 0
-        self._lad_scr_nudge_step = 0      # 定长点动·当前拍位移上限px(0=非点动拍)
-        self._lad_scr_nudge_from_x = None # 定长点动·当前拍起点屏幕X
-        self._lad_scr_nudge_gap = 100     # 定长点动·抬起后停顿ms
+        # 主窗口梯子对位状态(用户2026-09-15:删上行碎步/点动/卡住字段;只留粘滞梯X+诊断节流,每次爬梯由_reset_climb清零)
+        self._lad_scr_last_x = None       # 上次屏幕模板匹配到的稳定梯X(丢帧粘滞,三步直跳用)
+        self._lad_scr_last_t = 0
+        self._lad_dbg_diff_t = 0          # 人梯X差诊断打印节流(200px内每秒1条)
         # 登顶三背景点状态（右上/右下/左下，随人物基点移动）
         self._climb_box_prev = [None, None, None]      # 三点上一帧纹理
         self._climb_box_centers = [None, None, None]   # 三点上一帧中心(锚点突变时本帧只建基准不判动)
@@ -5232,25 +5219,11 @@ class MinimapRouteRecorder:
         self._slope_resume_at = 0                      # 跳高打：跨层爬梯到顶后保护截止(ms)，此时间前不启用跳高打(防刚翻上梯顶没站稳被跳下来,用户2026-09-09)
         self._slope_ref = None                         # 跳高打：当前钉住的高处参照怪(cx,cy),同层不每帧换X最近怪(治移动/出手方向左右碎步,用户2026-09-11);脱检/离开区间/走远才重选
         self._move_stuck_inited = False  # 爬梯结束重置卡住检测
-        # 主窗口梯子模板"屏幕X精对齐"状态复位(用户2026-09-09)
-        self._lad_scr_ok_frames = 0
-        self._lad_scr_key_vk = None
-        self._lad_scr_key_t = 0
-        self._lad_scr_nudge_t = 0
-        self._lad_scr_ref_spx = None
-        self._lad_scr_stall_t = 0
-        self._lad_scr_stall_n = 0
-        self._lad_scr_nomove_n = 0       # 碎步"按了没动"监管计数复位(用户2026-09-11)
-        self._lad_scr_running = False   # 大步助跑态复位(跑跳穿越触发用,用户2026-09-10)
-        self._lad_scr_nudge_n = 0        # 碎步已按拍数复位(最多3拍)
-        self._lad_scr_key_hold = 0       # 当前拍按住时长复位
-        self._lad_scr_nudge_step = 0     # 定长点动·当前拍位移上限px复位(0=非点动拍)
-        self._lad_scr_nudge_from_x = None  # 定长点动·当前拍起点屏幕X复位
-        self._lad_scr_nudge_gap = 100    # 定长点动·抬起后停顿ms复位
-        self._lad_scr_prev_asdx = None   # 上一检测周期人梯X差(自适应跑跳趋近速度),复位
-        self._lad_scr_last_x = None      # 上次屏幕模板匹配到的稳定梯X(丢帧粘滞),复位
+        # 主窗口梯子对位状态复位(用户2026-09-15:删上行碎步/点动/卡住/助跑死字段;只留粘滞梯X+等白框+诊断)
+        self._lad_scr_last_x = None      # 上次屏幕模板匹配到的稳定梯X(丢帧粘滞,三步直跳用)
         self._lad_scr_last_t = 0
-        self._lad_scr_enter_t = 0        # 进入屏幕对位的时刻(红框白框合并等待计时),复位
+        self._lad_scr_enter_t = 0        # 进入屏幕对位的时刻(等白框超时计时),复位
+        self._lad_dbg_diff_t = 0         # 人梯X差诊断打印节流复位
         self._ladder_run_dir = 1        # 跑跳空中趋近方向(屏幕:右1/左-1)
         self._ladder_run_t0 = 0         # 跑跳起跳时刻(抓梯1秒窗口从这起算)
         # 登顶三背景点状态复位
@@ -5273,6 +5246,7 @@ class MinimapRouteRecorder:
         self._ladder_realign_from_x = None   # 本轮移动起点·人物屏幕X
         self._ladder_realign_px = 0        # 本轮计划移动屏幕px(=进入时剩余*0.7)
         self._ladder_realign_key_vk = None   # 本轮按住的方向键vk
+        self._ladder_realign_lock_vk = None  # 本轮move锁定方向vk(10px方向锁:抖动不翻向,进gap/下一轮重定;用户2026-09-15)
         self._ladder_realign_ok_frames = 0   # 达标连续帧计数
         self._ladder_realign_no_tpl_since = 0  # 拿不到梯子屏幕X的起始时刻(超时回主线)
         # === 上梯集合到顶·三背景点静止(第一道)状态复位(用户2026-09-14:先背景不动、再光点重合梯顶) ===
@@ -5476,7 +5450,6 @@ class MinimapRouteRecorder:
         # 锁存跑跳已用(失败集合只走对齐直跳)、开放重新直跳;相位realign硬冻,从move段开下一轮(move内round+1)
         self._ladder_run_jumped = True
         self._ladder_vert_jumped = False
-        self._lad_scr_running = False
         self._ladder_precise_mode = True   # 失败集合全程彻底关怪物扫描,直到3轮失败_reset_climb/成功到顶才恢复(用户2026-09-14)
         self._ladder_jump_phase = 'realign'
         self._ladder_post_jump_step = None
@@ -5484,12 +5457,25 @@ class MinimapRouteRecorder:
         self._ladder_realign_from_x = None
         self._ladder_realign_px = 0
         self._ladder_realign_key_vk = None
+        self._ladder_realign_lock_vk = None  # 新进校准:方向锁从头定(用户2026-09-15)
         self._ladder_realign_ok_frames = 0
         self._ladder_realign_no_tpl_since = 0
         self._ladder_realign_t = now_ms
         _debug_log("[失败集合] 进校准(原因=%s,已用轮=%d/%d):下一轮走剩余70%%→停下→检测直跳"
                    % (why, self._ladder_realign_round, LADDER_REALIGN_MAX_ROUNDS))
         return False
+
+    def _ladder_debug_diff_log(self, now_ms, spx, tpl_x):
+        """诊断(用户2026-09-15):人梯屏幕|X差|≤LADDER_DEBUG_DIFF_PX时,每LADDER_DEBUG_DIFF_MS打印一次 人X-梯X
+        (带符号,负=梯在人右/正=梯在人左),用来观察贴近梯子时人物X识别抖动、方向锁是否压住翻向。"""
+        if tpl_x is None or spx is None:
+            return
+        if abs(tpl_x - spx) > LADDER_DEBUG_DIFF_PX:
+            return
+        if now_ms - getattr(self, '_lad_dbg_diff_t', 0) < LADDER_DEBUG_DIFF_MS:
+            return
+        self._lad_dbg_diff_t = now_ms
+        self._rlog("人X-梯X=%+.0f(人X=%d 梯X=%d)" % (spx - tpl_x, int(spx), int(tpl_x)), log='behavior')
 
     def _realign_release_move(self):
         """失败集合内统一抬掉左右移动键(幂等,不碰↑/攻击)。"""
@@ -5536,15 +5522,26 @@ class MinimapRouteRecorder:
         spx = sp[0]
         diff = tpl_x - spx                  # 带符号:正=梯子在人物右侧
         adiff = abs(diff)
-        dir_vk = VK_RIGHT if diff > 0 else VK_LEFT
+        # 10px方向锁(用户2026-09-15):本轮move起步定方向;|diff|≤10的识别抖动不许左右翻向(真机人X一帧跳28px致按键左右抵消、按住零位移),
+        # 只有真走过头|diff|>10才更新方向;进gap/下一轮move重新定。锁的是按键方向不是坐标,人照常朝梯移动、坐标一直变。
+        _want_vk = VK_RIGHT if diff > 0 else VK_LEFT
+        _lock_vk = getattr(self, '_ladder_realign_lock_vk', None)
+        if _lock_vk is not None and _want_vk != _lock_vk and adiff <= LADDER_REALIGN_LOCK_PX:
+            dir_vk = _lock_vk               # 快对齐时的抖动:保持本轮起步方向,不翻
+        else:
+            dir_vk = _want_vk
+            self._ladder_realign_lock_vk = _want_vk   # 起步/真走过头:刷新锁定方向
         opp_vk = VK_LEFT if dir_vk == VK_RIGHT else VK_RIGHT
         ph = self._ladder_realign_phase
+        # 诊断(用户2026-09-15):贴近梯子200px内每秒打印一次 人X-梯X
+        self._ladder_debug_diff_log(now_ms, spx, tpl_x)
 
         if ph == 'move':
             # 本轮起步:轮数+1,按"当前剩余"的70%定本轮步长(离得远多走、不碎步)
             if self._ladder_realign_from_x is None:
                 self._ladder_realign_round += 1
                 self._ladder_realign_from_x = spx
+                self._ladder_realign_lock_vk = dir_vk   # 本轮起步锁定方向(10px内抖动不翻,用户2026-09-15)
                 self._ladder_realign_px = max(LADDER_REALIGN_MIN_STEP, adiff * LADDER_REALIGN_RATIO)
                 self._ladder_realign_t = now_ms
                 _debug_log("[失败集合] 第%d/%d轮:剩余%.0f屏幕px,本轮走70%%=%.0f"
@@ -5561,6 +5558,7 @@ class MinimapRouteRecorder:
                 if dir_vk in self._random_move_keys:
                     self._key_up(dir_vk)
                 self._ladder_realign_key_vk = None
+                self._ladder_realign_lock_vk = None   # 进gap解锁,下一轮move起步重新定方向(用户2026-09-15)
                 self._ladder_realign_phase = 'gap'
                 self._ladder_realign_gap_to = now_ms + random.randint(LADDER_REALIGN_GAP_MIN,
                                                                        LADDER_REALIGN_GAP_MAX)
@@ -5599,6 +5597,7 @@ class MinimapRouteRecorder:
                 return self._ladder_enter_realign(py, now_ms, "3轮移动仍对不齐")
             self._ladder_realign_phase = 'move'
             self._ladder_realign_from_x = None
+            self._ladder_realign_lock_vk = None   # 开下一轮move:方向锁清空,起步按新diff重定(用户2026-09-15)
         return False
 
 
@@ -11449,11 +11448,11 @@ class MinimapRouteRecorder:
         return _hold, _gap, LADDER_SCR_NUDGE_STEP_PX[_i]
 
     def _ladder_align_by_screen(self, tpl_x, px, py, now_ms, jump_key):
-        """主窗口梯子X对齐起跳(屏幕坐标;用户2026-09-10定稿,全用主窗口屏幕px,X差可正可负按绝对值分段,小碎步全局只此函数、且只在离梯10~40px):
-        目标X优先用双框吸附锁定的稳定真实X(_ladder_snap_x,带滞回不抖),没吸附才退回单帧匹配tpl_x(治目标抖动致方向反复)。
-        >100按住朝梯大步助跑;助跑中70~100移动中【跑跳·第1次起跳】(朝梯键不松按跳、跳完80ms跳键和左右一起松、同时只按住↑、1秒内Y变小=抓住;贴脸X差≈0带不出水平速度跳不上,故提前到70~100,区间已含主线~110ms延迟补偿);
-        跑跳没挂上不回主线、留在to_ladder;35~70按住正常趋近;5~35【全局唯一小碎步】最多3拍修正、任一拍进≤5下帧即直跳;
-        ≤5连续2帧【直跳·第2次起跳,只跳1次】,失败即回主线打怪。碎步3拍对不齐/卡住也回主线不死磕。"""
+        """主窗口梯子X对齐起跳(屏幕坐标;用户2026-09-15重构,全用主窗口屏幕px,X差按绝对值分段,删除上行碎步/点动,新旧只留一套):
+        目标X优先用双框吸附稳定真实X(_ladder_snap_x,带滞回不抖),没吸附才用传入tpl_x。
+        X差>300瞬移;>100按住大步助跑;60~80移动中【跑跳·第1次起跳】(起跳即松左右、按住↑1秒判Y,贴脸带不出水平速度故提前到60-80);
+        60<X差≤100按住朝梯正常走等进跑跳带;X差≤60一律进【三步直跳集合_ladder_enter_realign】(走剩余70%→抬键停→连续对齐直跳→判Y,
+        最多3轮,内置10px方向锁治识别抖动左右翻向),不再有碎步三拍/≤5直跳旧路径。"""
         _sp = self._player_screen_pos
         if _sp is None:
             return False
@@ -11463,31 +11462,19 @@ class MinimapRouteRecorder:
         spx = int(_sp[0])
         sdx = tpl_x - spx                       # 正=梯子在屏幕右侧
         asdx = abs(sdx)
-        # 趋近速度(自适应提前量):上一检测周期人梯X差缩小了多少(正=在靠近);算出立刻刷新基准,保证下方各return路径都已更新
-        _prev_asdx = getattr(self, '_lad_scr_prev_asdx', None)
-        _approach_v = (_prev_asdx - asdx) if _prev_asdx is not None else 0.0
-        self._lad_scr_prev_asdx = asdx
-        # 用户2026-09-11:取消红框/红白合并,_merged=本帧已选中一把梯子白框(三点或就近),有白框中心才许跑跳/直跳
+        # 诊断(用户2026-09-15):人在梯200屏幕px内,每秒打印一次 人X-梯X,看贴近时识别抖动/方向
+        self._ladder_debug_diff_log(now_ms, spx, tpl_x)
+        # _merged=本帧已选中一把梯子白框(吸附稳定值),有白框中心才许跑跳
         _merged = _snap_x is not None
         if getattr(self, '_lad_scr_enter_t', 0) == 0:
             self._lad_scr_enter_t = now_ms
         if (not _merged) and now_ms - self._lad_scr_enter_t >= LADDER_MERGE_WAIT_MS:
-            # 进屏幕对位超过上限仍没扫到/选中任何白框(没录梯图/没YOLO/相似度不够):不硬跳也不死等,放弃回主线打怪
+            # 进屏幕对位超过上限仍没选中任何白框(没录梯图/没YOLO/相似度不够):不硬跳也不死等,放弃回主线打怪
             self._rlog("进主窗口%.0fms仍没识别到梯子白框,放弃回主线" % LADDER_MERGE_WAIT_MS, LOG_RED, log='behavior')
             self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
             self._reset_climb(); self._decide_climb_fail_action()
             return False
         _dir_vk = VK_RIGHT if sdx > 0 else VK_LEFT
-        _opp_vk = VK_LEFT if sdx > 0 else VK_RIGHT
-        # 到点抬起上一拍按键:碎步段(段3)定长点动拍的抬键由段3内部闭环判(实时达标/到步长/到时间),不在这抬;其它路径用兜底固定档
-        _key_hold = getattr(self, '_lad_scr_key_hold', 0) or \
-                    (LADDER_NUDGE_KEY_SMALL_MS if asdx <= LADDER_SCR_SLOW_NUDGE else LADDER_NUDGE_KEY_MS)
-        _ak = getattr(self, '_lad_scr_key_vk', None)
-        _in_nudge_step = getattr(self, '_lad_scr_nudge_step', 0) or 0
-        if _ak is not None and not _in_nudge_step and now_ms - getattr(self, '_lad_scr_key_t', 0) >= _key_hold:
-            self._key_up(_ak)                  # 一拍按满抬起,留GAP检测到没到再续下一拍
-            self._lad_scr_key_vk = None
-            _ak = None
         # 段0(用户2026-09-15):人梯X差>300且配了水平瞬移键/X距离→先朝梯瞬移快速接近。850ms节流复用战斗瞬移时间戳
         # (上梯时战斗瞬移本就不触发,共用一个节流还能防战斗/上梯切换瞬间连闪);瞬移那拍先按住朝梯方向,闪不成(没蓝/被挡)
         # 或处于节流内的帧自然往下落段1按住走,绝不站着等;打怪区刚从该侧拉回的冷却内不朝这侧瞬移(防闪回竖线死循环)。
@@ -11508,40 +11495,22 @@ class MinimapRouteRecorder:
             return False
         # 段1:X差>100 按住朝梯大步助跑(不磨叽;下行方式二另用LADDER_SCR_NUDGE=35,互不影响)
         if asdx > LADDER_SCR_FAST_PX:
-            if _ak is not None:
-                self._key_up(_ak)
-                self._lad_scr_key_vk = None
-            self._lad_scr_ok_frames = 0
-            self._lad_scr_stall_t = 0
-            self._lad_scr_stall_n = 0
-            self._lad_scr_nudge_t = 0   # 离开碎步区:拍数清0、下一拍时刻清0,下次进5~35第一拍立即按
-            self._lad_scr_nudge_n = 0
-            self._lad_scr_nudge_step = 0
-            self._lad_scr_key_hold = 0
             self._hold_toward_ladder(sdx)
-            self._lad_scr_running = True   # 大步助跑态:供段2跑跳判定水平惯性来源(22:38起朝梯键正按住也算,双保险)
             return False
-        # 段2:助跑趋近中【自适应提前一拍】跑跳(用户2026-09-11 22:38:真机目测离梯70~100带速起跳都能上,补偿主线~110ms延迟往远放)。
-        # 水平速度来源(22:38修时序bug):不再只认"先经过>FAST段才置的_lad_scr_running"——小地图|X差|≤7才切屏幕对位、切进来asdx已落在
-        # 70~100带内,running要等段2.5帧尾才补上=带内第一帧不跳、下帧已出带(真机5分钟只跳1次的根因)。改为 running 或 "朝梯方向键此刻正按住"
-        # (小地图导航本就一直按住朝梯键=正在助跑)即算有水平速度;叠加 asdx≤IDEAL+v 自适应提前,快/延迟大v大就多提前。
+        # 段2:移动中跑跳(用户2026-09-15定稿):屏幕X差[60,80]、朝梯方向键此刻正按住(=带水平速度)、选中白框=移动中起跳;
+        # 贴脸X差≈0水平速度为0跳不上,故必须在60-80带速度提前跳。X差≤60不跑跳,由段2.6直接进三步直跳集合。
         _moving_to_lad = _dir_vk in self._random_move_keys
-        # 第一次上梯分带(用户2026-09-14晚):屏幕X差[60,80]内、朝梯键按住、选中白框=移动中跑跳;X差<=60不跑跳(落下面趋近/碎步/段4走直跳三步)
         _rj_trig = (not getattr(self, '_ladder_run_jumped', False)) \
             and _moving_to_lad \
             and LADDER_RUNJUMP_LO <= asdx <= LADDER_RUNJUMP_HI \
             and _merged
         if _rj_trig:
-            if _ak is not None:
-                self._key_up(_ak)
-                self._lad_scr_key_vk = None
             # 用户2026-09-14固定时序:落入60-80跑跳带→按跳,【起跳同时松开左右键】、立刻只按住↑(满1秒后run_hold判Y)
             self._key_up(VK_LEFT)
             self._key_up(VK_RIGHT)
             if VK_DOWN in self._random_move_keys:
                 self._key_up(VK_DOWN)
             self._ladder_run_jumped = True
-            self._lad_scr_running = False
             self._ladder_vert_jumped = False
             self._ladder_run_dir = 1 if sdx > 0 else -1
             self._ladder_run_t0 = now_ms
@@ -11556,145 +11525,18 @@ class MinimapRouteRecorder:
             self._ladder_post_jump_step = 'run_hold'
             self._ladder_post_jump_t = now_ms
             return False
-        # 段2.5:X差>35却没被段2跑跳消费(没进60-80带/没选中白框/跑跳已用/已跌破60归直跳)→按住朝梯单调正常走:
-        # 80以上按住等进跑跳带;X差<=60归直跳路径,一路按住走到<=35进段3三拍碎步、<=5段4原地直跳。不reset、不转打怪、不左右摆(段1已挡>100)
-        if asdx > LADDER_SCR_BO_LO:
-            if _ak is not None:
-                self._key_up(_ak)
-                self._lad_scr_key_vk = None
-            self._lad_scr_nudge_t = 0   # 回到35外趋近区:拍数/下一拍时刻清零,重新进5~35时第一拍立即按
-            self._lad_scr_nudge_n = 0
-            self._lad_scr_nudge_step = 0
-            self._lad_scr_key_hold = 0
-            if not getattr(self, '_ladder_run_jumped', False):
-                self._lad_scr_running = True
+        # 段2.5(用户2026-09-15收窄):走到这X差≤100(段1挡了>100);60~80在"按住+选中白框"时已由段2跑跳消费,
+        # 落这=80~100,或60~80这帧还没满足跑跳(没选中白框/朝梯键刚起步)→按住朝梯正常走,下帧进60-80自然跑跳,不reset不转打怪。
+        if asdx > LADDER_RUNJUMP_LO:
             self._hold_toward_ladder(sdx)
             return False
-        # 段4:X差≤5 连续帧原地直跳抓梯(用户2026-09-10晚:10→5,太宽没贴近就跳=抓空)
-        if asdx <= LADDER_SCR_TOL:
-            if _ak is not None:
-                self._key_up(_ak)
-                self._lad_scr_key_vk = None
-            self._lad_scr_nudge_t = 0   # 已进直跳区=碎步对位成功,清下一拍时刻
-            self._lad_scr_nudge_n = 0
-            self._lad_scr_nudge_step = 0
-            self._lad_scr_key_hold = 0
-            if VK_LEFT in self._random_move_keys:
-                self._key_up(VK_LEFT)
-            if VK_RIGHT in self._random_move_keys:
-                self._key_up(VK_RIGHT)
-            if _merged:
-                self._lad_scr_ok_frames = getattr(self, '_lad_scr_ok_frames', 0) + 1
-            else:
-                self._lad_scr_ok_frames = 0   # 此刻没选中白框(特征丢帧)不累计直跳帧、不起跳,站住等白框
-                # 用户2026-09-11:差≤5却不动=这帧没扫到白框,日志写清已等多久/上限,便于看出是"卡在等白框"
-                _wait_merge = now_ms - getattr(self, '_lad_scr_enter_t', now_ms)
-                self._rlog_throttle('lad_wait_merge',
-                    "已到梯下X差%.1f≤5但此刻没选中白框→不碎步/不直跳,站等识别(%.0f/%dms)" % (
-                        sdx, _wait_merge, LADDER_MERGE_WAIT_MS), 500, log='behavior')
-            if _merged and self._lad_scr_ok_frames >= LADDER_SCR_HOLD_FRAMES and not getattr(self, '_ladder_vert_jumped', False):
-                self._ladder_vert_jumped = True
-                self._climb_start_y = py
-                self._press_game_key(jump_key, duration=80)
-                _debug_log("[爬梯·屏幕] 梯X=%d 人X=%d 差%.1f 连续%d帧→原地直跳抓梯" % (
-                    tpl_x, spx, sdx, self._lad_scr_ok_frames))
-                self._rlog("屏幕对齐梯子(X差%.1f)直跳抓梯" % sdx, log='behavior')
-                self._ladder_jump_phase = 'post_jump'
-                self._ladder_post_jump_step = 'delay1'
-                self._ladder_post_jump_t = now_ms
-            return False
-        # 段3:5<X差≤35 定长点动三拍(用户2026-09-10晚定稿:单拍最多移动100/80/60px递减、按住时间上限170-200ms随机;
-        # 按住中实时闭环:①一到≤5立刻抬(下帧段4直跳)②走够本拍步长③按满时间上限,任一满足即抬;抬起随机停100-110再检测按下一拍;
-        # 只朝梯方向绝不反向;任一拍挪进≤5下帧段4直跳;三拍按完仍>5=对不上回主线。>35段2.5按住走、≤5段4直跳)
-        self._lad_scr_running = False   # 进入离梯≤35对位区,只点动校正、不再跑跳
-        self._lad_scr_ok_frames = 0
-        if _ak is not None:
-            # 本拍按住中→闭环抬键:实时达标/走够本拍步长/按满时间上限,任一即抬,抬起后停gap再检测是否按下一拍
-            _from_x = getattr(self, '_lad_scr_nudge_from_x', spx)
-            _signed_move = spx - _from_x              # 带符号位移(正=向右),应与sdx同号才是朝梯子走
-            _moved = abs(_signed_move)
-            _el = now_ms - getattr(self, '_lad_scr_key_t', now_ms)
-            _nstep = getattr(self, '_lad_scr_nudge_step', 0) or 0
-            _nhold = getattr(self, '_lad_scr_key_hold', 200) or 200
-            _hit_tol = asdx <= LADDER_SCR_TOL
-            _hit_step = bool(_nstep and _moved >= _nstep)
-            _hit_time = _el >= _nhold
-            if _hit_tol or _hit_step or _hit_time:
-                self._key_up(_ak)
-                self._lad_scr_key_vk = None
-                self._lad_scr_nudge_step = 0
-                _gapv = getattr(self, '_lad_scr_nudge_gap', 100)
-                self._lad_scr_nudge_t = now_ms + _gapv  # 抬起后停gap再允许下一拍
-                _why = "已进≤5直跳区" if _hit_tol else ("走到本拍步长%dpx" % _nstep if _hit_step else "按满%dms时间上限" % _nhold)
-                _nextplan = "下帧进≤5直跳" if _hit_tol else (
-                    "停%dms后按第%d拍" % (_gapv, self._lad_scr_nudge_n + 1) if self._lad_scr_nudge_n < LADDER_SCR_NUDGE_MAX_TRIES else "三拍用完→回主线打怪")
-                # 用户2026-09-11:每拍抬起都写明"移动前/后离梯多远、实际挪了多少、为什么抬、下一步怎么调"
-                _debug_log("[梯对位·抬键] 第%d拍 起X=%.0f→现X=%d 实移%+.1fpx(应朝%s) 按住%d/%dms 抬因=%s 现X差%.1f →%s" % (
-                    self._lad_scr_nudge_n, _from_x, spx, _signed_move, "右" if sdx > 0 else "左",
-                    _el, _nhold, _why, asdx, _nextplan))
-                # 监管线(用户2026-09-11):按满了整拍时长却几乎零位移=这拍按键没让人物动起来,明确报出"没动的原因",不原地干站
-                if _hit_time and not _hit_tol and _moved < 2:
-                    self._lad_scr_nomove_n = getattr(self, '_lad_scr_nomove_n', 0) + 1
-                    _rev = (_signed_move != 0 and _signed_move * sdx < 0)
-                    _reason = "人物朝反方向挪(方向键疑似被战斗/边缘闸另一线程松开)" if _rev else (
-                        "按住%dms人物屏幕X零位移:按压时长太短游戏没起步/方向键被其它线程抢松/被地形卡住/人物特征X没刷新" % _nhold)
-                    self._rlog("梯对位监管:第%d拍按了没动→%s" % (self._lad_scr_nudge_n, _reason), LOG_RED, log='behavior')
-                    _debug_log("[梯对位·没动] %s;累计没动%d次(≥%d回主线,不原地干站)" % (
-                        _reason, self._lad_scr_nomove_n, LADDER_SCR_STALL_MAX))
-                    self._lad_scr_stall_n = getattr(self, '_lad_scr_stall_n', 0) + 1
-                    if self._lad_scr_stall_n > LADDER_SCR_STALL_MAX:
-                        self._rlog("梯对位连续按了不动,回主线重选(不死磕)", LOG_RED, log='behavior')
-                        self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
-                        self._reset_climb(); self._decide_climb_fail_action()
-            return False
-        # _ak is None:松开停gap中,到下一拍最早时刻才按
-        if now_ms >= getattr(self, '_lad_scr_nudge_t', 0):
-            _ref = getattr(self, '_lad_scr_ref_spx', None)
-            if _ref is not None:
-                _prev_gap = abs(tpl_x - _ref)
-                if asdx < _prev_gap - 0.5:
-                    self._lad_scr_stall_t = 0
-                    self._lad_scr_stall_n = 0
-                else:
-                    if self._lad_scr_stall_t == 0:
-                        self._lad_scr_stall_t = now_ms
-                    elif now_ms - self._lad_scr_stall_t >= LADDER_SCR_STALL_MS:
-                        self._lad_scr_stall_n += 1
-                        self._lad_scr_stall_t = now_ms
-                        if self._lad_scr_stall_n > LADDER_SCR_STALL_MAX:
-                            self._rlog("屏幕对齐梯子卡住,回主线重选(不死磕)", LOG_RED, log='behavior')
-                            self._key_up(VK_LEFT)
-                            self._key_up(VK_RIGHT)
-                            self._reset_climb()
-                            self._decide_climb_fail_action()
-                            return False
-            # 三拍按完仍>5(没进直跳区)=对不上,放弃对位回主线打怪(用户2026-09-10晚:最多三次、不再校准)
-            if self._lad_scr_nudge_n >= LADDER_SCR_NUDGE_MAX_TRIES:
-                self._rlog("定长点动%d拍仍X差%.1f未进5px直跳区,放弃回主线打怪" % (LADDER_SCR_NUDGE_MAX_TRIES, asdx),
-                           LOG_RED, log='behavior')
-                self._key_up(VK_LEFT)
-                self._key_up(VK_RIGHT)
-                self._reset_climb()
-                self._decide_climb_fail_action()
-                return False
-            self._key_up(_opp_vk)
-            _this_hold, _this_gap, _this_step = self._scr_nudge_timing(self._lad_scr_nudge_n)  # 按住上限/松开停顿/单拍步长
-            self._lad_scr_key_hold = _this_hold            # 本拍按住时间上限(闭环里按满也抬)
-            self._lad_scr_nudge_gap = _this_gap            # 抬起后停顿
-            self._lad_scr_nudge_step = _this_step          # 本拍最多移动px(走到就抬)
-            self._lad_scr_nudge_from_x = spx               # 本拍起点X(算实际位移)
-            self._lad_scr_nudge_n += 1
-            self._key_down(_dir_vk)
-            self._lad_scr_key_vk = _dir_vk
-            self._lad_scr_key_t = now_ms
-            self._lad_scr_ref_spx = spx
-            # 用户2026-09-11:每一拍按下都打日志(不限频),写明"离梯多远、朝哪、按多久、走多少、抬后停多久、达标怎么收"
-            _debug_log("[梯对位·按下] 第%d拍 梯在%s 现X差%.1f 按住%d±%dms/本拍步长%dpx/抬后停%dms;一到≤5立即抬→下帧直跳,按满没动监管会报原因" % (
-                self._lad_scr_nudge_n, "右" if sdx > 0 else "左", asdx,
-                _this_hold, LADDER_SCR_NUDGE_JITTER, _this_step, _this_gap))
-            self._rlog_throttle('lad_scr', "屏幕定长点动(梯在%s,X差%.1f,第%d拍步长%dpx按住上限%dms停%dms)" % (
-                "右" if sdx > 0 else "左", asdx, self._lad_scr_nudge_n, _this_step, _this_hold, _this_gap), 400, log='behavior')
-        return False
+        # 段2.6(用户2026-09-15):X差≤60一律进【三步直跳集合】(走剩余70%→抬键停→连续对齐直跳→判Y,最多3轮,内置10px方向锁);
+        # 一进屏幕对位就已≤60=第一次直接三步直跳,不等跑跳。旧段3碎步三拍/段4≤5直跳已整条删除,新旧只留一套。
+        if VK_LEFT in self._random_move_keys:
+            self._key_up(VK_LEFT)
+        if VK_RIGHT in self._random_move_keys:
+            self._key_up(VK_RIGHT)
+        return self._ladder_enter_realign(py, now_ms, "首次进0-%d直接三步直跳" % LADDER_RUNJUMP_LO)
 
     # ==================== 爬梯登顶·绑定人物基点的三背景点（右上/右下/左下，随人移动不出屏，任一静即静） ====================
     def _pick_climb_boxes(self, ppos, fh, fw):
