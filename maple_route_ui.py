@@ -554,6 +554,10 @@ LADDER_SCR_STALL_MAX = 3       # 想动没动解卡上限,超过回主线重选�
 LADDER_SCR_RUNJUMP_IDEAL = 85    # 理想腾空点≈85(跑跳带70~100中部,用户2026-09-11 22:38:区间改70~100;判据asdx≤IDEAL+v,主线~110ms一拍v大、IDEAL+v可覆盖到上限100,延迟大/速度快自动多提前)
 LADDER_SCR_RUNJUMP_TRIG_HI = 100  # 跑跳带上限:X差>100还太远,继续大步助跑不跳(用户2026-09-11 22:38:90→100,真机目测100处带速起跳仍上得去,同时补偿主线~110ms决策延迟)
 LADDER_SCR_RUNJUMP_TRIG_LO = 70  # 跑跳带下限:X差<70已贴太近、水平速度不足,不硬跑跳,交按住趋近→碎步→直跳(用户2026-09-11 22:38:65→70)
+LADDER_TP_DX = 300          # 向梯水平瞬移阈值(用户2026-09-15):人梯屏幕X差>此值且配了瞬移键/X瞬移距离,先朝梯水平瞬移快速接近;850ms节流(复用战斗瞬移时间戳),闪不成/节流内落段1按住走绝不站等
+LADDER_PICK_X_HALF = 300  # 选梯X窗口:只在人物左右300px内选梯,超出不看(用户2026-09-15)
+LADDER_PICK_UP_DY = 100   # 上行梯Y窗口:梯中心在[人Y-100,人Y](头顶100内/平行)才算向上的梯
+LADDER_PICK_DOWN_DY = 100 # 下行梯Y窗口:梯中心在[人Y,人Y+100](脚底下100内)才算向下的梯
 LADDER_RUNJUMP_HI = 80         # 第一次上梯跑跳带上限(用户2026-09-14晚):屏幕人梯X差落入[60,80]、移动中跑跳
 LADDER_RUNJUMP_LO = 60         # 跑跳带下限;X差<=60不再跑跳,走直跳路径(按住趋近→三拍碎步对齐→<=5原地直跳);一进屏幕对位就已<=60=直接走直跳,不等跑跳
 LADDER_RUNJUMP_HORIZ_REL = 12    # 跑跳腾空后:人梯屏幕X差≤此值松开朝梯水平键、只留↑,防水平惯性把人冲过梯子抓空
@@ -11157,7 +11161,7 @@ class MinimapRouteRecorder:
 
     def _match_ladder_screen_x(self, frame, ppos, direction, monster_x):
         """上梯近距在主窗口定向ROI匹配梯子竖条，只返回最佳梯子中心屏幕X(不要Y)。
-        X:只朝目标怪那一侧扩LADDER_TPL_X_RANGE(怪在右只搜右/在左只搜左;无怪方位左右各150兜底);
+        X:只朝目标怪那一侧扩寻怪X范围far_range_x(怪在右只搜右/在左只搜左;无怪方位左右各far_range兜底,用户2026-09-15远接近不再限±150);
         Y:上行搜人物头顶(-150~-20)、下行搜脚下(+20~+150),防止一上一下两把相邻梯认错;
         同侧匹配到多把梯子时,选X最贴近目标怪X的那把(用户2026-09-09)。"""
         if frame is None or ppos is None:
@@ -11166,12 +11170,13 @@ class MinimapRouteRecorder:
             return None   # 既没录梯子模板、也没梯子YOLO模型=无可用来源
         fh, fw = frame.shape[:2]
         ppx, ppy = int(ppos[0]), int(ppos[1])
+        _frx = max(50, int(self._get_fight_config().get("far_range_x", COMBAT_FAR_RANGE) or COMBAT_FAR_RANGE))
         if monster_x is None:
-            rx1, rx2 = ppx - LADDER_TPL_X_RANGE, ppx + LADDER_TPL_X_RANGE
+            rx1, rx2 = ppx - _frx, ppx + _frx
         elif monster_x >= ppx:
-            rx1, rx2 = ppx, ppx + LADDER_TPL_X_RANGE          # 怪在右:只搜右侧
+            rx1, rx2 = ppx, ppx + _frx          # 怪在右:只搜右侧(宽度=寻怪X范围,远接近阶段也兜底得到,不再限±150)
         else:
-            rx1, rx2 = ppx - LADDER_TPL_X_RANGE, ppx           # 怪在左:只搜左侧
+            rx1, rx2 = ppx - _frx, ppx           # 怪在左:只搜左侧
         if direction is not None and direction < 0:
             ry1, ry2 = ppy + LADDER_TPL_Y_NEAR, ppy + LADDER_TPL_Y_FAR   # 下行:脚下
         else:
@@ -11393,14 +11398,15 @@ class MinimapRouteRecorder:
             return []   # 既没录梯子模板、也没梯子YOLO模型=无来源
         fh, fw = frame.shape[:2]
         ppx, ppy = int(ppos[0]), int(ppos[1])
+        _fc = self._get_fight_config()
+        # X统一用寻怪大框(用户2026-09-15拍板·简单方案):上梯精准态不再缩成±150小框——选梯/远接近时人梯X差可达数百px,
+        # 小框扫不到目标梯→_ladder_snap_x持续None→选梯后站住发呆;大框全程看得到梯,精准态只保留20ms高频、不再缩范围。
+        _rx = max(50, int(_fc.get("far_range_x", COMBAT_FAR_RANGE) or COMBAT_FAR_RANGE))
         if getattr(self, '_ladder_precise_mode', False):
-            # 上梯高频档(方案B):白框也只扫人物周围小ROI(±150),配合30Hz节流也很轻,且吸附合并跟检测同频不拖起跳
-            _rx = LADDER_TPL_X_RANGE
+            # 精准态Y只扫同层±150窄带(上下各150),避免把上下层相邻梯一起扫进来认错;非精准用寻怪Y范围
             _yu = LADDER_TPL_Y_FAR
             _yd = LADDER_TPL_Y_FAR
         else:
-            _fc = self._get_fight_config()
-            _rx = max(50, int(_fc.get("far_range_x", COMBAT_FAR_RANGE) or COMBAT_FAR_RANGE))
             _yu = getattr(self, '_far_range_y_up', FAR_RANGE_Y_UP_DEFAULT)
             _yd = getattr(self, '_far_range_y_down', FAR_RANGE_Y_DOWN_DEFAULT)
         x1 = max(0, ppx - _rx)
@@ -11433,28 +11439,6 @@ class MinimapRouteRecorder:
                     peaks.append((s, int(cx), int(cy)))
         peaks.sort(key=lambda p: p[1])
         return [(cx, cy, round(s, 3)) for s, cx, cy in peaks]
-
-    def _pick_ladder_by_triangle(self, mon_x, mon_y, white_marks, psx, psy, cdir):
-        """三点折线选梯【方向严格为 怪→梯→人,用户2026-09-11定稿】:折线由【怪发出、到人结束】——
-        怪→梯段决定这把梯连不连怪那层(离怪X近=怪台入口),梯→人段决定人还要走多远;
-        总程 cost=|怪X-梯X|+|梯X-人X| 最小=人经这把梯到怪的X总程最短(红线短/蓝线绕远被淘汰)。只用屏幕X:
-        去同一层各梯爬梯高度近似相同,不掺Y。先按上下方向滤(上行不选脚下梯/下行不选头顶梯);
-        tie-break排序:①梯X落在人怪之间(总程恒=人怪间距=最顺路)→②总程cost小→③怪→梯更近(先连对怪层)→④梯→人更近。
-        返回[(cost,wx,wy,between,怪到梯m2l,梯到人l2p),...]已排序;无候选[]。纯函数无副作用,便于离线测。"""
-        out = []
-        _lo, _hi = (mon_x, psx) if mon_x < psx else (psx, mon_x)
-        for _wx, _wy in white_marks:
-            if cdir > 0 and _wy > psy + 40:
-                continue   # 上行却在人物脚下=另一把下行梯,排除
-            if cdir < 0 and _wy < psy - 40:
-                continue   # 下行却在人物头顶=另一把上行梯,排除
-            _m2l = abs(_wx - mon_x)   # 怪→梯(由怪发出)
-            _l2p = abs(_wx - psx)     # 梯→人(到人结束)
-            _cost = _m2l + _l2p
-            _between = 1 if (_lo - 2 <= _wx <= _hi + 2) else 0
-            out.append((_cost, int(_wx), int(_wy), _between, _m2l, _l2p))
-        out.sort(key=lambda c: (-c[3], c[0], c[4], c[5]))   # 人怪之间→总程→怪到梯→梯到人
-        return out
 
     def _scr_nudge_timing(self, n):
         """碎步第n拍(0基)的(按住时长ms, 松开后停顿ms, 单拍步长px),上行段3/下行方式二段C共用。
@@ -11504,6 +11488,24 @@ class MinimapRouteRecorder:
             self._key_up(_ak)                  # 一拍按满抬起,留GAP检测到没到再续下一拍
             self._lad_scr_key_vk = None
             _ak = None
+        # 段0(用户2026-09-15):人梯X差>300且配了水平瞬移键/X距离→先朝梯瞬移快速接近。850ms节流复用战斗瞬移时间戳
+        # (上梯时战斗瞬移本就不触发,共用一个节流还能防战斗/上梯切换瞬间连闪);瞬移那拍先按住朝梯方向,闪不成(没蓝/被挡)
+        # 或处于节流内的帧自然往下落段1按住走,绝不站着等;打怪区刚从该侧拉回的冷却内不朝这侧瞬移(防闪回竖线死循环)。
+        _tcfg = self._get_fight_config()
+        _tp_key0 = _tcfg.get("teleport_key", "")
+        _tp_x0 = int(_tcfg.get("teleport_distance", 0) or 0)
+        _tp_dir0 = 'right' if sdx > 0 else 'left'
+        _tp_bound0 = (_tp_dir0 == getattr(self, '_bound_last_side', None)
+                      and now_ms < getattr(self, '_bound_tp_block_until', 0))
+        if (asdx > LADDER_TP_DX and bool(_tp_key0) and _tp_x0 > 0
+                and now_ms - self._combat_last_h_teleport > 850 and not _tp_bound0):
+            self._hold_toward_ladder(sdx)              # 先按住朝梯方向(瞬移不成也在持续走,不发呆)
+            self._pre_teleport_release()               # 松攻击+50ms前摇(攻击硬直会吞瞬移),方向键保持
+            self._press_game_key(_tp_key0, duration=60)
+            self._combat_last_h_teleport = now_ms
+            self._char_relocate_until = now_ms + 700   # 瞬移合法大跳变:人物识别700ms全图重捕
+            self._rlog_throttle('lad_tp', "向梯瞬移(X差%.0f>%d朝%s)" % (asdx, LADDER_TP_DX, _tp_dir0), 800, log='behavior')
+            return False
         # 段1:X差>100 按住朝梯大步助跑(不磨叽;下行方式二另用LADDER_SCR_NUDGE=35,互不影响)
         if asdx > LADDER_SCR_FAST_PX:
             if _ak is not None:
@@ -19382,12 +19384,21 @@ class MinimapRouteRecorder:
                             _psx, _psy = self._player_screen_pos
                             _cdir = int(getattr(self, '_climb_direction', 1) or 1)
                             _tmonx = getattr(self, '_ladder_target_mon_x', None)  # 进梯时冻结的目标怪屏幕X(固定终点,不是锁梯)
-                            # 有固定终点怪X:键=(|梯X-怪X|, |梯Y-人Y|)——怪不动、梯是世界固定物,谁离怪近的次序不随人物走动变,天然不横跳;
-                            # 无冻结怪X(选台/掉台):退回(|梯Y-人Y|, |梯X-人X|)=先同高度、再在边上。每帧直接min,不带上帧结果。
-                            if _tmonx is not None:
-                                _cand_all = [(abs(_wx - _tmonx), abs(_wy - _psy), _wx, _wy) for (_wx, _wy) in _white_marks]
+                            # 以人物为中心选梯(用户2026-09-15定稿·固定窗口,旧三点折线/容差/兜底全删):
+                            # X窗口=人物左右±300内才看;上下由怪Y定——上行梯Y∈[人Y-100,人Y](头顶/平行)、下行梯Y∈[人Y,人Y+100](脚下100内);
+                            # 左右由怪X定——窗口内多把选X最靠怪的(怪在哪边选哪边),X并列再Y离人最近;无冻结怪(选台/掉台)才Y靠人、X靠人。窗口空=本帧无梯。
+                            if _cdir > 0:
+                                _half = [(_wx, _wy) for (_wx, _wy) in _white_marks
+                                         if abs(_wx - _psx) <= LADDER_PICK_X_HALF
+                                         and (_psy - LADDER_PICK_UP_DY) <= _wy <= _psy]
                             else:
-                                _cand_all = [(abs(_wy - _psy), abs(_wx - _psx), _wx, _wy) for (_wx, _wy) in _white_marks]
+                                _half = [(_wx, _wy) for (_wx, _wy) in _white_marks
+                                         if abs(_wx - _psx) <= LADDER_PICK_X_HALF
+                                         and _psy <= _wy <= (_psy + LADDER_PICK_DOWN_DY)]
+                            if _tmonx is not None:
+                                _cand_all = [(abs(_wx - _tmonx), abs(_wy - _psy), _wx, _wy) for (_wx, _wy) in _half]
+                            else:
+                                _cand_all = [(abs(_wy - _psy), abs(_wx - _psx), _wx, _wy) for (_wx, _wy) in _half]
                             _snap = bool(_cand_all)
                             _rx = None
                             if _snap:
