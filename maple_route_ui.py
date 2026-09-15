@@ -16750,7 +16750,7 @@ class MinimapRouteRecorder:
 
     def _person_loop(self):
         """人物识别线程(多线程重构·用户定稿·三地基线程之一):自己【不截图】,只从截图线程帧槽取最新一帧,
-        按角色fps节拍(上梯高帧每帧)跑人物多锚点匹配,原子发布_raw_char_pos+人物世界快照。
+        每个新帧都跑人物多锚点匹配(一帧一更新、不做fps节流),原子发布_raw_char_pos+人物世界快照。
         人物识别不再被截图/怪物YOLO拖住、最跟手。按seq只处理新帧,没新帧轻睡10ms,全程try自保护绝不崩。"""
         _last_seq = -1
         _dt_char = 0.0
@@ -16767,27 +16767,20 @@ class MinimapRouteRecorder:
                 _fh, _fw = _frame.shape[:2]
                 _band_y1 = DETECT_TOP_MARGIN
                 _band_y2 = max(_band_y1 + 1, _fh - DETECT_BOTTOM_MARGIN)
-                # 上梯对位高帧豁免fps节流(必须跟手);否则按面板角色fps节流,未到节拍沿用上一人物点
-                _in_precise = bool(getattr(self, '_ladder_precise_mode', False)) \
-                    and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+                # 人物每帧一更新(用户2026-09-15定稿):每个新截图帧都重匹配并立刻发布,不再按角色fps节流沿用旧点;
+                # 找不到才由_get_player_screen_pos内部停最后点(局部窗快跟→全图限频找回),坐标永远跟手、跳落即回地面值
+                _tc0 = time.time()
+                _ch = self._get_player_screen_pos(_frame)   # 局部窗快跟,丢失才全图(全图仍限频research)
+                _dt_char += time.time() - _tc0
+                # 人物点落在顶部标题栏/底部UI带=误匹配(人物不可能站UI上),作废
+                if _ch is not None and not (_band_y1 <= _ch[1] <= _band_y2):
+                    _ch = None
+                self._raw_char_pos = _ch                 # 原子发布:动作线程直接读最新人物点
+                self._char_feature_matches = getattr(self, '_char_feature_matches', [])
                 try:
-                    _role_fps = int((self._role_rec or {}).get("params", {}).get("fps", 24) or 24)
-                except Exception:
-                    _role_fps = 24
-                if _in_precise or time.time() - getattr(self, '_role_last_track_t', 0) >= 1.0 / max(1, _role_fps):
-                    _tc0 = time.time()
-                    _ch = self._get_player_screen_pos(_frame)   # 到节拍才匹配(局部很轻,丢失才全图)
-                    _dt_char += time.time() - _tc0
-                    self._role_last_track_t = time.time()
-                    # 人物点落在顶部标题栏/底部UI带=误匹配(人物不可能站UI上),作废
-                    if _ch is not None and not (_band_y1 <= _ch[1] <= _band_y2):
-                        _ch = None
-                    self._raw_char_pos = _ch                 # 原子发布:动作线程直接读最新人物点
-                    self._char_feature_matches = getattr(self, '_char_feature_matches', [])
-                    try:
-                        self._snap_store.update_parts(player_screen=_ch, player_t=time.time())
-                    except Exception as _se:
-                        _debug_log("[人物] 快照发布异常:%s" % _se)
+                    self._snap_store.update_parts(player_screen=_ch, player_t=time.time())
+                except Exception as _se:
+                    _debug_log("[人物] 快照发布异常:%s" % _se)
                 # 停止态(没在运行打怪)低频扫梯子白框供蒙板常开显示;运行态由识别B线程扫,门控互斥、不同时写缓存(用户2026-09-15)
                 if not self._monster_running and self._raw_char_pos is not None:
                     _lm_now = time.time()
