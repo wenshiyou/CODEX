@@ -107,7 +107,6 @@ import win32gui  # Windows GUI API，用于设置窗口置顶和透明
 import win32con  # Windows常量定义
 import win32api  # Windows API，用于RGB颜色转换
 import combat_logic  # 打怪决策核心(纯逻辑)；顶层静态导入保证PyInstaller打进exe，供[新决策]影子日志使用
-from core.action_arbiter import ActionMode, ActionArbiter, RangeGate  # 架构第1块:动作权仲裁/范围迟滞(顶层静态导入,PyInstaller打包)
 from core.world_snapshot import WorldSnapshot, SnapshotStore
 
 # === 必须在创建任何窗口之前设置 DPI 感知，否则高DPI缩放下蒙板坐标错位 ===
@@ -483,7 +482,6 @@ WD_IDLE_AUDIT_MS = 500    # 无移动意图时的按键残留/抢键仲裁巡检
 WD_SEG_MIN_HITS = 2       # 一个判定段内至少几次采样到"真实运动"(三块背景同动 或 光点同向位移)才算在动,否则段末判卡住
 WD_LOG_DEDUP_MS = 1500    # 监管同类日志去重间隔,避免刷屏
 WD_STALL_RECOVER_MAX = 2  # 监管兜底:水平移动连续2个1秒窗口(约2秒,用户2026-09-10"任何卡死不超2秒")判没动→放弃本次跨层回主线重选;第1窗口清键重处理、第2窗口仍不动就放弃,不再拖到3秒
-WD_ARBITER_HOLD_MS = 350  # 冲突仲裁后方向滞回保持时长:这段时间持续压制输掉的一方按键,防下一帧又被按下导致来回翻烧饼(对标主流bot方向滞回)
 # === 第二层监管·原地左右横跳探测(用户2026-09-11:两个脑子/锁怪在左右怪间横跳→方向快速来回、人原地不动,要拉回正轨) ===
 AJ_WIN_MS = 1500           # 横跳观察窗:最近1.5s
 AJ_FLIP_MIN = 4            # 窗内左右换向≥4次(来回≥2个回合)才算横跳
@@ -1436,7 +1434,6 @@ class MinimapRouteRecorder:
         # 独立后台线程,只监测不发键;v1观察版只打行为日志(异常红字),不挂起主线、不执行修复。
         self._wd_lock = threading.RLock()  # 监管状态锁:用可重入RLock(同线程嵌套acquire不自死锁,跨线程仍互斥);监管线程判停滞/主线按键对账都要抢它,曾因锁内嵌套with导致整UI未响应
         self._mv_intent = {}               # 当前移动意图 {'x':intent,'y':intent},水平/垂直独立记账可同时存在;intent=dict{dir,src,seg_t,seg_x,seg_y,reported...}
-        self._motion_owner = None          # 动作权 'main'/'aux:edge'/'aux:fall'/'aux:unblock'/None(v1只记录交接,不强制)
         self._wd_thread = None             # 监管线程句柄
         self._wd_running = False           # 监管线程运行标志
         self._wd_log_last = {}             # 同类监管日志去重 {key:t}
@@ -1445,9 +1442,6 @@ class MinimapRouteRecorder:
         self._wd_stall_req = None        # 监管线程→主线的"水平停滞重处理"请求{axis,dir,t,win};主线每帧consume,跨线程只经_wd_lock传递(线程本身绝不发键)
         self._wd_recover_cnt = 0         # 同一移动段连续停滞重处理次数(真动了清零);累计到WD_STALL_RECOVER_MAX放弃本次跨层回主线
         self._wd_recover_seg = None      # 上轮重处理对应的意图段标识(方向);换向/重新规划自动清零计数
-        self._wd_conflict_req = None     # 监管线程→主线的"两套方向键打架"仲裁请求{战斗L/R,巡路L/R,t};线程只置位、松键由主线执行
-        self._wd_arbiter_loser = None    # 最近一次冲突仲裁输掉的一方'combat'/'route';hold期内持续松它的水平键
-        self._wd_arbiter_until = 0       # 仲裁滞回截止时间戳(ms),此前维持裁决不翻烧饼
         # === 监管线掌控的跨线程硬重置(用户2026-09-10)：监管线程独立轮询实时发现卡死,不等主线串行跑完(慢几拍) ===
         self._hard_reset_req = None     # 监管线程→主线帧首的硬重置令{reason,t}(经_wd_lock传递)；监管实时发令、主线帧首统一清零
         self._hard_reset_last_t = 0.0   # 监管侧上次发令时间(ms)，GLOBAL_RESET_COOLDOWN_MS冷却内不重复发，防连环重置刷屏
@@ -1487,7 +1481,6 @@ class MinimapRouteRecorder:
         self._combat_timed_keys = []       # 定时释放的按键 [(vk, release_ms)]（仅用于短按转身）
         self._combat_last_target_pos = None  # 上一次攻击目标位置(x,y)，用于近战挡身体时搜血条
         self._combat_held_keys = set()     # 持续按住的方向键（流畅移动用）
-        self._move_owner = 'none'          # 单一移动权(FSM外壳,用户2026-09-10):'route'跨层爬梯/'combat'平地战斗/'none'无任务,帧末_converge_movement据此收敛
         self._combat_move_dir = None       # 当前持续移动方向 "left"/"right"/None
         self._combat_locked_target = None  # 锁定的目标 (cx, cy)，打死才换，不中途切换
         self._combat_lock_tier = None      # 锁定类别 in=技能范围内/out=同层范围外/cross=跨层(两类锁怪维持依据,每帧由决策回存)
@@ -1662,13 +1655,8 @@ class MinimapRouteRecorder:
         self._raw_monsters = []             # 后台线程算出的原始合并怪列表 [(x1,y1,x2,y2,score)]
         self._raw_hp_bars = []              # 后台线程算出的血条 [(x,y,w,h)]
         self._raw_char_pos = None           # 后台线程算出的人物脚位置
-        # 架构第1块·影子地基:世界快照仓(识别线程唯一出口)+动作权仲裁器+范围迟滞门。
-        # 影子阶段只发布快照、只比对仲裁结果,不接发键回调、不夺权,现有行为完全不变。
+        # 世界快照仓(识别线程唯一出口)。动作权仲裁器/范围迟滞门已按用户2026-09-15整套删除:打怪/巡路一条线直连,不再有第三方劝架。
         self._snap_store = SnapshotStore()
-        self._arbiter = ActionArbiter(on_leave=None, on_enter=None)  # 真正收键时再注入松键回调
-        self._range_gate = RangeGate(enter_keep=50, exit_back=25)    # 用户定:走到R-50开打、退到R+25回巡路
-        self._shadow_arb_log_t = 0.0        # 影子仲裁比对日志节流
-        self._arbiter_live = True           # 架构B总开关:True=仲裁器实控平地打怪开打/停打;False=完全回老stop_range逻辑(F3一键切)
         self._raw_cached_feature_monsters = []  # 后台线程算出的怪物特征匹配结果
         self._detect_sct = None             # 后台线程自己的 mss 实例（不共用主线程的 self.sct）
         self._detect_last_monsters = None   # 后台线程最近一次非空怪列表（2秒宽限用）
@@ -8134,15 +8122,6 @@ class MinimapRouteRecorder:
             self._key_state[vk] = pressed
 
     def _handle_hotkey(self, vk):
-        if vk == VK_F3:
-            # 架构B:仲裁器实控↔老逻辑一键切换(实控=RangeGate按R-50进/R+25出迟滞接管平地开打;关=完全回stop_range单阈值老逻辑)
-            self._arbiter_live = not getattr(self, '_arbiter_live', True)
-            self._range_gate.reset()   # 切换瞬间清迟滞状态,不沿用上一套判定
-            _msg = "动作权仲裁→实控(新)" if self._arbiter_live else "动作权仲裁→老逻辑(退回)"
-            print("[F3]", _msg)
-            self._add_log(_msg)
-            _debug_log("[F3] _arbiter_live=%s" % self._arbiter_live)
-            return
         if vk == VK_F4:
             # F4=调试显示总开关:开=画全部框/线(锚点橙框/白搜索框/黄怪物框/蓝技能框/怪物点等);关=蒙板等同干净原画面。
             # 蒙板只负责显示、不参与识别,关掉不影响任何打怪逻辑。旧连拍采集已改由"人物特征"按钮的角色识别管理窗承担(方法保留备用)。
@@ -15760,49 +15739,6 @@ class MinimapRouteRecorder:
             except Exception:
                 pass
 
-    def _converge_movement(self):
-        """单一移动权·帧末确定性收敛(架构收编第一步,用户2026-09-10"换架构、责任分清、消灭两个脑子")。
-        不管各状态分支这一帧里怎么按方向键,帧末按【唯一owner】把物理方向键收敛成一致状态:
-          · owner=route:正在跨层/爬梯/上下(_climb_state!=none 或 _combat_transit),移动权归巡路套,战斗套方向键全松;
-          · owner=combat:平地战斗/追击,移动权归战斗套,巡路套残留方向键全松;
-          · owner=none:无任务,两套方向键全松(站着等刷怪)。
-        同侧(左/右、上/下)若被同时按住=必相抵,两个都松、下帧由唯一owner重按。只收敛四个方向键,不碰攻击/跳/技能。
-        幂等:无冲突不发键事件。这是FSM外壳的控制权字段(_move_owner),后续状态分支里散落的手动松键逐步收编到这一处。"""
-        try:
-            cs = getattr(self, '_climb_state', 'none')
-            if cs != 'none' or getattr(self, '_combat_transit', False):
-                owner = 'route'
-            elif getattr(self, '_combat_active', False) or self._combat_locked_target is not None \
-                    or getattr(self, '_bound_pull', None) is not None:
-                # 打怪区域左右拉回中(_bound_pull在手)也归combat:即使此刻没锁怪,也要保住_set_combat_move按的朝内键,
-                # 否则owner=none会在帧末把朝内键松掉=想拉却拉不动(旧边缘碎步病根之一)
-                owner = 'combat'
-            else:
-                owner = 'none'
-            if owner == 'route':
-                if self._combat_held_keys:
-                    self._release_combat_move()
-                if VK_LEFT in self._random_move_keys and VK_RIGHT in self._random_move_keys:
-                    self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
-                if VK_UP in self._random_move_keys and VK_DOWN in self._random_move_keys:
-                    self._key_up(VK_UP); self._key_up(VK_DOWN)
-            elif owner == 'combat':
-                for _vk in (VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN):
-                    if _vk in self._random_move_keys:
-                        self._key_up(_vk)
-                if VK_LEFT in self._combat_held_keys and VK_RIGHT in self._combat_held_keys:
-                    self._release_combat_key(VK_LEFT); self._release_combat_key(VK_RIGHT)
-                    self._combat_move_dir = None
-            else:
-                if self._combat_held_keys:
-                    self._release_combat_move()
-                for _vk in (VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN):
-                    if _vk in self._random_move_keys:
-                        self._key_up(_vk)
-            self._move_owner = owner
-        except Exception as e:
-            _debug_log("[移动收敛]异常:%s" % e)
-
     def _lock_target_ladder_for_cross(self, mpx, mpy, sx, sy):
         """跨层选梯那一下【怪→梯→人·用户2026-09-11定稿】:用当前屏幕怪(sx,sy)换算小地图,以怪层Y、怪X为【起点】
         选出连着怪层的正确梯并锁整把梯(_find_nearest_ladder内部锁);锁后引路只认这把梯、不再依赖这只怪
@@ -15824,35 +15760,6 @@ class MinimapRouteRecorder:
         if getattr(self, '_locked_ladder', None) is not None:
             _debug_log("[锁定梯] 解绑(原因=%s)" % (why or '?'))
         self._locked_ladder = None
-
-    def _abort_transit_for_nearby(self):
-        """【平地去梯途中近身刷怪·严格三步走(用户2026-09-11,顺序不可乱)】
-        ①解绑固定锚点 → ②取消去梯子/走台子动作(清transit+爬梯状态机+路径) → ③松全部键、清旧跨层锁、立刻重扫,
-        本帧到此return,下一帧主线从识别重新开始,自然锁定技能范围内的近身怪打。只在平地(_climb_state=none未起跳)调用:
-        起跳抓梯后走_climb_state硬冻分支,不会进来(爬一半不被近身怪拉下来)。"""
-        # ①解绑锚点
-        self._clear_locked_ladder('平地去梯途中技能范围内出怪,先打近身')
-        # ②取消跨层动作
-        self._combat_transit = False
-        self._transit_target = None
-        self._transit_walk_path = None
-        self._transit_via = 'ladder'
-        try:
-            self._reset_climb()
-        except Exception as e:
-            _debug_log("[跨层锚点] 三步走_reset_climb异常:%s" % e)
-        # ③松键+清旧跨层锁+立刻重扫,下帧主线重锁近身怪
-        self._release_combat_move()
-        try:
-            self._release_all_keys()
-        except Exception:
-            pass
-        self._combat_locked_target = None
-        self._combat_last_target_pos = None
-        self._combat_target_alive = False
-        self._yolo_last_t = 0.0
-        self._bars_last_t = 0.0
-        self._rlog("去梯途中近身刷怪:解绑跨层坐标+取消上梯,回主线先打身边怪", log='behavior')
 
     def _is_lock_frozen(self):
         """锁怪冻结硬信号(用户2026-09-09定稿)：以"我们自己的抓梯/垂直动作阶段"为唯一判据,不靠画面Y/X(镜头会滚、对齐会抖)。
@@ -15962,15 +15869,6 @@ class MinimapRouteRecorder:
             self._wd_register_intent('y', -1, src)
         else:
             self._wd_clear_intent('y')
-
-    def _wd_set_owner(self, owner):
-        """动作权交接登记（v1只记录+日志；v2用于仲裁：任一时刻只允许一个执行线持有动作权）。"""
-        with self._wd_lock:
-            old = self._motion_owner
-            if old == owner:
-                return
-            self._motion_owner = owner
-        _debug_log("[监管线] 动作权交接: %s → %s" % (old, owner))
 
     def _wd_log(self, key, msg, color=(0, 0, 255)):
         """监管日志：行为日志栏显示+写debug，同类按WD_LOG_DEDUP_MS去重防刷屏；异常默认红字。"""
@@ -16125,50 +16023,6 @@ class MinimapRouteRecorder:
         self._wd_log('wd_antijitter',
                      "原地左右横跳:%.1fs内换向%d次、光点净位移仅%.1f<%d,请求拉回正轨" % (
                          AJ_WIN_MS / 1000.0, n, net, AJ_NET_MAP_DX), color=(0, 0, 255))
-
-    def _wd_consume_conflict(self, now):
-        """主线每帧消费"两套方向键打架"请求并即时仲裁(用户2026-09-09:两方拉扯时随便偏向一方都算赢,
-        先打怪还是先上梯不重要,绝不能两套相抵呆在原地)。裁决规则固定、无歧义:
-        ·正在跨层(_combat_transit:上梯/走台/下行)→移动权归巡路,松战斗套左右键;
-        ·正常打怪(无跨层)→移动权归战斗,松巡路套左右键。
-        仲裁后WD_ARBITER_HOLD_MS内持续压制输家(方向滞回,防下一帧又被按下、来回翻烧饼)。只松水平键不return,本帧赢家继续动作。"""
-        # 1) 滞回保持期:持续松开上轮输家的水平键
-        _loser = getattr(self, '_wd_arbiter_loser', None)
-        if _loser is not None:
-            if now < getattr(self, '_wd_arbiter_until', 0):
-                try:
-                    if _loser == 'combat':
-                        self._release_combat_key(VK_LEFT)
-                        self._release_combat_key(VK_RIGHT)
-                    else:
-                        self._key_up(VK_LEFT)
-                        self._key_up(VK_RIGHT)
-                except Exception as e:
-                    _debug_log("[监管线] 滞回压制异常:%s" % e)
-            else:
-                self._wd_arbiter_loser = None
-        # 2) 取本轮新冲突请求并裁决
-        with self._wd_lock:
-            req = self._wd_conflict_req
-            self._wd_conflict_req = None
-        if not req:
-            return False
-        if getattr(self, '_combat_transit', False):
-            # 跨层优先:保巡路移动,松战斗套
-            self._release_combat_key(VK_LEFT)
-            self._release_combat_key(VK_RIGHT)
-            self._wd_arbiter_loser = 'combat'
-            self._wd_log('wd_arbitrate',
-                         "冲突仲裁:跨层上梯/走台中→移动权归巡路,松战斗左右键(先上梯,不停留)", color=(0, 150, 255))
-        else:
-            # 非跨层:保战斗移动,松巡路套
-            self._key_up(VK_LEFT)
-            self._key_up(VK_RIGHT)
-            self._wd_arbiter_loser = 'route'
-            self._wd_log('wd_arbitrate',
-                         "冲突仲裁:正常打怪中→移动权归战斗,松巡路左右键(先打怪,不停留)", color=(0, 150, 255))
-        self._wd_arbiter_until = now + WD_ARBITER_HOLD_MS
-        return True
 
     def _global_stall_watchdog(self, now):
         """全局2秒总兜底(用户2026-09-10:任何卡住/不动/异常都不许存在超过2秒,到点全部清零重新开始)。主线内每帧调,不另起线程。
@@ -16343,9 +16197,6 @@ class MinimapRouteRecorder:
             with self._wd_lock:
                 self._mv_intent.clear()
                 self._wd_stall_req = None
-                self._wd_conflict_req = None
-                self._wd_arbiter_loser = None
-                self._wd_arbiter_until = 0
             self._wd_recover_cnt = 0
             self._wd_recover_seg = None
             # 战斗瞬移生效校验状态一并清零,避免重置后被旧的待校验/失败禁用误伤
@@ -17433,42 +17284,6 @@ class MinimapRouteRecorder:
             "走台子" if self._transit_via == 'walk' else "走梯子", target_mid[0], target_mid[1]))
         return True
 
-    def _shadow_combat_decision(self):
-        """【Phase A 影子日志】用新决策核心(combat_logic)算一遍当前该怎么做，打印出来，
-        但绝不改变bot实际行为。目的：真机跑一次，核对"新决策"是否与实际一致；
-        一致才进入Phase B真正切换。任何异常只记录，不影响主流程。"""
-        try:
-            import combat_logic as _cl
-            pos = self._player_screen_pos
-            if not pos:
-                return
-            px, py = pos
-            py = self._char_ground_y if getattr(self, '_char_ground_y', None) is not None else py  # 影子决策也用跳前点基线Y,和执行层同一把尺(用户2026-09-11)
-            fight_cfg = self._get_fight_config()
-            skill_range = int(fight_cfg.get("atk1_distance", 150) or 150)
-            _sy_up = abs(int(fight_cfg.get("attack_y_up", -ATTACK_Y_UP)))
-            _sy_dn = abs(int(fight_cfg.get("attack_y_down", ATTACK_Y_DOWN)))
-            _s_farx = max(50, int(fight_cfg.get("far_range_x", COMBAT_FAR_RANGE) or COMBAT_FAR_RANGE))
-            self._far_range_y_up = max(10, int(fight_cfg.get("far_range_y_up", FAR_RANGE_Y_UP_DEFAULT) or FAR_RANGE_Y_UP_DEFAULT))
-            self._far_range_y_down = max(10, int(fight_cfg.get("far_range_y_down", FAR_RANGE_Y_DOWN_DEFAULT) or FAR_RANGE_Y_DOWN_DEFAULT))
-            lock = self._combat_locked_target
-            lcx, lcy = (lock if lock else (None, None))
-            d = _cl.select_combat_target(
-                px, py, self._monsters, self._selected_platforms, skill_range,
-                _s_farx, lcx, lcy, self._combat_target_alive,
-                self._is_monster_on_platform, self._get_monster_platform,
-                self._probe_side, self._probe_switched,
-                getattr(self, '_shadow_cross_target', None), _sy_up, _sy_dn, True,
-                same_platform_fn=self._same_recorded_platform)
-            # 跨层目标稳定：选了就维持，避免左右摇摆
-            self._shadow_cross_target = d['target'] if d['state'] == 'cross' else None
-            _debug_log("[新决策] state=%s 目标=%s 方向=%s 距离=%s 实际锁定=%s 活着=%s" % (
-                d['state'], d['target'], d['direction'], d['dist'],
-                self._combat_locked_target, self._combat_target_alive))
-        except Exception as e:
-            print("[新决策] 影子日志异常:", e)
-            _debug_log("[新决策] 影子日志异常: " + str(e))
-
     def _filter_static_monsters(self, monsters):
         """锁怪前识别环节：同一位置被连续识别N次仍不动=识别错(建筑/背景误检)→临时排除。用户2026-09-05规则。
         不固定等1秒：每秒多次识别；若这多次都在同一位置(中心移动≤STATIC_MOVE_TOL)，投票+1；
@@ -18121,9 +17936,6 @@ class MinimapRouteRecorder:
                     _rem.append((_vk, _rel))
             self._combat_timed_keys = _rem
 
-        # 测试期冲突处理(用户2026-09-10):两套方向键互搏冲突统一由监管线程_wd_audit_keys一旦发现即硬重置(即时停手+
-        # 帧首_consume_hard_reset清零),不再走"选一方继续"的软仲裁_wd_consume_conflict(函数保留,正式版要恢复软仲裁再启用):
-        # self._wd_consume_conflict(now)
         # 单向走不动(地形挡)不在此处理,靠录制绿线6px跑跳+卡住跳脱困;硬重置只认左右互搏冲突。
         # 注:旧"主线每帧消费水平停滞→续跑/放弃"已撤,统一在主循环帧首 _consume_hard_reset 跨线程清零,不在combat_tick中途串行处理。
 
@@ -18231,7 +18043,6 @@ class MinimapRouteRecorder:
             # 跨层行进中：感知不到怪也继续走向目标平台（_move_to自动跳/瞬移/爬梯）
             if self._combat_transit:
                 self._transit_step()
-            self._shadow_combat_decision()   # Phase A影子日志：无怪时看新决策(idle/cross)
             self._release_combat_move()
             return
 
@@ -18242,7 +18053,6 @@ class MinimapRouteRecorder:
         # 被误判成起跳→基线冻结在旧低处、且要求Y回落才解锁,上台阶后永远解不开(实测实时脚528/基线卡620差92),
         # 导致几乎同高的怪被算成"上方99"一直误判跳高打。回退实时Y,与X用同一套坐标,简单不卡死。
         py_layer = py
-        self._shadow_combat_decision()   # Phase A影子日志：有怪时看新决策(pursue/cast/switch)
 
         # 首次发现目标：反应延迟
         if not self._combat_had_target:
@@ -18448,7 +18258,6 @@ class MinimapRouteRecorder:
             _oldlk = self._combat_locked_target
             _is_new_target = (_oldlk is None) or (abs(_oldlk[0]-t_cx) > 40 or abs(_oldlk[1]-t_cy) > 50)
             if _is_new_target:
-                self._range_gate.reset()   # 架构B:每锁一只新怪,迟滞门从"未开打"重新走(走近到R-50才站定)
                 # 改打身边能直打的怪(cast)=不再去上层,清掉可能残留的锁定梯,防下帧又被拉回cross拉扯(用户2026-09-11)
                 if _dl['state'] == 'cast' and getattr(self, '_locked_ladder', None) is not None:
                     self._clear_locked_ladder('改打技能范围内近身怪')
@@ -18595,14 +18404,8 @@ class MinimapRouteRecorder:
         # 面向判断：怪在右按右键，怪在左按左键。
         # 【用户2026-09-08】追怪(范围外)时不转身，一直按住方向键连续走；进入攻击范围后才松方向键→决定要不要转向→攻击
         needed_facing = 1 if t_cx > px else -1
-        if getattr(self, '_arbiter_live', False):
-            # 架构B·实控:平地"站定开打/走近"统一由迟滞门+动作权仲裁器定(R-50进/R+25出,用户2026-09-12)。
-            # y_ok先传True=只管X距离迟滞;Y够不够得到仍由下方主攻Y带/跳高打分支把,不在这里拦。
-            _in_fight = self._range_gate.update(t_dist, True, skill_range)
-            _o_arb, _ = self._arbiter.update(has_target=True, in_range=_in_fight)
-            in_attack_range = (_o_arb == ActionMode.FIGHT)
-        else:
-            in_attack_range = t_dist <= stop_range
+        # 一条线直连(用户2026-09-15:删动作权仲裁器/迟滞门):距离进停步线就站定开打,不经过第三方劝架
+        in_attack_range = t_dist <= stop_range
         # 【用户2026-09-10·治碎步过冲】进停步线后脸朝错,只发40ms极短方向点掰脸(不位移/不sleep/不return当帧继续站定出手,主攻前还会再点一次双保险);
         # |X差|≤15死区(怪几乎正对不掰,治几px抖动让朝向左右翻)+同目标300ms迟滞(不重复点)。
         # 旧"松键+sleep50+按住新方向120~150ms+return"会真位移跨过怪→下帧怪到另一侧再反向按=原地左右抖,已删。
@@ -18674,7 +18477,7 @@ class MinimapRouteRecorder:
                 self._combat_last_move = now
                 return
             # ②水平不用闪(没配X/X已不够远/被禁用)时,配了Y且|Y差|≥Y阈值→纯竖直瞬移(松开水平不夹方向,不管X);
-            #   上/下键帧末由_converge_movement(combat态)自动抬起不卡住
+            #   上/下方向键定时120ms自动抬起(谁按谁松,不依赖已删除的帧末仲裁收敛,防↑/↓卡住)
             # 打怪区域·Y边界:向下瞬移时人在下限平台不闪、向上瞬移时人在上限平台不闪(用户2026-09-11:上线平台禁止再向上,补拦向上)
             if _tp_ready and _tp_y > 0 and abs(_dyv) >= _tp_y \
                     and not ((_dyv > 0 and self._bound_block_down()) or (_dyv < 0 and self._bound_block_up())):
@@ -18685,6 +18488,8 @@ class MinimapRouteRecorder:
                 _vvk = VK_DOWN if _dyv > 0 else VK_UP
                 if _vvk not in self._random_move_keys:
                     self._key_down(_vvk)
+                self._combat_timed_keys = [t for t in self._combat_timed_keys if t[0] != _vvk]
+                self._combat_timed_keys.append((_vvk, now + 120))
                 self._pre_teleport_release()   # 瞬移前先松攻击键+前摇(攻击硬直会吞瞬移),竖直方向键保持
                 self._press_game_key(_tp_key, duration=60)
                 self._combat_last_h_teleport = now
@@ -19358,36 +19163,6 @@ class MinimapRouteRecorder:
                 import traceback; _debug_log("[战斗] 异常: " + str(e) + "\n" + traceback.format_exc())
             self._seg_loop['6combat'] = self._seg_loop.get('6combat', 0) + time.time() - self._lk.get('before_combat', time.time())
             self._lk['after_combat'] = time.time()
-            # 单一移动权·帧末收敛(架构收编第一步,用户2026-09-10):辅助线独占时不干预,其余每帧把战斗/巡路两套方向键
-            # 收敛成唯一owner(route跨层爬梯 / combat平地战斗 / none),从根上杜绝两个脑子同时按方向键、左右相抵原地横跳
-            if not _aux_busy:
-                try:
-                    self._converge_movement()
-                except Exception as e:
-                    _debug_log("[移动收敛] 调用异常: %s" % e)
-            # 动作权仲裁:实控时owner已在_combat_tick内按真实距离update,这里只读不重复update(否则会用active近似覆盖真实判定);
-            # 影子模式(F3关)才每帧用active近似update,与旧_converge_movement移动权并排打日志比对
-            try:
-                _sh_bound = self._bound_pull is not None
-                _sh_has = self._combat_locked_target is not None
-                _sh_active = bool(getattr(self, '_combat_active', False))
-                _sh_now = time.time()
-                if getattr(self, '_arbiter_live', False):
-                    _sh_owner, _sh_ev = self._arbiter.owner, None   # 只读,战斗tick内已update
-                else:
-                    # 影子:in_range用active近似(锁了且在打=True;锁了没在打=False;没锁=None)
-                    _sh_inrange = (True if _sh_active else (False if _sh_has else None))
-                    _sh_owner, _sh_ev = self._arbiter.update(bound=_sh_bound, has_target=_sh_has, in_range=_sh_inrange)
-                if _sh_ev or _sh_now - self._shadow_arb_log_t >= 1.0:
-                    self._shadow_arb_log_t = _sh_now
-                    _debug_log("[%s] owner=%s 旧移动权=%s | bound拉回=%s 锁怪=%s active=%s transit=%s climb=%s 切换=%s" % (
-                        "实控仲裁" if getattr(self, '_arbiter_live', False) else "影子仲裁",
-                        _sh_owner, getattr(self, '_move_owner', None), _sh_bound, _sh_has,
-                        _sh_active, getattr(self, '_combat_transit', False),
-                        getattr(self, '_climb_state', 'none'), _sh_ev))
-            except Exception as _ae:
-                _debug_log("[仲裁] 异常:%s" % _ae)
-
             # === 定期维护(启动即跑一次，之后每10分钟)：debug.log只留最近5分钟、清1天前调试缓存；backups全部保留 ===
             try:
                 _mnt_now = time.time()
