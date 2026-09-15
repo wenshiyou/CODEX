@@ -15344,11 +15344,10 @@ class MinimapRouteRecorder:
         rr = VK_RIGHT in self._random_move_keys
         left_held, right_held = cl or rl, cr or rr
         if left_held and right_held:
-            # 【测试期·用户2026-09-10】左右两套方向键互搏=两个脑子抢键冲突(也是"平地上该走却呆住不走"的线程根因)。
-            # 测试期不做"选一方继续"的软仲裁、不计数等待:看门狗一见到冲突就当场硬重置(即时松全部键+主线帧首清零重来),
-            # 每次冲突都立刻解决/暴露。地形单向被挡不会左右互搏,故不在此(靠录制绿线6px跑跳)。重置冷却内不重复发。
-            self._request_hard_reset(
-                "左右方向键互搏冲突(战斗L%d/R%d 巡路L%d/R%d),冲突即硬重置,全部停止重新决策" % (cl, cr, rl, rr))
+            # 用户2026-09-15定稿:看门狗只记录、绝不干预。左右互搏是主线打怪/巡路没互斥好的"症状",
+            # 不在此硬重置/松键兜底(兜底只会掩盖根因);只打日志留证据,根治靠主线A/B严格开关互斥。
+            self._wd_log('wd_key_conflict',
+                         "左右方向键互搏(战斗L%d/R%d 巡路L%d/R%d)[只观察不干预]" % (cl, cr, rl, rr))
         updown = (VK_UP in self._combat_held_keys or VK_DOWN in self._combat_held_keys
                   or VK_UP in self._random_move_keys or VK_DOWN in self._random_move_keys)
         with self._wd_lock:
@@ -15449,11 +15448,10 @@ class MinimapRouteRecorder:
             return
         if now - getattr(self, '_wd_aj_last_req', 0) < AJ_TRIG_COOLDOWN:
             return
-        self._wd_aj_last_req = now
-        with self._wd_lock:
-            self._wd_antijitter_req = {'t': now, 'n': n, 'net': net}
+        self._wd_aj_last_req = now  # 仅作日志节流,不再置任何拉回令
+        # 用户2026-09-15定稿:横跳只记录、绝不干预(不锁侧900ms、不B级硬清零);根治靠主线A/B互斥。
         self._wd_log('wd_antijitter',
-                     "原地左右横跳:%.1fs内换向%d次、光点净位移仅%.1f<%d,请求拉回正轨" % (
+                     "原地左右横跳:%.1fs内换向%d次、光点净位移仅%.1f<%d[只观察不干预]" % (
                          AJ_WIN_MS / 1000.0, n, net, AJ_NET_MAP_DX), color=(0, 0, 255))
 
     def _global_stall_watchdog(self, now):
