@@ -18270,9 +18270,14 @@ class MinimapRouteRecorder:
 
             # 掉台归位独占线(用户2026-09-09)：辅助线独占期间主线(_random_step/_combat_tick)一律暂停,
             # 辅助线结束(光点回台)才恢复主线——辅助线与主线同一时间只跑一个,不并行抢键
-            _fall_returning = self._fall_return_tick() if getattr(self, '_aux_enable_fall', True) else False
+            # 【用户2026-09-15】掉台归位先关闭·注释(排查主线不进战斗;总开关_aux_enable_fall本就默认False,这里代码层再硬断;
+            # 逻辑整段保留不删,要恢复=删掉下面False、取消注释下一行即可)
+            # _fall_returning = self._fall_return_tick() if getattr(self, '_aux_enable_fall', True) else False
+            _fall_returning = False
             # 卡住解卡独占线(用户2026-09-09)：仅在没有更高优先级辅助线(掉台归位)时运行
-            _unblocking = (self._unblock_tick() if not _fall_returning else False) if getattr(self, '_aux_enable_unblock', True) else False
+            # 【用户2026-09-15】卡住解卡先关闭·注释(同上代码层硬断,恢复=取消注释下一行)
+            # _unblocking = (self._unblock_tick() if not _fall_returning else False) if getattr(self, '_aux_enable_unblock', True) else False
+            _unblocking = False
             # 打怪区域·左右越线强制拉回(用户2026-09-11):独立守护线程实时检测,主循环帧首第一时间消费=朝内固定走1000~1500ms再松手恢复主线;
             # 掉台归位/解卡优先级更高(它们进行时本帧不拉,并清掉进行中的拉回、松朝内键,避免两套辅助线抢键)。
             # 拉回中并入_aux_busy=暂停巡路_random_step与打怪_combat_tick,不并行抢键。Y上下限是发起动作处的同步平台闸门,不在主循环占线

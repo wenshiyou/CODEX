@@ -29,6 +29,6 @@
   "far_range_y_up": "350",
   "far_range_y_down": "350",
   "slope_jump_y_min": "-25",
-  "slope_jump_y_max": "-150",
+  "slope_jump_y_max": "-180",
   "hp_value": "35"
 }
