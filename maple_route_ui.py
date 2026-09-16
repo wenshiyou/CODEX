@@ -1299,6 +1299,9 @@ class MinimapRouteRecorder:
         self._potion_last = {}  # potionN_key -> 上次释放时间戳
         self._attack_last = {}  # atk1/aoe -> 上次释放时间戳
         self._player_screen_pos = None  # (x,y) 人物画面坐标
+        # 屏幕Y一秒最低值平滑缓冲（用户2026-09-16定稿）：打怪/选梯/边界用地面Y，过滤起跳峰值；上梯检测仍用原始Y
+        self._screen_y_smooth_window = []  # [(时间戳ms, y), ...] 最近1秒
+        self._screen_y_smooth_window_ms = 1000  # 窗口长度1秒
         self._role_track = None         # 新多锚点跟踪状态:last锚点/foot脚点/miss失配/last_full全图时间/face朝向/score
         self._role_face = None          # 面部锚点判定的朝向 'L'/'R'(打怪左右决策用)
         self._role_anchor_polys = {}    # 本帧识别到(过阈)的各锚点缩小多边形{key:([(x,y)...],score)},供蒙板画框
@@ -1437,7 +1440,10 @@ class MinimapRouteRecorder:
         self._char_disp_pos_prev = None              # 上次同步的原始匹配位置（用于算速度，不存外推值）
         self._char_disp_pos_time = 0                 # 上次同步时间戳(ms)
         self._char_disp_vel = (0.0, 0.0)             # 人物最近速度(px/s)，匹配失败宽限期内维持外推
-        self._player_map_pos = None        # 玩家小地图坐标，用于判断当前平台
+        self._player_map_pos = None        # 玩家小地图坐标，用于判断当前平台（原始值，上梯检测用）
+        # Y一秒最低值平滑缓冲（用户2026-09-16定稿）：打怪/选梯/边界用地面Y，过滤起跳峰值；上梯检测仍用原始Y
+        self._y_smooth_window = []         # [(时间戳ms, y), ...] 最近1秒
+        self._y_smooth_window_ms = 1000    # 窗口长度1秒
         # 光点中心一次性微调(小地图块像素,默认0):小地图红十字与游戏黄光点视觉中心固定差多少就填多少;
         # find_player_dot返回前叠加,绿线/梯子/导航/边界全部共用校准后的同一中心(用户2026-09-14)
         self._dot_center_off_x = 0
@@ -17021,6 +17027,11 @@ class MinimapRouteRecorder:
                                 self._player_map_pos = _pdot
                                 self._last_smooth_dot = _pdot
                                 self._map_dot_lost = 0
+                                # Y一秒最低值平滑：压入缓冲，清掉超过1秒的旧值
+                                _now_ms = time.time() * 1000
+                                self._y_smooth_window.append((_now_ms, _pdot[1]))
+                                while self._y_smooth_window and (_now_ms - self._y_smooth_window[0][0]) > self._y_smooth_window_ms:
+                                    self._y_smooth_window.pop(0)
                             else:
                                 if getattr(self, '_last_smooth_dot', None) is not None:
                                     self._player_map_pos = self._last_smooth_dot
@@ -17501,7 +17512,11 @@ class MinimapRouteRecorder:
         # 2026-09-11曾改用"落地稳定基线_char_ground_y"(腾空时冻结),但人走上更高台阶/坡后脚Y永久抬高,
         # 被误判成起跳→基线冻结在旧低处、且要求Y回落才解锁,上台阶后永远解不开(实测实时脚528/基线卡620差92),
         # 导致几乎同高的怪被算成"上方99"一直误判跳高打。回退实时Y,与X用同一套坐标,简单不卡死。
-        py_layer = py
+        # 打怪距离计算用一秒最低Y（地面值，过滤起跳峰值），上梯检测仍用原始Y
+        if self._screen_y_smooth_window:
+            py_layer = min(y for _, y in self._screen_y_smooth_window)
+        else:
+            py_layer = py
 
         # 首次发现目标：反应延迟
         if not self._combat_had_target:
@@ -18408,6 +18423,12 @@ class MinimapRouteRecorder:
                         _t2 = time.time()
                         # 人物/怪/YOLO/血条 都由后台检测线程同一帧算好了，主线程只读结果+过滤假怪（主线程不再做重活）
                         self._player_screen_pos = self._raw_char_pos
+                        # 屏幕Y一秒最低值平滑：压入缓冲，清掉超过1秒的旧值
+                        if self._raw_char_pos is not None:
+                            _now_ms = time.time() * 1000
+                            self._screen_y_smooth_window.append((_now_ms, self._raw_char_pos[1]))
+                            while self._screen_y_smooth_window and (_now_ms - self._screen_y_smooth_window[0][0]) > self._screen_y_smooth_window_ms:
+                                self._screen_y_smooth_window.pop(0)
                         self._monster_hp_bars = self._raw_hp_bars
                         self._raw_cached = self._raw_cached_feature_monsters
                         # 2026-09-07 用户定稿：不再做"静止怪"静态过滤(冒险岛大量怪本就站桩,会误剔近身真怪→有怪不锁/空打)。
