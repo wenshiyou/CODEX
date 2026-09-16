@@ -663,12 +663,12 @@ MON_DETECT_KEEP_MAX = 1200  # 上限1200ms(用户2026-09-05：最多记1.2秒，
 # === 镜头死区检测（三个背景框，帧差对比检测镜头是否在动） ===
 # 三个默认检测点（整个窗口坐标，含标题栏+边框）：左下/左上/右中
 BG_DETECT_DEFAULT_REGIONS = [
-    {"x": 35, "y": 744, "w": 40, "h": 39},    # 左下
-    {"x": 170, "y": 43, "w": 46, "h": 23},    # 左上
-    {"x": 1320, "y": 409, "w": 43, "h": 28},  # 右中
+    {"x": 35, "y": 649, "w": 40, "h": 39},    # 左下(原674向上移25→649,2026-09-16)
+    {"x": 1222, "y": 574, "w": 46, "h": 23},  # 右下(BG3正下方,x=1222;原624向上移50→574,2026-09-16)
+    {"x": 1222, "y": 309, "w": 43, "h": 28},  # 右上(原右中y409向上移100→309,2026-09-16不变)
 ]
-BG_DIFF_THRESHOLD = 5.0       # 帧差均值阈值，超过此值判定该区域在动（调小更灵敏，镜头动了更容易检测到）
-BG_MOTION_MIN_REGIONS = 3     # 至少几个区域在动才判定镜头在跟随
+BG_DIFF_THRESHOLD = 30.0      # 该框两帧间"发生变化的像素占比(%)"超过此值判定在动(用户规则:>30%算动)
+BG_MOTION_MIN_REGIONS = 2     # 至少几个区域在动才判定镜头在跟随(用户规则2026-09-16:三点里二个在动就算动,只有一个动就算停)
 BG_STILL_FRAMES_TO_DEADZONE = 3  # 连续几帧不动才切到死区状态
 BG_DETECT_REGIONS_FILE = os.path.join(DATA_DIR, "bg_detect_regions.json")  # 检测框位置持久化
 
@@ -12212,6 +12212,44 @@ class MinimapRouteRecorder:
                                     gdi32.TextOutW(hdc, int(_cb[0]) + 3, int(_cb[1]) + 2, _rlab, len(_rlab))
                                     gdi32.SelectObject(hdc, old_cfont)
 
+                            # 调试(用户2026-09-16):镜头三背景检测框+帧差值(用户规则:动=绿>阈值/停=红;三点全动才跟随,一个停就死区)
+                            try:
+                                for _bi, _br in enumerate(self._bg_regions):
+                                    _bx0 = int(_br["x"]); _by0 = int(_br["y"])
+                                    _bx1 = _bx0 + int(_br["w"]); _by1 = _by0 + int(_br["h"])
+                                    _dv = float(self._bg_diff_values[_bi]) if _bi < len(self._bg_diff_values) else 0.0
+                                    _bclr = 0x00FF00 if _dv > BG_DIFF_THRESHOLD else 0x0000FF
+                                    _bp = gdi32.CreatePen(0, 1, _bclr)
+                                    if _bp: gdi_objs.append(_bp)
+                                    _ob = gdi32.SelectObject(hdc, _bp)
+                                    gdi32.SelectObject(hdc, gdi32.GetStockObject(5))
+                                    gdi32.Rectangle(hdc, _bx0, _by0, _bx1, _by1)
+                                    gdi32.SelectObject(hdc, _ob)
+                                    _btxt = "BG%d=%.1f" % (_bi + 1, _dv)
+                                    _bf = gdi32.CreateFontW(13, 0, 0, 0, 400, 0, 0, 0, 134, 3, 2, 1, 49, "微软雅黑")
+                                    if _bf: gdi_objs.append(_bf)
+                                    _of = gdi32.SelectObject(hdc, _bf)
+                                    gdi32.SetTextColor(hdc, _bclr); gdi32.SetBkMode(hdc, 1)
+                                    gdi32.TextOutW(hdc, _bx0 + 2, _by0 + 2, _btxt, len(_btxt))
+                                    gdi32.SelectObject(hdc, _of)
+                            except Exception:
+                                pass
+                            # 调试:小地图光点映射到游戏窗口的锁角色点→黑色框(用户要求黑色),看落点对不对
+                            # 冒险岛相机把人固定在屏幕"中心偏下"而非几何中心,故y补固定偏移(真机校准:初值+100,2026-09-16再上调30→+70),x不动
+                            try:
+                                _ls = self.lock_screen_from_dot()
+                                if _ls:
+                                    _lsx, _lsy = int(_ls[0]), int(_ls[1]) + 70
+                                    _LR = 40
+                                    _lkp = gdi32.CreatePen(0, 2, 0x000000)
+                                    if _lkp: gdi_objs.append(_lkp)
+                                    _olk = gdi32.SelectObject(hdc, _lkp)
+                                    gdi32.SelectObject(hdc, gdi32.GetStockObject(5))
+                                    gdi32.Rectangle(hdc, _lsx - _LR, _lsy - _LR, _lsx + _LR, _lsy + _LR)
+                                    gdi32.SelectObject(hdc, _olk)
+                            except Exception:
+                                pass
+
                             # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
                             # 注：和人物特征点写法完全一样，不用self（wnd_proc回调中self会导致异常）
                             for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
@@ -12355,9 +12393,9 @@ class MinimapRouteRecorder:
             _debug_log("[怪物蒙板] RegisterClass重试 atom=%s" % atom)
 
         hwnd = user32.CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOPMOST,
+            WS_EX_LAYERED,
             className, "Overlay", WS_POPUP | WS_VISIBLE,
-            0, 0, 100, 100, None, None, hinst, None)
+            0, 0, 100, 100, self.hwnd, None, hinst, None)  # hWndParent=self.hwnd:从属游戏窗口,游戏最小化/切后台蒙板跟着退,不全屏置顶
         _debug_log("[怪物蒙板] CreateWindow hwnd=%s" % hwnd)
         self._overlay_hwnd = hwnd
         if not hwnd:
@@ -12378,7 +12416,7 @@ class MinimapRouteRecorder:
         if self.hwnd and self.window_rect:
             wr = self.window_rect
             _debug_log("[怪物蒙板] 立即定位: %dx%d +%d+%d" % (wr['width'], wr['height'], wr['left'], wr['top']))
-            user32.SetWindowPos(hwnd, -1, wr['left'], wr['top'],
+            user32.SetWindowPos(hwnd, 0, wr['left'], wr['top'],
                                 wr['width'], wr['height'], 0x0050)
         else:
             # 无游戏窗口坐标时默认显示在屏幕中央，确保窗口可见用于诊断
@@ -12387,7 +12425,7 @@ class MinimapRouteRecorder:
             _dw, _dh = 800, 600
             _dx, _dy = (_sw - _dw) // 2, (_sh - _dh) // 2
             _debug_log("[怪物蒙板] 无游戏坐标，默认定位: %dx%d +%d+%d" % (_dw, _dh, _dx, _dy))
-            user32.SetWindowPos(hwnd, -1, _dx, _dy, _dw, _dh, 0x0050)
+            user32.SetWindowPos(hwnd, 0, _dx, _dy, _dw, _dh, 0x0050)
         user32.UpdateWindow(hwnd)
 
         user32.SetTimer(hwnd, IDT_TIMER, 100, None)
@@ -12417,7 +12455,7 @@ class MinimapRouteRecorder:
                     _osl, _ost, _osr, _osb = struct.unpack("llll", _ob.raw)
                     _ov_geom = (_osl, _ost, _osr - _osl, _osb - _ost)
                     if _ov_geom != _cur_geom:
-                        user32.SetWindowPos(hwnd, -1, _cur_geom[0], _cur_geom[1],
+                        user32.SetWindowPos(hwnd, 0, _cur_geom[0], _cur_geom[1],
                                             _cur_geom[2], _cur_geom[3], 0x0050)
                         self._overlay_last_geom = _cur_geom
                         _debug_log("[怪物蒙板] 载体偏离游戏已拉回: 蒙板%s -> 游戏%s" % (_ov_geom, _cur_geom))
@@ -14574,6 +14612,11 @@ class MinimapRouteRecorder:
         """镜头死区检测：三区域帧间差异对比。直接用主循环已截好的frame（不隐藏蒙板，不闪烁）。
         三个检测区域在屏幕边缘/角落，蒙板绘制内容在中间，不会干扰背景差异检测。
         状态机：deadzone(镜头不动)→following(镜头在动)，进入死区时冻结绿框位置。"""
+        if getattr(self, 'frame_count', 0) % 30 == 0:
+            _debug_log("[镜头检测入口] has_dot=%s has_winrect=%s frame=%s raw_t=%d bg_last_t=%d" % (
+                bool(self._player_map_pos), bool(self.window_rect),
+                frame is not None, getattr(self, '_raw_frame_t', -999),
+                getattr(self, '_bg_last_raw_t', -999)))
         if not self._player_map_pos or not self.window_rect:
             return
         if frame is None:
@@ -14587,25 +14630,41 @@ class MinimapRouteRecorder:
         if frame is None:
             return
         fh, fw = frame.shape[:2]
+        # 2026-09-16:主循环高频tick、共享帧_raw_frame由检测线程低频更新;必须只在帧真换了才比,
+        # 否则连续tick拿同一张帧absdiff恒=0,永远判不出镜头在动(三框恒绿/状态机死)。
+        _cur_rft = getattr(self, '_raw_frame_t', 0)
+        if getattr(self, '_bg_last_raw_t', -1) == _cur_rft:
+            return  # 同一帧重复tick,跳过帧差,保留上次_bg_diff_values与状态机
+        self._bg_last_raw_t = _cur_rft
         motion_count = 0
         for i, reg in enumerate(self._bg_regions):
             x1 = max(0, min(reg["x"], fw - 1))
             y1 = max(0, min(reg["y"], fh - 1))
             x2 = min(fw, x1 + reg["w"])
             y2 = min(fh, y1 + reg["h"])
-            # 内缩3像素：排除蒙板自己画在ROI边缘的检测框线，否则框线红/绿变色会被帧差捕捉，形成自激振荡误判
-            _PAD = 3
+            # 内缩1像素：排除蒙板自己画在ROI边缘的检测框线，否则框线变色会被帧差捕捉自激振荡(用户2026-09-16:比框小1px)
+            _PAD = 1
             cx1, cy1, cx2, cy2 = x1 + _PAD, y1 + _PAD, x2 - _PAD, y2 - _PAD
             if cx2 <= cx1 or cy2 <= cy1:
                 self._bg_diff_values[i] = 0.0
                 continue
             roi = frame[cy1:cy2, cx1:cx2]
             if self._bg_last_frames[i] is not None and self._bg_last_frames[i].shape == roi.shape:
+                # 用户标准(2026-09-16):两帧ROI对比,变化像素占比>30%=在动(不用平均亮度差)
                 diff = cv2.absdiff(roi, self._bg_last_frames[i])
-                self._bg_diff_values[i] = float(diff.mean())
-                if self._bg_diff_values[i] > BG_DIFF_THRESHOLD:
+                _g = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if diff.ndim == 3 else diff
+                _changed = int(cv2.countNonZero((_g > 8).astype('uint8')))
+                _ratio = _changed / float(_g.size) if _g.size else 0.0
+                self._bg_diff_values[i] = _ratio * 100.0  # 存百分比,框上BGn显示%
+                if _ratio > 0.30:  # 变化超30%像素=在动
                     motion_count += 1
             self._bg_last_frames[i] = roi.copy()
+        # 临时诊断(2026-09-16):打印三点实际帧差/帧时间戳,定位"一直红=判停"根因
+        if getattr(self, 'frame_count', 0) % 30 == 0:
+            _debug_log("[镜头检测诊断] raw_t=%d diffs=%.1f,%.1f,%.1f motion=%d state=%s thresh=%.1f" % (
+                getattr(self, '_raw_frame_t', 0),
+                self._bg_diff_values[0], self._bg_diff_values[1], self._bg_diff_values[2],
+                motion_count, self._camera_state, BG_DIFF_THRESHOLD))
         # 判断光点是否在移动（光点不动=人物不动=镜头大概率不动）
         dot_moving = False
         if self._last_dot_pos is not None:
@@ -14614,8 +14673,9 @@ class MinimapRouteRecorder:
             if abs(dot_dx) > 0 or abs(dot_dy) > 0:
                 dot_moving = True
         self._last_dot_pos = (self._player_map_pos[0], self._player_map_pos[1])
-        # 状态机切换（前馈渐变曲线匹配镜头物理：启动0→2约60帧/1秒，匀速保持2，停止2→0约30帧/0.5秒后切死区）
-        if dot_moving and motion_count >= BG_MOTION_MIN_REGIONS:
+        # 状态机切换(用户规则2026-09-16):只看三点帧差,不看点——光点停了镜头因惯性还在动。
+        # 三点全动(>=3)才是镜头在动→跟随;只要有一个点停→走衰减→切死区。
+        if motion_count >= BG_MOTION_MIN_REGIONS:
             # 跟随状态：光点在动且3处背景都在动=镜头在动
             self._stop_frame_count = 0  # 重置停止计数器
             self._follow_frame_count += 1  # 跟随帧数递增
@@ -14638,16 +14698,16 @@ class MinimapRouteRecorder:
                 if self._player_map_pos:
                     self._last_follow_dot_pos = (self._player_map_pos[0], self._player_map_pos[1])
         else:
-            # 光点停了或背景不动：前馈衰减渐变（2→0约30帧/0.5秒，模拟镜头惯性减速），30帧后切死区
+            # 有一个点停(motion<2)：前馈衰减渐变（2→0约10帧折中，2026-09-16:5帧太激进易抖,30帧太慢），10帧后切死区
             self._follow_frame_count = 0  # 重置跟随计数器
             self._stop_frame_count += 1  # 停止帧数递增
-            # 前馈衰减渐变：30帧内从2线性减到0（模拟镜头惯性减速约0.5秒）
-            if self._stop_frame_count <= 30:
-                self._feedforward_strength = 2.0 * (1.0 - self._stop_frame_count / 30.0)
+            # 前馈衰减渐变：10帧内从2线性减到0
+            if self._stop_frame_count <= 10:
+                self._feedforward_strength = 2.0 * (1.0 - self._stop_frame_count / 10.0)
             else:
                 self._feedforward_strength = 0.0
-            # 30帧后确认镜头真停了，切死区
-            if self._stop_frame_count >= 30 and self._camera_state != "deadzone":
+            # 10帧后确认镜头真停了，切死区
+            if self._stop_frame_count >= 10 and self._camera_state != "deadzone":
                 self._camera_state = "deadzone"
                 # 进入死区(镜头停止)：以光点为中心冻结绿框位置，之后绿框钉住、光点在固定框内移动
                 _mp_freeze = self._player_map_pos
@@ -16694,6 +16754,11 @@ class MinimapRouteRecorder:
                         self._latest_frame_seq = getattr(self, '_latest_frame_seq', 0) + 1
                         self._raw_frame = _frame                          # 供吃药/伤害/镜头/上梯对位复用,帧龄用_raw_frame_t判
                         self._raw_frame_t = self._latest_frame_t
+                        # 镜头死区检测(轻量帧差):拿到新帧就在此做,不依赖combat_tick(它有early return到不了)。三BG框颜色/状态机每帧更新
+                        try:
+                            self._detect_camera_motion(frame=_frame)
+                        except Exception as _ce:
+                            _debug_log("[镜头检测] 截图线程调用异常: %r" % (_ce,))
             except Exception as _e:
                 if self._detect_running:
                     print("[截图] 异常:", _e)
@@ -17131,6 +17196,7 @@ class MinimapRouteRecorder:
 
         # === 人物/怪/YOLO/血条 已由后台检测线程同一帧算好，主循环过滤进 self._monsters / self._player_screen_pos ===
         # 这里主线程不再做检测重活，只保留镜头死区(右键拖动检测框) + 人物定位日志 + 怪物计数日志
+        # 2026-09-16补:镜头死区检测已挪到截图线程(拿到新帧即做),combat_tick有early return到不了,这里不再重复调用
         _rb_down = bool(user32.GetAsyncKeyState(0x02) & 0x8000)  # VK_RBUTTON
         if _rb_down and not self._last_rbutton_down:
             # 右键刚按下：取光标位置转游戏窗口客户区坐标
