@@ -14480,7 +14480,7 @@ class MinimapRouteRecorder:
         return True
 
     def _calc_blue_box_pos(self, mx, my):
-        """绿框(=镜头视野)在小地图上的位置：以光点为中心+边缘钳制(左4/右7/上5/下5)。
+        """绿框(=镜头视野)在小地图上的位置：以光点为中心+边缘钳制(2026-09-16定稿:左18/右21/上3/下21)。
         lock_screen_from_dot(大屏幕人物框)与_draw_blue_box(小地图绿框)共用，保证两个框位置永远一致。
         返回(box_x,box_y)；绿框未校准或区域无效返回None。"""
         r = getattr(self, 'map_area_rect', None)
@@ -14490,14 +14490,14 @@ class MinimapRouteRecorder:
         mw, mh = r["width"], r["height"]
         box_x = int(mx - bw // 2)
         box_y = int(my - bh // 2)
-        if box_x < 4:
-            box_x = 4
-        if box_x > mw - 7 - bw:
-            box_x = mw - 7 - bw
-        if box_y < 5:
-            box_y = 5
-        if box_y > mh - 5 - bh:
-            box_y = mh - 5 - bh
+        if box_x < 18:
+            box_x = 18
+        if box_x > mw - 21 - bw:
+            box_x = mw - 21 - bw
+        if box_y < 3:
+            box_y = 3
+        if box_y > mh - 21 - bh:
+            box_y = mh - 21 - bh
         return box_x, box_y
 
     def _draw_blue_box(self, map_frame):
@@ -14704,8 +14704,8 @@ class MinimapRouteRecorder:
                         if _r and self._blue_box:
                             _bw, _bh = self._blue_box["width"], self._blue_box["height"]
                             _mw, _mh = _r["width"], _r["height"]
-                            box_x = max(4, min(box_x, _mw - 7 - _bw))
-                            box_y = max(5, min(box_y, _mh - 5 - _bh))
+                            box_x = max(18, min(box_x, _mw - 21 - _bw))
+                            box_y = max(3, min(box_y, _mh - 21 - _bh))
             # 方案B·直接映射：光点在绿框中的偏移 × 缩放比例(窗口/绿框) = 游戏窗口坐标，不用先算比例再乘窗口
             offset_x = mx - box_x
             offset_y = my - box_y
