@@ -253,7 +253,7 @@ def _s(v):
 
 # === 小地图内容区域 ===
 UI_MAP_X = 29
-UI_MAP_Y = 131
+UI_MAP_Y = 126  # 小地图UI显示区域Y(2026-09-16整体上移5px:131→126,与map_display_y同步、保持12px固定差)
 UI_MAP_W = 403
 UI_MAP_H = 279
 UI_MAP_SCALE = UI_MAP_W / FIXED_W
@@ -2133,7 +2133,7 @@ class MinimapRouteRecorder:
         TOP_OFFSET = 24  # 上边向下移1px(用户2026-09-06冒险岛世界调试：27→24，小地图上方Y上移3px)
         BOTTOM_OFFSET = -8  # 下边(用户2026-09-06冒险岛世界调试：-9→-8，下边Y下移1px)
         left = mini_x + LEFT_OFFSET  # 左边加偏移量
-        right = big_x + bw + 3  # 右边(用户2026-09-06冒险岛世界调试：+1→+3，右边X右移2px)
+        right = big_x + bw + 2  # 右边界(2026-09-16:右偏移定为+2;新加号模板big15x20)
         top = mini_y + mh + TOP_OFFSET  # 上面加偏移量
         if debug:
             print("边界: L=%d R=%d T=%d W=%d" % (left, right, top, right - left))
@@ -8873,7 +8873,7 @@ class MinimapRouteRecorder:
         # === 按原始大小合成到背景（不拉伸，保持原始比率，显示在顶部按钮下方）===
         map_h, map_w = map_display.shape[:2]  # 获取map_display实际尺寸
         map_display_x = (UI_W - map_w) // 2  # 水平居中
-        map_display_y = 143  # 垂直位置：从162再向上移19像素
+        map_display_y = 138  # 垂直位置(2026-09-16累计上移5px:143→138,与UI_MAP_Y同步;历史:从162上移)
         # 保存小地图显示位置和缩放比例（供鼠标点击坐标转换用）
         self._map_disp_x = map_display_x
         self._map_disp_y = map_display_y
