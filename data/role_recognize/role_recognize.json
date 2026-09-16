@@ -7,7 +7,15 @@
     "maxmove": 250,
     "faststep": 2,
     "research": 1500,
-    "hold": 90
+    "hold": 90,
+    "lock_follow_lx": 119,
+    "lock_follow_rx": 87,
+    "lock_follow_y": 65,
+    "lock_dead_lx": 31,
+    "lock_dead_rx": 46,
+    "lock_dead_y": 60,
+    "lock_idle_x": 29,
+    "lock_idle_y": 75
   },
   "blocklist": [
     [

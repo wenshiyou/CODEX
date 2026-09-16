@@ -392,6 +392,15 @@ ROLE_TRACK_DEFAULT = {
     "faststep": 2,     # 快速失配:局部窗内连续失配多少帧后切全图搜索
     "research": 1500,  # 全图搜索间隔(ms):局部跟丢后限频全屏找回,避免每帧全屏拖帧
     "hold": 90,        # 丢失保持(帧):刚丢先保持上一可信点,不立刻乱跳
+    # 2026-09-16:黑框偏移(分状态分左右固定补偿,存盘永久)
+    "lock_follow_lx": 30,  # 跟随态向左 x
+    "lock_follow_rx": 30,  # 跟随态向右 x
+    "lock_follow_y": 70,   # 跟随态 y
+    "lock_dead_lx": 0,     # 死区向左 x
+    "lock_dead_rx": 0,     # 死区向右 x
+    "lock_dead_y": 70,     # 死区 y
+    "lock_idle_x": 0,      # 站立不动 x
+    "lock_idle_y": 0,      # 站立不动 y
 }
 ROLE_TRACK_FIELDS = [  # (参数key,中文标签,是否小数)
     ("fps", "跟踪FPS", False), ("thr", "匹配阈值", True),
@@ -667,7 +676,7 @@ BG_DETECT_DEFAULT_REGIONS = [
     {"x": 1222, "y": 574, "w": 46, "h": 23},  # 右下(BG3正下方,x=1222;原624向上移50→574,2026-09-16)
     {"x": 1222, "y": 309, "w": 43, "h": 28},  # 右上(原右中y409向上移100→309,2026-09-16不变)
 ]
-BG_DIFF_THRESHOLD = 30.0      # 该框两帧间"发生变化的像素占比(%)"超过此值判定在动(用户规则:>30%算动)
+BG_DIFF_THRESHOLD = 20.0      # 该框两帧间"发生变化的像素占比(%)"超过此值判定在动(2026-09-16:原30%不敏感,调到20%,背景微动也判动)
 BG_MOTION_MIN_REGIONS = 2     # 至少几个区域在动才判定镜头在跟随(用户规则2026-09-16:三点里二个在动就算动,只有一个动就算停)
 BG_STILL_FRAMES_TO_DEADZONE = 3  # 连续几帧不动才切到死区状态
 BG_DETECT_REGIONS_FILE = os.path.join(DATA_DIR, "bg_detect_regions.json")  # 检测框位置持久化
@@ -3327,6 +3336,16 @@ class MinimapRouteRecorder:
             print("[角色识别] 加载失败,用默认:", e)
             cur = self._role_cur_character(rec); rec["anchors"] = cur["anchors"]
         self._role_rec = rec
+        # 2026-09-16:把存盘的黑框偏移同步到类常量,黑框下帧即用
+        _p = rec["params"]
+        self.FOLLOW_LEFT_X = int(_p["lock_follow_lx"])
+        self.FOLLOW_RIGHT_X = int(_p["lock_follow_rx"])
+        self.FOLLOW_Y = int(_p["lock_follow_y"])
+        self.DEAD_LEFT_X = int(_p["lock_dead_lx"])
+        self.DEAD_RIGHT_X = int(_p["lock_dead_rx"])
+        self.DEAD_Y = int(_p["lock_dead_y"])
+        self.IDLE_X = int(_p["lock_idle_x"])
+        self.IDLE_Y = int(_p["lock_idle_y"])
         if _migrated:  # 旧格式迁移完成→立即落盘新结构(含characters/active),避免图已分目录而json仍旧格式的中间态
             try:
                 self._save_role_recognize()
@@ -3981,10 +4000,10 @@ class MinimapRouteRecorder:
         win = tk.Toplevel(self._tk_root)
         self._role_rec_window = win
         win.title("角色识别")
-        win.resizable(False, False)  # 固定大小不拉伸,文字不变形;标题栏可拖动
+        win.resizable(False, False)  # 固定大小不拉伸
         win.attributes("-topmost", True)
-        self._position_window(win, 600, 740)
-        self._role_thumbs = []  # 持有PhotoImage引用防被GC导致缩略图不显示
+        self._position_window(win, 600, 860)  # 加高,放下黑框偏移+黑名单
+        self._role_thumbs = []
 
         tk.Label(win, text="角色识别（小锚点多冗余 · 局部半径跟踪）",
                  font=("微软雅黑", 11, "bold")).pack(pady=(8, 2))
@@ -4076,6 +4095,27 @@ class MinimapRouteRecorder:
                 print("[角色识别] 参数保存失败:", e)
         self._role_apply_params = _apply_params
 
+        # 2026-09-16:黑框偏移实时调试面板(竖排在角色跟踪参数下方,整个窗口已可上下滚动)
+        lock_fr = tk.LabelFrame(win, text="黑框偏移（实时拖·左列管向左/右列管向右）", font=("微软雅黑", 9, "bold"))
+        lock_fr.pack(fill="x", padx=8, pady=(0, 6))
+        self._lock_off_vars = {}
+        def _mk_off(row, col, key, label, cur):
+            f = tk.Frame(lock_fr); f.grid(row=row, column=col, sticky="w", padx=10, pady=3)
+            tk.Label(f, text=label, width=9, anchor="w", font=("微软雅黑", 9)).pack(side="left")
+            v = tk.IntVar(value=int(cur))
+            self._lock_off_vars[key] = v
+            tk.Scale(f, from_=0, to=150, orient="horizontal", variable=v, length=110, showvalue=False,
+                     command=lambda val, k=key: self._apply_lock_offset(k, self._lock_off_vars[k].get())).pack(side="left")
+            tk.Label(f, textvariable=v, width=4, font=("微软雅黑", 9)).pack(side="left")
+        _mk_off(0, 0, "follow_left_x", "跟随左x", self.FOLLOW_LEFT_X)
+        _mk_off(0, 1, "follow_right_x", "跟随右x", self.FOLLOW_RIGHT_X)
+        _mk_off(1, 0, "dead_left_x", "死区左x", self.DEAD_LEFT_X)
+        _mk_off(1, 1, "dead_right_x", "死区右x", self.DEAD_RIGHT_X)
+        _mk_off(2, 0, "follow_y", "跟随y", self.FOLLOW_Y)
+        _mk_off(2, 1, "dead_y", "死区y", self.DEAD_Y)
+        _mk_off(3, 0, "idle_x", "站立x", getattr(self,'IDLE_X',0))
+        _mk_off(3, 1, "idle_y", "站立y", getattr(self,'IDLE_Y',0))
+
         def _rebuild_anchors():
             for w in self._role_anchor_frame.winfo_children():
                 w.destroy()
@@ -4154,7 +4194,7 @@ class MinimapRouteRecorder:
             _apply_params(); self._close_window("_role_rec_window")
         # ===== 角色识别黑名单(放最下方:框内不采信任何锚点命中,防固定UI/图标误检) =====
         blk_outer = tk.LabelFrame(win, text="黑名单区域（默认只屏蔽人物锚点；勾选后怪物YOLO也屏蔽；可框多处同时生效）", font=("微软雅黑", 9, "bold"))
-        blk_outer.pack(fill="x", padx=8, pady=4, side="bottom")
+        blk_outer.pack(fill="x", padx=8, pady=4)  # 2026-09-16:去掉side=bottom,按顺序排在黑框偏移后、保存按钮前
         blk_top = tk.Frame(blk_outer); blk_top.pack(fill="x", padx=6, pady=2)
         self._role_blk_list_frame = tk.Frame(blk_outer); self._role_blk_list_frame.pack(fill="x", padx=6)
 
@@ -4189,7 +4229,7 @@ class MinimapRouteRecorder:
 
         win.protocol("WM_DELETE_WINDOW", on_close)
         tk.Button(win, text="保存并关闭", width=16, height=2, bg="#2196F3", fg="white",
-                  command=on_close).pack(side="bottom", pady=8)
+                  command=on_close).pack(pady=8)  # 放最后(黑名单正下方),不再side=bottom
 
     def _open_char_feature_window(self):
         """打开人物特征管理弹窗：左右分栏，左边特征列表(含偏移X/Y)，右边操作区"""
@@ -12232,7 +12272,7 @@ class MinimapRouteRecorder:
                             try:
                                 _ls = self.lock_screen_from_dot()
                                 if _ls:
-                                    _lsx, _lsy = int(_ls[0]), int(_ls[1]) + 70
+                                    _lsx, _lsy = int(_ls[0]), int(_ls[1])  # 补偿已在lock_screen_from_dot按状态加,这里不再叠加
                                     _LR = 40
                                     _lkp = gdi32.CreatePen(0, 2, 0x000000)
                                     if _lkp: gdi_objs.append(_lkp)
@@ -14710,6 +14750,52 @@ class MinimapRouteRecorder:
                 self._feedforward_strength = 0.0
                 print("[镜头检测] 切到死区状态（前馈衰减30帧后确认）")
 
+    def _apply_lock_offset(self, key, val):
+        # 2026-09-16:滑块改类常量+写params落盘,黑框下帧即用新值,重启不丢
+        try:
+            v = int(val)
+            if key == "follow_left_x":
+                self.FOLLOW_LEFT_X = v; self._role_rec["params"]["lock_follow_lx"] = v
+            elif key == "follow_right_x":
+                self.FOLLOW_RIGHT_X = v; self._role_rec["params"]["lock_follow_rx"] = v
+            elif key == "follow_y":
+                self.FOLLOW_Y = v; self._role_rec["params"]["lock_follow_y"] = v
+            elif key == "dead_left_x":
+                self.DEAD_LEFT_X = v; self._role_rec["params"]["lock_dead_lx"] = v
+            elif key == "dead_right_x":
+                self.DEAD_RIGHT_X = v; self._role_rec["params"]["lock_dead_rx"] = v
+            elif key == "dead_y":
+                self.DEAD_Y = v; self._role_rec["params"]["lock_dead_y"] = v
+            elif key == "idle_x":
+                self.IDLE_X = v; self._role_rec["params"]["lock_idle_x"] = v
+            elif key == "idle_y":
+                self.IDLE_Y = v; self._role_rec["params"]["lock_idle_y"] = v
+            self._save_role_recognize()
+        except Exception as e:
+            _debug_log("[黑框偏移] 设置失败:%s %s" % (key, e))
+
+    LOCK_FOLLOW_OX = 30      # (旧,已拆左右,见FOLLOW_LEFT_X/RIGHT_X)
+    LOCK_FOLLOW_OY = 70      # 跟随态y补偿(正=向下)
+    LOCK_DEADZONE_OX = 0      # (旧,已拆左右,见DEAD_LEFT_X/RIGHT_X)
+    LOCK_DEADZONE_OY = 70     # 死区态y补偿
+    # 2026-09-16:X补偿按左右方向分开(光点左移用LEFT,右移用RIGHT),都是正数,面板左右两列分别调
+    FOLLOW_LEFT_X = 30       # 跟随态向左走 x补偿
+    FOLLOW_RIGHT_X = 30      # 跟随态向右走 x补偿
+    FOLLOW_Y = 70            # 跟随态 y补偿
+    DEAD_LEFT_X = 0          # 死区向左走 x补偿
+    DEAD_RIGHT_X = 0         # 死区向右走 x补偿
+    DEAD_Y = 70             # 死区 y补偿
+    LOCK_SPEED_K = 1.0        # (旧共用系数,已废弃,见下两个独立)
+    FOLLOW_SPEED_K = 2.0       # 跟随态走路速度系数(框往移动方向补光点位移×此;跟随差得远先调大)
+    DEADZONE_SPEED_K = 1.0     # 死区走路速度系数
+    SPEED_BOOST = 1.5         # 刚切跟随瞬间的额外前馈(猛补一段向前,之后衰减到FOLLOW_SPEED_K)
+    SPEED_BOOST_DEAD = 0.6    # 死区刚进入也补一段弱前馈(比跟随的1.5小)
+    BOOST_FRAMES = 15         # 从猛补衰减到普通所需帧数(约15帧后变普通补偿)
+    # 2026-09-16:左右方向分开(实测两边不对称),再分死区/跟随,共4组速度系数(按光点移动方向sdx正负选)
+    DEAD_LEFT_K = 1.8          # 死区向左走速度补偿(真机定)
+    DEAD_RIGHT_K = 1.3         # 死区向右走速度补偿(真机定)
+    FOLLOW_LEFT_K = 4.0        # 跟随向左走速度补偿(真机定)
+    FOLLOW_RIGHT_K = 3.0       # 跟随向右走速度补偿(真机定)
     def lock_screen_from_dot(self):
         """【光点锁定·不用倍率】小地图光点 → 归一化位置 → 游戏屏幕坐标(锁定人物真实坐标).
         原理: 小地图三特征定位裁剪(map_area_rect)映射到显示窗口; 光点在此窗口内归一化(0~1),
@@ -14742,19 +14828,10 @@ class MinimapRouteRecorder:
                 box_x, box_y = frozen_pos  # 镜头不动：绿框钉在进入死区那一刻的位置
             else:
                 box_x, box_y = follow_pos  # 跟随/兜底：以光点为中心
-                # 跟随状态前馈偏移：绿框沿光点移动方向提前2倍光点移动量，补偿镜头缓冲延迟
-                _last_dot = getattr(self, '_last_follow_dot_pos', None)
-                if _last_dot and self._player_map_pos:
-                    _fdx = self._player_map_pos[0] - _last_dot[0]
-                    _fdy = self._player_map_pos[1] - _last_dot[1]
-                    if _fdx != 0 or _fdy != 0:
-                        _ff = getattr(self, '_feedforward_strength', 2.0)
-                        if _ff > 0:
-                            box_x += int(_fdx * _ff)  # 前馈渐变：人物在动时强度=2，停了后逐渐减到0
-                            box_y += int(_fdy * _ff)
-                        # 边缘钳制
-                        _r = getattr(self, 'map_area_rect', None)
-                        if _r and self._blue_box:
+                # 2026-09-16:去掉前馈(原box_x+=_fdx*_ff让人走时黑框反向拖后、左右不对称),绿框纯以光点为中心、左右对称
+                # 边缘钳制
+                _r = getattr(self, 'map_area_rect', None)
+                if _r and self._blue_box:
                             _bw, _bh = self._blue_box["width"], self._blue_box["height"]
                             _mw, _mh = _r["width"], _r["height"]
                             box_x = max(18, min(box_x, _mw - 21 - _bw))
@@ -14780,7 +14857,43 @@ class MinimapRouteRecorder:
             mode = "全图"
         sx = int(offset_x * scale_x)
         sy = int(offset_y * scale_y)
+        # 2026-09-16:X补偿按左右方向分开(光点本帧左移用LEFT,右移用RIGHT);Y共用。都是正数。
+        # 2026-09-16:方向直接读物理键kl/kr(GetAsyncKeyState实测能读到keybd_event发的键);md=None时也能用
+        _kl = key_pressed(VK_LEFT); _kr = key_pressed(VK_RIGHT)
+        _dir = 0  # 0=停, -1=左, 1=右
+        if _kl:
+            _dir = -1
+        elif _kr:
+            _dir = 1
+        self._off_prev_mx = mx
+        if getattr(self, 'frame_count', 0) % 10 == 0:
+            _debug_log("[黑框方向] state=%s mx=%d md=%s kl=%d kr=%d dir=%d 用%s" % (
+                self._camera_state, mx, getattr(self,'_combat_move_dir',None), _kl, _kr, _dir,
+                '左' if _dir < 0 else '右'))
+        if self._camera_state == "deadzone":
+            if _dir < 0: sx -= self.DEAD_LEFT_X      # 向左走:黑框偏右,向左补(减)
+            elif _dir > 0: sx += self.DEAD_RIGHT_X   # 向右走:黑框偏左,向右补(加)
+            else: sx += self.IDLE_X                 # 站立不动:手动调
+            sy += self.DEAD_Y if _dir != 0 else self.IDLE_Y
+        else:
+            if _dir < 0: sx -= self.FOLLOW_LEFT_X    # 向左走:黑框偏右,向左补(减)
+            elif _dir > 0: sx += self.FOLLOW_RIGHT_X  # 向右走:黑框偏左,向右补(加)
+            else: sx += self.IDLE_X                 # 站立不动:手动调
+            sy += self.FOLLOW_Y if _dir != 0 else self.IDLE_Y
+        # 2026-09-16:速度前馈整段删除(跟随时真光点识别串到小亮点、算不到真实位移,补偿全是白算),全用固定偏移
         # 去掉EMA平滑：直接用当前帧坐标，反应更快不延迟（用户要求跟手，抖动可接受）
+        # 临时测速2026-09-16:每秒打印光点位移→屏幕速度(小地图px×scale),定"按速度比例补偿"用
+        _now_t = time.time()
+        _prev = getattr(self, '_speed_prev', None)
+        if _prev:
+            _dt = _now_t - _prev[2]
+            if _dt >= 1.0:
+                _sdx = mx - _prev[0]; _sdy = my - _prev[1]
+                _spd_screen = (abs(_sdx) * scale_x + abs(_sdy) * scale_y) / _dt
+                _debug_log("[光点测速] 光点位移=(%d,%d) 屏幕速度≈%.0f px/s state=%s" % (_sdx, _sdy, _spd_screen, self._camera_state))
+                self._speed_prev = (mx, my, _now_t)
+        else:
+            self._speed_prev = (mx, my, _now_t)
         if getattr(self, 'frame_count', 0) % 20 == 0:
             _debug_log("[光点锁定] 光点(%d,%d) %s偏移(%d,%d)缩放(%.2f,%.2f)屏幕(%d,%d)" % (mx, my, mode, offset_x, offset_y, scale_x, scale_y, sx, sy))
         if getattr(self, 'frame_count', 0) % 30 == 0:
@@ -16834,6 +16947,40 @@ class MinimapRouteRecorder:
                     _ch = None
                 self._raw_char_pos = _ch                 # 原子发布:动作线程直接读最新人物点
                 self._char_feature_matches = getattr(self, '_char_feature_matches', [])
+                # 2026-09-16:小地图光点检测也搬到本高频线程(原在主循环,空闲300ms才更新一次→黑框滞后)。
+                # 每来新帧就从整帧按map_area_rect裁小地图块→find_player_dot→写全局_player_map_pos,跟着截图帧十几ms更新。
+                try:
+                    _r = getattr(self, 'map_area_rect', None)
+                    if _r and _r.get("width", 0) > 0 and _r.get("height", 0) > 0:
+                        _fh2, _fw2 = _frame.shape[:2]
+                        _x0, _y0 = int(_r["left"]), int(_r["top"])
+                        _x1 = min(_x0 + int(_r["width"]), _fw2)
+                        _y1 = min(_y0 + int(_r["height"]), _fh2)
+                        if _x1 > _x0 and _y1 > _y0:
+                            _map_blk = _frame[_y0:_y1, _x0:_x1]
+                            _pdot = self.find_player_dot(_map_blk)
+                            if _pdot is not None:
+                                self._player_map_pos = _pdot
+                                self._last_smooth_dot = _pdot
+                                self._map_dot_lost = 0
+                            else:
+                                if getattr(self, '_last_smooth_dot', None) is not None:
+                                    self._player_map_pos = self._last_smooth_dot
+                                if getattr(self, '_auto_refresh', True) and self.hwnd:
+                                    self._map_dot_lost = getattr(self, '_map_dot_lost', 0) + 1
+                                    _now_force = time.time()
+                                    if (self._map_dot_lost >= 15
+                                            and _now_force - getattr(self, '_last_minimap_force_t', 0) > 2.0):
+                                        self._last_minimap_force_t = _now_force
+                                        self._map_dot_lost = 0
+                                        try:
+                                            self._detect_minimap(debug=False)
+                                            _debug_log("[小地图] 光点连续丢失，立即三模板重定位(换图/尺寸变化兜底)")
+                                        except Exception as _mpe:
+                                            print("[小地图] 光点丢失重定位异常:", _mpe)
+                except Exception as _dot_e:
+                    if self._detect_running:
+                        _debug_log("[人物] 光点检测异常:%s" % _dot_e)
                 try:
                     self._snap_store.update_parts(player_screen=_ch, player_t=time.time())
                 except Exception as _se:
@@ -18188,32 +18335,10 @@ class MinimapRouteRecorder:
                 self._ensure_game_hwnd()   # 句柄看门狗:游戏重启/换频道句柄变更时自动重绑(仅自动绑定),先于尺寸校正
                 self._ensure_window_size()
             _lkd = time.time()
-            player_pos = self.find_player_dot(map_area)  # 每帧都检测光点
+            # 2026-09-16:光点检测已挪到人物高频线程_person_loop(每新截图帧就更新,不再等主循环300ms节奏→黑框跟手),
+            # 主循环只读全局self._player_map_pos,这里不再重复跑find_player_dot/map_area只作"有画面"门控
             self._seg_loop['1dot'] = self._seg_loop.get('1dot', 0) + time.time() - _lkd
             self._lk['after_dot'] = time.time()
-            # 光点不做EMA平滑（保证轻微移动也能反映到比例上），检测失败时用上一帧位置
-            if player_pos is not None:
-                self._player_map_pos = player_pos
-                self._last_smooth_dot = player_pos
-                self._map_dot_lost = 0  # 找到光点，丢失计数清零
-            else:
-                _last_dot = getattr(self, '_last_smooth_dot', None)
-                if _last_dot is not None:
-                    self._player_map_pos = _last_dot
-                # 换地图/小地图尺寸变化会让旧矩形截不全→光点连续丢失。不等30帧定时刷新，
-                # 连续丢15帧(约0.75s)立即三模板重定位；2秒节流防正常偶发丢点反复全屏匹配(2026-09-07)
-                if getattr(self, '_auto_refresh', True) and self.hwnd:
-                    self._map_dot_lost = getattr(self, '_map_dot_lost', 0) + 1
-                    _now_force = time.time()
-                    if (self._map_dot_lost >= 15
-                            and _now_force - getattr(self, '_last_minimap_force_t', 0) > 2.0):
-                        self._last_minimap_force_t = _now_force
-                        self._map_dot_lost = 0
-                        try:
-                            self._detect_minimap(debug=False)
-                            _debug_log("[小地图] 光点连续丢失，立即三模板重定位(换图/尺寸变化兜底)")
-                        except Exception as _e:
-                            print("[小地图] 光点丢失重定位异常:", _e)
             # 保存小地图坐标供战斗逻辑判断平台
             # 【模块B】独立检测人物屏幕位置+怪物（不依赖运行状态，脚本启动就工作）
             if self.hwnd:  # 人物屏幕位置每帧检测（绿框跟随人物实时刷新）
@@ -18312,6 +18437,7 @@ class MinimapRouteRecorder:
             if self._auto_calib_stage >= 2 and self.frame_count % 5 == 0:
                 self._match_calib_templates()
 
+            player_pos = self._player_map_pos  # 2026-09-16:光点由人物高频线程写全局,录制/draw统一读它
             if self.recording_platform:
                 _debug_log("[录制A] player_pos=%s points_count=%d recording=%s" % (str(player_pos), len(self.platform_points), self.recording_platform))  # 调试日志：验证录制时人物光点是否有效
             if self.recording_platform and player_pos:
@@ -18358,7 +18484,7 @@ class MinimapRouteRecorder:
             self._seg_loop['3misc'] = self._seg_loop.get('3misc', 0) + time.time() - self._lk.get('before_scale', time.time())
             self._lk['before_route'] = time.time()
             if not _aux_busy and not _hard_reset_done and not _anti_jitter_done:
-                self._random_step(player_pos)
+                self._random_step(self._player_map_pos)  # 2026-09-16:光点改由人物高频线程写全局_player_map_pos,这里读它
             self._seg_loop['4route'] = self._seg_loop.get('4route', 0) + time.time() - self._lk.get('before_route', time.time())
             self._lk['after_route'] = time.time()
             self._check_hotkeys()
@@ -18804,7 +18930,7 @@ class MinimapRouteRecorder:
             self._seg_loop['7e'] = self._seg_loop.get('7e', 0) + time.time() - self._lk.get('cross_t', time.time())
             try:
                 _td0 = time.time()
-                frame = self.draw(map_area, player_pos)
+                frame = self.draw(map_area, self._player_map_pos)
                 self._fps_draw_time += time.time() - _td0
                 _ti0 = time.time()
                 cv2.imshow(win, frame)
