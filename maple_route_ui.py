@@ -1299,9 +1299,6 @@ class MinimapRouteRecorder:
         self._potion_last = {}  # potionN_key -> 上次释放时间戳
         self._attack_last = {}  # atk1/aoe -> 上次释放时间戳
         self._player_screen_pos = None  # (x,y) 人物画面坐标
-        # 屏幕Y一秒最低值平滑缓冲（用户2026-09-16定稿）：打怪/选梯/边界用地面Y，过滤起跳峰值；上梯检测仍用原始Y
-        self._screen_y_smooth_window = []  # [(时间戳ms, y), ...] 最近1秒
-        self._screen_y_smooth_window_ms = 1000  # 窗口长度1秒
         self._role_track = None         # 新多锚点跟踪状态:last锚点/foot脚点/miss失配/last_full全图时间/face朝向/score
         self._role_face = None          # 面部锚点判定的朝向 'L'/'R'(打怪左右决策用)
         self._role_anchor_polys = {}    # 本帧识别到(过阈)的各锚点缩小多边形{key:([(x,y)...],score)},供蒙板画框
@@ -17512,23 +17509,8 @@ class MinimapRouteRecorder:
         # 2026-09-11曾改用"落地稳定基线_char_ground_y"(腾空时冻结),但人走上更高台阶/坡后脚Y永久抬高,
         # 被误判成起跳→基线冻结在旧低处、且要求Y回落才解锁,上台阶后永远解不开(实测实时脚528/基线卡620差92),
         # 导致几乎同高的怪被算成"上方99"一直误判跳高打。回退实时Y,与X用同一套坐标,简单不卡死。
-        # 打怪距离计算用一秒最低Y（地面值，过滤起跳峰值），上梯检测仍用原始Y
-        if self._screen_y_smooth_window:
-            py_layer = min(y for _, y in self._screen_y_smooth_window)
-        else:
-            py_layer = py
-
-        # 首次发现目标：反应延迟
-        if not self._combat_had_target:
-            self._combat_had_target = True
-            self._combat_react_until = now + random.randint(30, 90)  # 2026-09-09提效80-250→30-90,先求快;拟人化阶段再调回随机区间
-            return
-
-        # 【冒险岛世界2026-09-07清理】旧"手写分边探测(monster_dists/cross_candidates/probe_side排序)+跨层中遇怪取消"
-        # 整段已删除：选目标/分层/跨层/取消跨层全部由下方 combat_step 统一决策（其结果 _dl['state'] 在后面处理跨层取消），
-        # 旧段构建后无任何消费者(A2后群攻也改数self._monsters)，属死代码。
-
-        # === 用已验证的决策核心 combat_step 选目标/方向/存活（同平台优先 + 跨平台/cross/idle 一次搞定）===
+        # 人怪Y分层用实时人物Y(用户2026-09-16:删除方案二Y变化率平滑,实测无效且污染地面Y)
+        py_layer = py
         # 静态/空怪过滤已由主循环在做，这里直接用主循环过滤后的 self._monsters
         skill_range = int(fight_cfg.get("atk1_distance", 150) or 150)
         # 【用户2026-09-10】停步出手线=技能射程4/5(250→200):(stop_range,skill_range]仍pursue一直按住走,≤stop_range才站定开打,
@@ -17716,8 +17698,9 @@ class MinimapRouteRecorder:
             _is_new_target = (_oldlk is None) or (abs(_oldlk[0]-t_cx) > 40 or abs(_oldlk[1]-t_cy) > 50)
             if _is_new_target:
                 # 改打身边能直打的怪(cast)=不再去上层,清掉可能残留的锁定梯,防下帧又被拉回cross拉扯(用户2026-09-11)
-                if _dl['state'] == 'cast' and getattr(self, '_locked_ladder', None) is not None:
-                    self._clear_locked_ladder('改打技能范围内近身怪')
+                # 用户2026-09-16定稿:选了梯子就不解绑了,一心上梯子,有怪也不打,上到顶再打怪
+                # if _dl['state'] == 'cast' and getattr(self, '_locked_ladder', None) is not None:
+                #     self._clear_locked_ladder('改打技能范围内近身怪')
                 self._combat_target_attacked = False  # 换了新目标：重置"已出手"标记（空怪判定用）
                 self._combat_first_strike_time = 0    # 换新目标：首次出手计时清零，重新给反馈窗口
                 self._combat_target_lock_time = now     # 重置锁定基准时间
@@ -18423,12 +18406,6 @@ class MinimapRouteRecorder:
                         _t2 = time.time()
                         # 人物/怪/YOLO/血条 都由后台检测线程同一帧算好了，主线程只读结果+过滤假怪（主线程不再做重活）
                         self._player_screen_pos = self._raw_char_pos
-                        # 屏幕Y一秒最低值平滑：压入缓冲，清掉超过1秒的旧值
-                        if self._raw_char_pos is not None:
-                            _now_ms = time.time() * 1000
-                            self._screen_y_smooth_window.append((_now_ms, self._raw_char_pos[1]))
-                            while self._screen_y_smooth_window and (_now_ms - self._screen_y_smooth_window[0][0]) > self._screen_y_smooth_window_ms:
-                                self._screen_y_smooth_window.pop(0)
                         self._monster_hp_bars = self._raw_hp_bars
                         self._raw_cached = self._raw_cached_feature_monsters
                         # 2026-09-07 用户定稿：不再做"静止怪"静态过滤(冒险岛大量怪本就站桩,会误剔近身真怪→有怪不锁/空打)。
@@ -18854,7 +18831,8 @@ class MinimapRouteRecorder:
                                     else:
                                         _reach_fallback = True   # 当下全是够不着的远梯:回退全集,日志标明
                                 if _pick_list:
-                                    _mc = min(_pick_list, key=lambda c: c[0])
+                                    # 用户2026-09-16定稿:先按总距离最短,总距离一样再按人离梯Y差最小(第二筛选用Y差不是X差)
+                                    _mc = min(_pick_list, key=lambda c: (c[0], abs(c[4] - _psy)))
                                     _rx, _ry = _mc[3], _mc[4]
                                     self._ladder_lock = (_rx, _ry, _now_lm)    # 建锁:同时冻结这把梯此刻像素块(身份),坐标后续随动
                                     self._ladder_snap_x = _rx
