@@ -1,4 +1,4 @@
-"""
+﻿"""
 Minimap Route Recorder - 鼠标操作版
 Auto lock game window + blue border detection (projection) + ROI dot tracking
 三套方案（route_1/2/3），每套独立存储平台+梯子；方式：手动/随机
@@ -401,6 +401,8 @@ ROLE_TRACK_DEFAULT = {
     "lock_dead_y": 70,     # 死区 y
     "lock_idle_x": 0,      # 站立不动 x
     "lock_idle_y": 0,      # 站立不动 y
+    "lock_box_rx": 40,     # 黑框X半径
+    "lock_box_ry": 40,     # 黑框Y半径
 }
 ROLE_TRACK_FIELDS = [  # (参数key,中文标签,是否小数)
     ("fps", "跟踪FPS", False), ("thr", "匹配阈值", True),
@@ -541,8 +543,8 @@ LADDER_SCR_FAST_PX = 100      # 上行分段(用户2026-09-15定稿,主窗口屏
 LADDER_SCR_TOL = 5            # 屏幕对位最终准入(上下行共用,用户2026-09-10晚:10→5治"10太宽、没碎步贴近就原地跳"):上行|X差|≤5且连续2帧=原地直跳;下行|X差|≤5且连续2帧=按↓下移;5~35必须先走三次碎步贴近
 LADDER_SCR_HOLD_FRAMES = 2     # 屏幕对齐连续多少帧才直跳(下行方式二共用保留;上行0-60已改走三步直跳)
 LADDER_TP_DX = 300          # 向梯水平瞬移阈值(用户2026-09-15):人梯屏幕X差>此值且配了瞬移键/X瞬移距离,先朝梯水平瞬移快速接近;850ms节流(复用战斗瞬移时间戳),闪不成/节流内落段1按住走绝不站等
-LADDER_RUNJUMP_HI = 80         # 第一次上梯跑跳带上限(用户2026-09-14晚):屏幕人梯X差落入[60,80]、移动中跑跳
-LADDER_RUNJUMP_LO = 60         # 跑跳带下限;X差<=60不再跑跳,走直跳路径(按住趋近→三拍碎步对齐→<=5原地直跳);一进屏幕对位就已<=60=直接走直跳,不等跑跳
+LADDER_RUNJUMP_HI = 80         # 跑跳带上限(用户2026-09-16定稿):人梯X差落入70-80跑跳
+LADDER_RUNJUMP_LO = 70         # 跑跳带下限
 LADDER_SCR_STICK_MS = 150        # 屏幕精对齐粘滞:模板偶发丢帧时沿用上一次稳定梯X的最长时间,防状态掉回小地图走到X差0原地直跳
 LADDER_PICK_RECENT_MS = 180      # 选梯候选累积窗(用户2026-09-15):约两帧内出现过的白框都算候选,治"梯子在闪/单帧扫不到";帧率4.6~12波动,用短时间窗等价"两帧"
 LADDER_RECENT_MERGE_PX = 45      # 累积窗内同一把梯归并半径:邻帧位置X/Y都≤45px视为同一把、刷新到最新位置,避免一把梯在候选池里重复多条
@@ -554,7 +556,7 @@ LADDER_LOCK_PATCH_W = 50       # 建锁时裁下的"这把梯此刻实拍块"宽
 LADDER_LOCK_PATCH_H = 120      # 裁块高(和白框120同高)
 LADDER_LOCK_SEARCH_X = 170     # 已锁后拿冻结块在上一帧位置附近的搜索外扩X(覆盖一帧镜头横滚,大于邻域步长120)
 LADDER_LOCK_SEARCH_Y = 110     # 搜索外扩Y(大于邻域步长80)
-LADDER_LOCK_PATCH_SIM = 0.62   # 冻结块重定位相似度门槛(梯子是不动死物+实拍快照贴现场,可低于通用模板0.70)
+LADDER_LOCK_PATCH_SIM = 0.55   # 冻结块重定位相似度门槛(用户2026-09-16:0.62太高认不回,降到0.55)
 LADDER_SCR_NUDGE_STEP_PX = (100, 80, 60)  # 碎步三拍·单拍最多一口气移动的屏幕px(用户:第1拍100/第2拍80/第3拍60递减,越近越保守防冲过头;若按住中已实时达标≤TOL则立即抬、不必走满)
 LADDER_SCR_NUDGE_GAP_RANGE = (100, 110)  # 每拍【松开后】到下一拍前的停顿时长随机区间ms(用户:中间延时100-110随机,拟人不机械;时序=按住→达标/到步长/到时间抬起→停gap→检测→再按)
 LADDER_SCR_NUDGE_HOLD_MS = (100, 60, 40)  # 碎步三拍·每拍按住方向键时长基准ms(用户2026-09-11晚定稿100/60/40递减,原170-200太长对不准;各±JITTER随机)
@@ -615,14 +617,15 @@ LADDER_GRAB_FAIL_MIN_MS = 1000 # 直跳起跳后至少这么久才允许"Y落回
 LADDER_FAIL_REENTER_MS = 120  # 抓梯失败回主线后的极短冷却(2026-09-10替代原随机300~500:防同帧立刻又选同一梯空跳,又不发呆;本层有怪会被先锁去打)
 # === 梯子【失败集合】校准(用户2026-09-14定稿:直跳没抓住不回主线,最多3轮"朝梯移动当前剩余距离70%→停下→检测,达标就直跳";
 #   任一直跳后Y变小=抓住→接上梯集合、剩余轮次作废;3轮移动后仍没抓住→重新算怪距回主线打怪。移动用主窗口梯子屏幕X,和正常直跳同口径) ===
-LADDER_REALIGN_MAX_ROUNDS = 3     # 失败集合最多移动几轮(每轮=走剩余50%→停→检测→达标直跳)
-LADDER_REALIGN_RATIO = 0.50       # 每轮朝梯移动"本轮开始时剩余屏幕X差"的50%(用户0915由70%下调,减半防一按就过冲;离得远首轮仍多走,不碎步)
-LADDER_REALIGN_MIN_STEP = 6       # 单轮最少移动屏幕px(剩余太小时也保证真的挪一点,不会原地空转)
-LADDER_REALIGN_MOVE_CAP_MS = 320  # 单轮按住朝梯方向键的时长上限(实时走到本轮步长即提前抬键;防走过头/卡住死按)
-LADDER_REALIGN_GAP_MIN = 200      # 移动后固定停200ms下限(用户0915:原90-140随机太短、人还在滑行没停稳就检测,改固定200停稳再连续2帧判对齐)
-LADDER_REALIGN_GAP_MAX = 200      # 移动后固定停200ms上限(与MIN相等=固定200ms,不再随机;停稳后align连续2帧达标即原地直跳)
-LADDER_REALIGN_TOL = 5            # 达标=屏幕|人-梯X差|≤此值(复用LADDER_SCR_TOL口径5px)
-LADDER_REALIGN_LOCK_PX = 10       # 三步直跳方向锁死区(用户2026-09-15):本轮move内|人梯X差|≤此值的识别抖动不许左右翻向,真走过头>此值才改向(真机人X一帧跳28px致按键左右抵消、按住零位移)
+LADDER_REALIGN_MAX_ROUNDS = 3     # 失败集合走3轮(用户2026-09-16定稿):100/80/50MS三次移动
+LADDER_REALIGN_MOVE_TIMES = (100, 80, 50)  # 三次移动时长(用户2026-09-16定稿)
+LADDER_REALIGN_RATIO = 0.50       # 保留(当前未用)
+LADDER_REALIGN_MIN_STEP = 6       # 保留(当前未用)
+LADDER_REALIGN_MOVE_CAP_MS = 320  # 保留(当前未用)
+LADDER_REALIGN_GAP_MIN = 200      # 移动后固定停200ms
+LADDER_REALIGN_GAP_MAX = 200      # 移动后固定停200ms
+LADDER_REALIGN_TOL = 10           # 达标=屏幕|人-梯X差|≤此值
+LADDER_REALIGN_LOCK_PX = 10       # 方向锁死区
 LADDER_REALIGN_HOLD_FRAMES = 2    # 达标需连续帧数(防抖,和正常屏幕直跳一致)
 LADDER_DEBUG_DIFF_PX = 200        # 诊断(用户2026-09-15):人梯屏幕|X差|≤此值才开始每秒打印一次"人X-梯X"
 LADDER_DEBUG_DIFF_MS = 1000       # 诊断:"人X-梯X"打印节流1秒1条
@@ -639,16 +642,17 @@ JUMP_DOWN_HOLD_BEFORE_JUMP_MS = 150 # 下跳时序(用户2026-09-09最新)：松
 #   →lad_slide继续按↓1秒→lad_leap松↓随机侧100+跳离梯→lad_fall_wait固定1秒回主线;lad_grab满500 Y没变=抓不住回主线,不补跳不死磕。
 DESC_LAD_ALIGN_TOL = 5         # 方式二·段1:小地图梯X对齐人物光点中心,|差|≤5即切主窗口精对位+同拍进30Hz高帧(和上行≤7同款;2→5放宽求稳,小地图px)
 DESC_GOTO_STALL_MS = 600       # 段1朝梯走但连续600ms没靠近=被边挡住,直接切主窗口段(用特征兜底对位)
-DESC_DROP_CHECK_MS = 300       # 方式一:两跳后最早开始判Y增大的时刻(此前是跳跃上升期,不判,防噪声)
-DESC_DROP_WAIT_MAX_MS = 900    # 方式一:两跳后观察窗上限——窗内任一人Y往下增大达标=跳下成功立刻自由落体;到900ms仍纹丝不动=实心台真跳不下去,这才转方式二对齐梯子(用户2026-09-10:直接跳任意位置、别动不动就对齐梯子)
-DESC_DROP_DY = 25              # 方式一·主窗口:人物特征屏幕Y比"左右跳之前"增大≥25=确实穿到下一层(用户2026-09-10:向下不用像向上那么精,10→25放宽,只掉几px的原地小跳不算)
-DESC_DROP_DY_MAP = 8           # 方式一·小地图:世界Y增大≥8也算(小地图1px≈主窗口~10px,8≈屏幕80px真实落差;与屏幕Y取或,抗镜头跟随/光点抖动)
-DESC_DIRECT_DOWN_HOLD_MS = 100 # 方式一:第一跳(下穿台)前按住↓100ms(用户2026-09-10:压住↓100ms再跳)
-DESC_DIRECT_SIDE_MS = 100      # 方式一:第一跳松↓后,随机左/右方向键按100ms再按第二跳(左右跳离台),随即松左右
-DESC_LAD_GRAB_MS = 500         # 方式二:梯位按住↓观察500ms,期间Y变大=抓住梯子开始下滑
-DESC_LAD_SLIDE_MS = 1000       # 方式二:抓住后继续按住↓下滑1秒(用户:有变大就再按一秒)
-DESC_LAD_LEAP_SIDE_MS = 100    # 方式二:侧跳离梯前随机左/右方向键按压100ms
-DESC_LAD_FALL_WAIT_MS = 1000   # 方式二:侧跳离梯后固定等1000ms直接开主线打怪(不再判背景、不沿梯到底)
+DESC_DROP_CHECK_MS = 500       # 方式一:第二跳后500ms判Y增大(用户2026-09-16定稿)
+DESC_DROP_WAIT_MAX_MS = 1200   # 方式一:观察窗上限
+DESC_DROP_DY = 50              # 方式一·主窗口:Y增大≥50=确实跳下(用户2026-09-16定稿)
+DESC_DROP_DY_MAP = 16          # 方式一·小地图:世界Y增大≥16≈屏幕80px
+DESC_DIRECT_DOWN_HOLD_MS = 150 # 方式一:第一跳前压↓150ms
+DESC_FIRST_JUMP_WAIT_MS = 500  # 方式一:第一跳后等500ms再按侧键+第二跳
+DESC_DIRECT_SIDE_MS = 150      # 方式一:侧键按150ms(怪在哪边选哪边)
+DESC_LAD_GRAB_MS = 500         # 方式二:梯位按↓500ms
+DESC_LAD_SLIDE_MS = 1000       # 方式二:滑梯1秒
+DESC_LAD_LEAP_SIDE_MS = 150    # 方式二:侧跳150ms
+DESC_LAD_FALL_WAIT_MS = 500    # 方式二:侧跳后500ms检测Y
 DESC_Y_MOVE_TOL = 5            # 方式二lad_grab:光点Y比基准增大>5=抓住梯子向下动了
 LADDER_DEL_X_TOL = 6          # 梯删除点选命中：点击点与梯子X差≤6(小地图原始分辨率)且Y落在线段内=删这条
 LADDER_DEL_Y_TOL = 4
@@ -1514,6 +1518,7 @@ class MinimapRouteRecorder:
         self._desc_stall_t = 0        # 水平"没靠近"的起始时刻
         self._desc_jumped = False     # 本阶段是否已补按过跳跃键
         self._desc_j2 = False         # 方式一第二跳(随机侧向)是否已按
+        self._desc_j2_pre = False     # 方式一:第一跳后等500ms→按侧键标记
         self._desc_leap_dir = 1       # 方式一/二侧跳离梯的随机方向(-1左/1右)
         self._desc_j2 = False         # 方式一:第二跳(随机侧向)是否已按
         self._desc_leap_dir = 1       # 方式一/二侧跳离梯的随机方向(1右/-1左)
@@ -3346,6 +3351,8 @@ class MinimapRouteRecorder:
         self.DEAD_Y = int(_p["lock_dead_y"])
         self.IDLE_X = int(_p["lock_idle_x"])
         self.IDLE_Y = int(_p["lock_idle_y"])
+        self.LOCK_BOX_RX = int(_p["lock_box_rx"])
+        self.LOCK_BOX_RY = int(_p["lock_box_ry"])
         if _migrated:  # 旧格式迁移完成→立即落盘新结构(含characters/active),避免图已分目录而json仍旧格式的中间态
             try:
                 self._save_role_recognize()
@@ -4115,6 +4122,8 @@ class MinimapRouteRecorder:
         _mk_off(2, 1, "dead_y", "死区y", self.DEAD_Y)
         _mk_off(3, 0, "idle_x", "站立x", getattr(self,'IDLE_X',0))
         _mk_off(3, 1, "idle_y", "站立y", getattr(self,'IDLE_Y',0))
+        _mk_off(4, 0, "box_rx", "黑框X半径", getattr(self,'LOCK_BOX_RX',40))
+        _mk_off(4, 1, "box_ry", "黑框Y半径", getattr(self,'LOCK_BOX_RY',40))
 
         def _rebuild_anchors():
             for w in self._role_anchor_frame.winfo_children():
@@ -5119,7 +5128,7 @@ class MinimapRouteRecorder:
             if VK_DOWN not in self._random_move_keys:
                 self._key_down(VK_DOWN)
         # 按瞬移技能键
-        self._press_game_key(tp_key, duration=60)
+        self._press_game_key(tp_key, duration=120)
         # 瞬移后人物合法大跳变：700ms内人物匹配跳过ROI直接全图、允许远距同步(治点钉原地)
         self._char_relocate_until = time.time() * 1000 + 700
         self._climb_start_y = current_y
@@ -5187,9 +5196,9 @@ class MinimapRouteRecorder:
             return self._ladder_enter_realign(py, now_ms, "跑跳1秒没抓住")
 
         if step == 'delay1':
-            # 起跳后延时再按↑：用户2026-09-10定稿,原地直跳/固定点跑跳统一跳后50ms按↑(原直跳100/固定点150),更早抓梯
+            # 用户2026-09-16定稿:跑跳后100ms按↑,直跳后还是50ms按↑
             _is_vert = getattr(self, '_ladder_vert_jumped', False) and not getattr(self, '_ladder_run_jumped', False)
-            _up_delay = 50
+            _up_delay = 100 if getattr(self, '_ladder_run_jumped', False) else 50
             if now_ms - start_t >= _up_delay:
                 self._release_move_conflicts()  # 按↑抓梯前清攻击+两套左右(残留键会打断爬梯=上一半停)
                 if VK_DOWN in self._random_move_keys:
@@ -5198,12 +5207,10 @@ class MinimapRouteRecorder:
                     self._key_down(VK_UP)
                 self._ladder_post_jump_step = 'check'
                 self._ladder_post_jump_t = now_ms
-                # 【镜头滚动原理·用户2026-09-09】抓梯基准必须用"起跳前站地Y"(跑跳/直跳起跳时已写入_climb_start_y),
-                # 不能在此用跳后当前py覆盖:快到顶镜头会滚动、跳后Y已被污染。仅基准无效(0)时才用当前值兜底。
                 if not self._climb_start_y:
                     self._climb_start_y = py
-                _debug_log("[爬梯] 起跳后%dms按↑松左右(%s),窗口%dms内对比起跳前地面基准Y=%.0f(当前Y=%.0f)" % (
-                    _up_delay, "直跳" if _is_vert else "跑跳", LADDER_GRAB_WINDOW_MS, self._climb_start_y, py))
+                _debug_log("[爬梯] 起跳后%dms按↑松左右(%s),300ms内对比起跳前地面基准Y=%.0f(当前Y=%.0f)" % (
+                    _up_delay, "直跳" if _is_vert else "跑跳", self._climb_start_y, py))
             return False
 
         # check【镜头滚动原理·用户2026-09-09定稿】：只和"起跳前站地基准Y"比,不做相邻帧比较
@@ -5356,31 +5363,33 @@ class MinimapRouteRecorder:
         self._ladder_debug_diff_log(now_ms, spx, tpl_x)
 
         if ph == 'move':
-            # 本轮起步:轮数+1,按"当前剩余"的70%定本轮步长(离得远多走、不碎步)
+            # 本轮起步:轮数+1,按LADDER_REALIGN_MOVE_TIMES[轮-1]定时长移动
             if self._ladder_realign_from_x is None:
                 self._ladder_realign_round += 1
                 self._ladder_realign_from_x = spx
-                self._ladder_realign_lock_vk = dir_vk   # 本轮起步锁定方向(10px内抖动不翻,用户2026-09-15)
-                self._ladder_realign_px = max(LADDER_REALIGN_MIN_STEP, adiff * LADDER_REALIGN_RATIO)
+                self._ladder_realign_lock_vk = dir_vk
+                # 三次移动时长:100/80/50MS
+                _move_idx = min(self._ladder_realign_round - 1, len(LADDER_REALIGN_MOVE_TIMES) - 1)
+                self._ladder_realign_px = LADDER_REALIGN_MOVE_TIMES[_move_idx]  # 复用字段存时长
                 self._ladder_realign_t = now_ms
-                _debug_log("[失败集合] 第%d/%d轮:剩余%.0f屏幕px,本轮走%d%%=%.0f"
+                _debug_log("[失败集合] 第%d/%d轮:移动%dMS(剩余%.0fpx)"
                            % (self._ladder_realign_round, LADDER_REALIGN_MAX_ROUNDS,
-                              adiff, int(LADDER_REALIGN_RATIO * 100), self._ladder_realign_px))
+                              self._ladder_realign_px, adiff))
             if opp_vk in self._random_move_keys:
                 self._key_up(opp_vk)
             if dir_vk not in self._random_move_keys:
                 self._key_down(dir_vk)
-            moved = abs(spx - self._ladder_realign_from_x)
-            if moved >= self._ladder_realign_px or adiff <= LADDER_REALIGN_TOL                     or now_ms - self._ladder_realign_t >= LADDER_REALIGN_MOVE_CAP_MS:
-                # 走到本轮步长/已达标/按满时长→抬键,进gap停稳
+            _moved_ms = now_ms - self._ladder_realign_t
+            if _moved_ms >= self._ladder_realign_px or adiff <= LADDER_REALIGN_TOL:
+                # 按满时长/已达标→抬键,进gap停稳
                 if dir_vk in self._random_move_keys:
                     self._key_up(dir_vk)
-                self._ladder_realign_lock_vk = None   # 进gap解锁,下一轮move起步重新定方向(用户2026-09-15)
+                self._ladder_realign_lock_vk = None
                 self._ladder_realign_phase = 'gap'
                 self._ladder_realign_gap_to = now_ms + random.randint(LADDER_REALIGN_GAP_MIN,
                                                                        LADDER_REALIGN_GAP_MAX)
-                _debug_log("[失败集合] 本轮移动%.0fpx后剩余%.0f,抬键停%dms稳" % (
-                    moved, adiff, int(self._ladder_realign_gap_to - now_ms)))
+                _debug_log("[失败集合] 移动%dMS后剩余%.0f,抬键停%dms稳" % (
+                    int(self._ladder_realign_px), adiff, int(self._ladder_realign_gap_to - now_ms)))
             return False
 
         if ph == 'gap':
@@ -5399,7 +5408,7 @@ class MinimapRouteRecorder:
                 _jk = self._get_fight_config().get("jump_key", "")
                 self._climb_start_y = py    # 起跳前小地图Y=成败基准,起跳后Y变小=抓住接上梯集合
                 if _jk:
-                    self._press_game_key(_jk, duration=80)
+                    self._press_game_key(_jk, duration=120)
                 self._ladder_vert_jumped = True
                 self._ladder_jump_phase = 'post_jump'
                 self._ladder_post_jump_step = 'delay1'
@@ -5445,12 +5454,17 @@ class MinimapRouteRecorder:
         self._climb_state = 'descend'
         self._climb_direction = -1
         self._ladder_precise_mode = True   # 用户2026-09-15:第一次下跳就关怪物识别,横跳离梯+1秒/落地由_reset_climb重开
+        # 用户2026-09-16:下平台前清梯子锁定,不要锁梯子;下跳失败转方式二时再重新锁
+        self._ladder_snap_x = None
+        self._ladder_snap_y = None
+        self._ladder_lock_patch = None
+        self._monster_overlay_data["ladder_sel"] = None
         self._climb_target_y = target_y
         self._climb_action_time = now_ms
         # 用户2026-09-11:跳前点基线已解决下跳腾空误判高低,删掉旧3秒冻结;防重复下跳靠descend状态机自身(进descend后不再走入口)
         # 用户2026-09-10:跳过旧goto_x(小碎步走到怪正头上才跳),进descend原地直接按住↓下跳;
         # first_jump满窗口Y没变(跳不了)会自动转to_ladder走梯子,不需要先水平对齐怪
-        self._desc_phase = 'first_jump'
+        self._desc_phase = 'pre_wait'   # 用户2026-09-16:下跳前置——停主线松键等150ms再跳
         self._desc_phase_t = now_ms
         self._desc_base_y = py
         self._desc_ref_px = px
@@ -5458,6 +5472,7 @@ class MinimapRouteRecorder:
         self._desc_jumped = False
         self._desc_j2 = False
         self._desc_leap_dir = 1
+        self._desc_j2_pre = False
         # 基准在"决定下跳、人还站定"时就记(用户2026-09-10:原在第二跳空中记会取到无效屏幕Y=0/动作抖动,导致Δ=0误判没下去→每次都转梯子对齐)
         self._desc_pre_leap_sy = self._player_screen_pos[1] if self._player_screen_pos else None  # 站定人物特征屏幕Y
         self._desc_pre_leap_my = py     # 站定小地图世界Y基准(不受镜头滚动影响,主判据)
@@ -5653,6 +5668,17 @@ class MinimapRouteRecorder:
         if VK_DOWN not in self._random_move_keys:
             self._key_down(VK_DOWN)
 
+    def _pick_desc_side(self):
+        """下行横跳方向:怪在右边选右(1),怪在左边选左(-1),没怪随机"""
+        try:
+            tx = getattr(self, '_target_monster_x', None)
+            px = getattr(self, '_player_x', None)
+            if tx is not None and px is not None:
+                return 1 if tx > px else -1
+        except Exception:
+            pass
+        return random.choice([-1, 1])
+
     def _enter_desc_fall(self, py, now_ms):
         """阶段fall：直接下跳已确认Y变大后的自由落体——不按任何键(用户2026-09-09:跳后即松↓不长按),
         只等三背景点连续静止=落地站稳。"""
@@ -5673,46 +5699,57 @@ class MinimapRouteRecorder:
         _jk = self._get_fight_config().get("jump_key", "")
         ph = self._desc_phase
 
-        # ①first_jump【方式一·用户2026-09-10定稿:不找口子/不走边缘,原地直接跳;动作无条件做完整,事后在check_drop一次性判Y】
-        #   压↓100ms→第一跳(下穿台)→松↓→随机侧键100ms→第二跳(左右跳,跳前记人物特征基准Y)→松左右→进check_drop
+        # ①first_jump【方式一】前置:停主线→松攻击和左右键→等150ms→再开始跳(用户2026-09-16)
+        if ph == 'pre_wait':
+            self._key_up(VK_LEFT)
+            self._key_up(VK_RIGHT)
+            self._key_up(VK_DOWN)
+            if now_ms - self._desc_phase_t >= 150:
+                self._desc_phase = 'first_jump'
+                self._desc_phase_t = now_ms
+            return False
+
+        # ②first_jump:压↓150ms→按跳→等500ms→松↓→侧键150ms→第二跳
         if ph == 'first_jump':
             if not self._desc_jumped:
-                # 子步1:按住↓满100ms→第一跳,随即松↓、按下随机侧键
+                # 子步1:压↓150ms→按跳(同时压↓)
                 if VK_DOWN not in self._random_move_keys:
                     self._key_down(VK_DOWN)
                 if now_ms - self._desc_phase_t >= DESC_DIRECT_DOWN_HOLD_MS:
                     if _jk:
-                        self._press_game_key(_jk, duration=80)   # 第一跳:向下穿台
+                        self._press_game_key(_jk, duration=150)   # 第一跳:向下穿台(用户2026-09-16:80太短没反应,改150)
                     self._desc_jumped = True
                     self._desc_jump_t = now_ms
+                    _debug_log("[下行·方式一] ↓压%.0fms按跳,等%dms松↓" % (
+                        DESC_DIRECT_DOWN_HOLD_MS, DESC_FIRST_JUMP_WAIT_MS))
+            elif not getattr(self, '_desc_j2_pre', False):
+                # 子步2:跳后等500ms→松↓→按侧键(怪在哪边选哪边)
+                if now_ms - self._desc_jump_t >= DESC_FIRST_JUMP_WAIT_MS:
+                    self._desc_j2_pre = True
+                    self._desc_side_t = now_ms
                     if VK_DOWN in self._random_move_keys:
-                        self._key_up(VK_DOWN)                   # 第一跳后立刻松↓(不长按)
-                    self._desc_leap_dir = random.choice([-1, 1])  # 随机左/右拟人
+                        self._key_up(VK_DOWN)  # 松↓
+                    self._desc_leap_dir = self._pick_desc_side()
                     _svk = VK_RIGHT if self._desc_leap_dir > 0 else VK_LEFT
                     _ovk = VK_LEFT if _svk == VK_RIGHT else VK_RIGHT
                     if _ovk in self._random_move_keys:
                         self._key_up(_ovk)
                     if _svk not in self._random_move_keys:
                         self._key_down(_svk)
-                    _debug_log("[下行·方式一] ↓压%.0fms第一跳+松↓+随机向%s" % (
-                        DESC_DIRECT_DOWN_HOLD_MS, "右" if self._desc_leap_dir > 0 else "左"))
+                    _debug_log("[下行·方式一] 跳后等%dms松↓→按向%s键%dms" % (
+                        DESC_FIRST_JUMP_WAIT_MS, "右" if self._desc_leap_dir > 0 else "左", DESC_DIRECT_SIDE_MS))
             elif not getattr(self, '_desc_j2', False):
-                # 子步2:随机侧键按满100ms→第二跳(左右跳、带侧向速度离台),跳【前】记人物特征基准Y,随即松左右进check_drop
-                _svk = VK_RIGHT if getattr(self, '_desc_leap_dir', 1) > 0 else VK_LEFT
-                if _svk not in self._random_move_keys:
-                    self._key_down(_svk)
-                if now_ms - self._desc_jump_t >= DESC_DIRECT_SIDE_MS:
-                    # 基准沿用_enter_descend站定值(不在第二跳空中重取,避免取到无效0/抖动)
+                # 子步3:侧键150ms→第二跳→松方向键
+                if now_ms - self._desc_side_t >= DESC_DIRECT_SIDE_MS:
                     if _jk:
-                        self._press_game_key(_jk, duration=80)   # 第二跳(左右跳)
+                        self._press_game_key(_jk, duration=150)   # 第二跳(横跳,用户2026-09-16:改150)
                     self._desc_j2 = True
+                    self._desc_phase = 'check_drop'
+                    self._desc_phase_t = now_ms
                     self._key_up(VK_LEFT)
                     self._key_up(VK_RIGHT)
-                    self._desc_phase = 'check_drop'             # 动作做完→事后一次性判Y(不在动作中途判,避免光点闪断误判)
-                    self._desc_phase_t = now_ms
-                    _debug_log("[下行·方式一] 侧向%.0fms第二跳(左右跳)+松键,记基准Y(屏幕=%s/世界=%.0f),%.0fms后判增大(屏≥%d/世≥%d)" % (
-                        DESC_DIRECT_SIDE_MS, self._desc_pre_leap_sy, self._desc_pre_leap_my,
-                        DESC_DROP_CHECK_MS, DESC_DROP_DY, DESC_DROP_DY_MAP))
+                    _debug_log("[下行·方式一] 侧键%dms→第二跳+松键,等%dms判Y增大%dpx" % (
+                        DESC_DIRECT_SIDE_MS, DESC_DROP_CHECK_MS, DESC_DROP_DY))
             return False
 
         # ①.5 check_drop【方式一·观察窗判定(用户2026-09-10晚:任意位置先直接跳、别动不动对齐梯子)】基准用_enter_descend站定值。
@@ -5728,15 +5765,27 @@ class MinimapRouteRecorder:
             _dsy = (_cur_sy - self._desc_pre_leap_sy) if (
                 _cur_sy is not None and self._desc_pre_leap_sy) else None
             _dmy = py - self._desc_pre_leap_my
-            _moved = ((_dsy is not None and _dsy >= DESC_DROP_DY) or (_dmy >= DESC_DROP_DY_MAP))
+            # 用户2026-09-16:删除小地图世界Y判定(_dmy>=DESC_DROP_DY_DY_MAP),只看主窗口人物特征Y
+            _moved = (_dsy is not None and _dsy >= DESC_DROP_DY)
             if _el >= DESC_DROP_CHECK_MS and _moved:
                 # 观察窗内一旦Y往下增大=确实跳下,立刻自由落体等落地(直接跳成功,绝不去对齐梯子)
                 _debug_log("[下行·方式一] 直接下跳Y增大(屏幕Δ%s/世界Δ%.0f,起%.0fms)=穿到下一层,自由落体" % (
                     ("%.0f" % _dsy) if _dsy is not None else "NA", _dmy, _el))
                 self._enter_desc_fall(py, now_ms)
             elif _el >= DESC_DROP_WAIT_MAX_MS:
-                # 实心台横跳不下去:用户2026-09-15——清掉"小地图选梯+小地图粗对齐(to_ladder)"旧法(旧码已物理删除,唯一选梯=怪梯人总距离最短+锁身份),
-                # 直接切到大游戏窗口用梯子白框/模板找梯对位(lad_scr纯屏幕),后续抓住下滑→再横跳离梯时序不变。
+                # 实心台横跳不下去:用户2026-09-16——方式一失败后再重复一次,第二次还失败才转方式二找梯子
+                if not getattr(self, '_desc_first_jump_retried', False):
+                    self._desc_first_jump_retried = True
+                    self._desc_jumped = False
+                    self._desc_j2 = False
+                    self._desc_j2_pre = False
+                    self._desc_phase = 'pre_wait'
+                    self._desc_phase_t = now_ms
+                    self._desc_pre_leap_sy = self._player_screen_pos[1] if self._player_screen_pos else None
+                    self._desc_pre_leap_my = py
+                    _debug_log("[下行·方式一] 第一次没下去,重复一次方式一")
+                    return False
+                # 第二次还失败,转方式二找梯子
                 _debug_log("[下行·方式一] 观察%.0fms Y始终没增大(屏幕Δ%s/世界Δ%.0f)=实心台,直接主窗口找梯(不走小地图)" % (
                     _el, ("%.0f" % _dsy) if _dsy is not None else "NA", _dmy))
                 self._rlog("横跳%.0fms没下去,直接主窗口找梯子" % _el, log='behavior')
@@ -5813,7 +5862,7 @@ class MinimapRouteRecorder:
                 self._key_down(_svk)
             if not self._desc_jumped and now_ms - self._desc_phase_t >= DESC_LAD_LEAP_SIDE_MS:
                 if _jk:
-                    self._press_game_key(_jk, duration=80)
+                    self._press_game_key(_jk, duration=120)
                 self._desc_jumped = True
                 self._key_up(VK_LEFT)
                 self._key_up(VK_RIGHT)   # 侧按100ms给个初速度即可,跳后松侧键避免落地还在横走
@@ -6009,7 +6058,7 @@ class MinimapRouteRecorder:
             if not getattr(self, '_jd_jumped', False) and elapsed >= JUMP_DOWN_HOLD_BEFORE_JUMP_MS:
                 _jk = self._get_fight_config().get("jump_key", "")
                 if _jk:
-                    self._press_game_key(_jk, duration=80)
+                    self._press_game_key(_jk, duration=120)
                 self._jd_jumped = True
                 _debug_log("[下跳] ↓已按住%.0fms,补按跳跃键" % elapsed)
             # 【阶段2】等下落：光点Y比起跳点增大>5=已离开平台开始下落→此时松↓(用户:按跳后再松下),进入落地观测;满800ms还没下降=跳不下去改梯子
@@ -6154,7 +6203,7 @@ class MinimapRouteRecorder:
                     self._climb_target_y = target_y
                     self._climb_start_y = py
                     self._climb_action_time = now_ms
-                    self._press_game_key(jump_key, duration=80)
+                    self._press_game_key(jump_key, duration=150)
                     # 跳起后按住上键（向上移动；Y检测在jump_up状态里）
                     if VK_UP not in self._random_move_keys:
                         self._key_down(VK_UP)
@@ -6190,7 +6239,7 @@ class MinimapRouteRecorder:
 
             # 没有梯子，小高度差尝试普通跳跃
             if abs(dy) <= 20 and jump_key:
-                self._press_game_key(jump_key, duration=80)
+                self._press_game_key(jump_key, duration=150)
                 return False
 
         # 水平移动
@@ -6218,7 +6267,7 @@ class MinimapRouteRecorder:
                     fight_cfg = self._get_fight_config()
                     jump_key = fight_cfg.get("jump_key", "")
                     if jump_key and now_ms - getattr(self, '_move_stuck_jump_time', 0) > 1200:
-                        self._press_game_key(jump_key, duration=80)
+                        self._press_game_key(jump_key, duration=150)
                         self._move_stuck_jump_time = now_ms
                         _debug_log("[移动] 卡住：方向=%s X=%.0f 1.5秒未变化，跳跃脱困" % (
                             "右" if dx > 0 else "左", px))
@@ -6235,7 +6284,7 @@ class MinimapRouteRecorder:
             if _grn_slope == 'up':
                 # 绿线坡跳：跨层/非跨层都生效(过挡正道),仅350ms去重
                 if _grn_jkey and now_ms - getattr(self, '_last_green_slope_jump', 0) > 350:
-                    self._press_game_key(_grn_jkey, duration=60)
+                    self._press_game_key(_grn_jkey, duration=120)
                     self._last_green_slope_jump = now_ms
                     _debug_log("[绿线坡] 前方上坡(低向高) 跑+跳")
             elif _grn_slope == 'down':
@@ -6246,7 +6295,7 @@ class MinimapRouteRecorder:
                 if jump_key:
                     last_jump = getattr(self, '_last_platform_gap_jump', 0)
                     if now_ms - last_jump > 350:
-                        self._press_game_key(jump_key, duration=60)
+                        self._press_game_key(jump_key, duration=120)
                         self._last_platform_gap_jump = now_ms
                         _debug_log("[平台对接] 微高差%.0fpx，边走边跳" % dy)
         else:
@@ -11194,7 +11243,7 @@ class MinimapRouteRecorder:
                 and now_ms - self._combat_last_h_teleport > 850 and not _tp_bound0):
             self._hold_toward_ladder(sdx)              # 先按住朝梯方向(瞬移不成也在持续走,不发呆)
             self._pre_teleport_release()               # 松攻击+50ms前摇(攻击硬直会吞瞬移),方向键保持
-            self._press_game_key(_tp_key0, duration=60)
+            self._press_game_key(_tp_key0, duration=120)
             self._combat_last_h_teleport = now_ms
             self._char_relocate_until = now_ms + 700   # 瞬移合法大跳变:人物识别700ms全图重捕
             self._rlog_throttle('lad_tp', "向梯瞬移(X差%.0f>%d朝%s)" % (asdx, LADDER_TP_DX, _tp_dir0), 800, log='behavior')
@@ -11211,22 +11260,20 @@ class MinimapRouteRecorder:
             and LADDER_RUNJUMP_LO <= asdx <= LADDER_RUNJUMP_HI \
             and _merged
         if _rj_trig:
-            # 用户2026-09-14固定时序:落入60-80跑跳带→按跳,【起跳同时松开左右键】、立刻只按住↑(满1秒后run_hold判Y)
+            # 用户2026-09-16定稿:70-80带起跳→按跳120ms,【起跳同时松开左右键】、100ms后按↑、按↑300ms后判Y
             self._key_up(VK_LEFT)
             self._key_up(VK_RIGHT)
             if VK_DOWN in self._random_move_keys:
                 self._key_up(VK_DOWN)
             self._ladder_run_jumped = True
             self._ladder_vert_jumped = False
-            self._climb_start_y = py            # 起跳前站地Y=1秒后判成败基准
-            self._press_game_key(jump_key, duration=80)
-            if VK_UP not in self._random_move_keys:
-                self._key_down(VK_UP)
-            _debug_log("[爬梯·屏幕·跑跳] 60-80带起跳(梯X=%d 人X=%d 差%.1f):起跳即松左右、按住↑满%dms再判Y(基准Y=%.0f)" % (
-                tpl_x, spx, sdx, RUNJUMP_GRAB_WINDOW_MS, py))
-            self._rlog("跑跳上梯(60-80带X差%.1f起跳,松左右按↑1秒判Y)" % sdx, log='behavior')
+            self._climb_start_y = py            # 起跳前站地Y=判成败基准
+            self._press_game_key(jump_key, duration=120)
+            _debug_log("[爬梯·屏幕·跑跳] 70-80带起跳(梯X=%d 人X=%d 差%.1f):起跳松左右、100ms后按↑、300ms后判Y(基准Y=%.0f)" % (
+                tpl_x, spx, sdx, py))
+            self._rlog("跑跳上梯(70-80带X差%.1f起跳)" % sdx, log='behavior')
             self._ladder_jump_phase = 'post_jump'
-            self._ladder_post_jump_step = 'run_hold'
+            self._ladder_post_jump_step = 'delay1'
             self._ladder_post_jump_t = now_ms
             return False
         # 段2.5(用户2026-09-15收窄):走到这X差≤100(段1挡了>100);60~80在"按住+选中白框"时已由段2跑跳消费,
@@ -12268,18 +12315,20 @@ class MinimapRouteRecorder:
                             except Exception:
                                 pass
                             # 调试:小地图光点映射到游戏窗口的锁角色点→黑色框(用户要求黑色),看落点对不对
-                            # 冒险岛相机把人固定在屏幕"中心偏下"而非几何中心,故y补固定偏移(真机校准:初值+100,2026-09-16再上调30→+70),x不动
+                            # 2026-09-16:黑白不同时显示;有白框(角色特征)就不画黑框;黑框尺寸单独调
                             try:
-                                _ls = self.lock_screen_from_dot()
-                                if _ls:
-                                    _lsx, _lsy = int(_ls[0]), int(_ls[1])  # 补偿已在lock_screen_from_dot按状态加,这里不再叠加
-                                    _LR = 40
-                                    _lkp = gdi32.CreatePen(0, 2, 0x000000)
-                                    if _lkp: gdi_objs.append(_lkp)
-                                    _olk = gdi32.SelectObject(hdc, _lkp)
-                                    gdi32.SelectObject(hdc, gdi32.GetStockObject(5))
-                                    gdi32.Rectangle(hdc, _lsx - _LR, _lsy - _LR, _lsx + _LR, _lsy + _LR)
-                                    gdi32.SelectObject(hdc, _olk)
+                                if not _rsb:  # 没白框→画黑框
+                                    _ls = self.lock_screen_from_dot()
+                                    if _ls:
+                                        _lsx, _lsy = int(_ls[0]), int(_ls[1])
+                                        _LRX = int(getattr(self, 'LOCK_BOX_RX', 40))
+                                        _LRY = int(getattr(self, 'LOCK_BOX_RY', 40))
+                                        _lkp = gdi32.CreatePen(0, 2, 0x000000)
+                                        if _lkp: gdi_objs.append(_lkp)
+                                        _olk = gdi32.SelectObject(hdc, _lkp)
+                                        gdi32.SelectObject(hdc, gdi32.GetStockObject(5))
+                                        gdi32.Rectangle(hdc, _lsx - _LRX, _lsy - _LRY, _lsx + _LRX, _lsy + _LRY)
+                                        gdi32.SelectObject(hdc, _olk)
                             except Exception:
                                 pass
 
@@ -12344,10 +12393,15 @@ class MinimapRouteRecorder:
                                 if _lm_pen:
                                     gdi_objs.append(_lm_pen)
                                     _o_lm = gdi32.SelectObject(hdc, _lm_pen)
-                                    for (_lmx, _lmy) in data.get('ladder_marks', []):
+                                    for _i, (_lmx, _lmy) in enumerate(data.get('ladder_marks', [])):
                                         if _sel_x is not None and abs(_lmx - _sel_x) <= LADDER_MARK_NMS_X:
                                             continue   # 被选中的这把白框不画(下面原地转红框)
                                         gdi32.Rectangle(hdc, _lmx - 25, _lmy - 60, _lmx + 25, _lmy + 60)  # 宽50高120,中心=白框中心
+                                        # 给每个梯子打编号(用户2026-09-16)
+                                        gdi32.SetTextColor(hdc, 0xFFFFFF)
+                                        gdi32.SetBkMode(hdc, 1)
+                                        _num_txt = "#%d" % (_i + 1)
+                                        gdi32.TextOutW(hdc, _lmx - 8, _lmy - 78, _num_txt, len(_num_txt))
                                     gdi32.SelectObject(hdc, _o_lm)
                                 if _ld_sel:
                                     _sx, _sy = _ld_sel[0], _ld_sel[1]   # 选中梯:坐标就是白框特征中心,不漂移
@@ -12359,8 +12413,8 @@ class MinimapRouteRecorder:
                                         gdi32.SelectObject(hdc, _o_sp)
                                     gdi32.SetTextColor(hdc, 0x0000FF)
                                     gdi32.SetBkMode(hdc, 1)
-                                    _stxt = "梯X:%d" % _sx
-                                    gdi32.TextOutW(hdc, _sx - 25, _sy - 78, _stxt, len(_stxt))
+                                    _stxt = "选中"
+                                    gdi32.TextOutW(hdc, _sx - 15, _sy - 78, _stxt, len(_stxt))
                                 for (x1, y1, x2, y2, score) in data.get('monsters', []):
                                     mx, my = (x1 + x2) // 2, (y1 + y2) // 2
                                     dist = int(((mx - cx) ** 2 + (my - cy) ** 2) ** 0.5)
@@ -14770,6 +14824,10 @@ class MinimapRouteRecorder:
                 self.IDLE_X = v; self._role_rec["params"]["lock_idle_x"] = v
             elif key == "idle_y":
                 self.IDLE_Y = v; self._role_rec["params"]["lock_idle_y"] = v
+            elif key == "box_rx":
+                self.LOCK_BOX_RX = v; self._role_rec["params"]["lock_box_rx"] = v
+            elif key == "box_ry":
+                self.LOCK_BOX_RY = v; self._role_rec["params"]["lock_box_ry"] = v
             self._save_role_recognize()
         except Exception as e:
             _debug_log("[黑框偏移] 设置失败:%s %s" % (key, e))
@@ -16136,7 +16194,7 @@ class MinimapRouteRecorder:
             self._release_combat_key(vk)
             self._hold_combat_key(vk)
             if st['jump'] and now - self._combat_last_jump > 250:
-                self._press_game_key(st['jump'], duration=70)
+                self._press_game_key(st['jump'], duration=120)
                 self._combat_last_jump = now
             st['dot0'] = mmp[0] if mmp else st['dot0']
             st['act_t'] = now
@@ -16517,13 +16575,13 @@ class MinimapRouteRecorder:
                         if getattr(self, '_transit_jump_effective', False):
                             # 有效：跳着走（450ms间隔）
                             if now_ms - getattr(self, '_combat_last_jump', 0) > 450:
-                                self._press_game_key(_jump_key, duration=80)
+                                self._press_game_key(_jump_key, duration=120)
                                 self._combat_last_jump = now_ms
                         elif getattr(self, '_transit_jump_probe_next', 0) == 0 or \
                                 now_ms >= getattr(self, '_transit_jump_probe_next', 0):
                             # 试探跳（走近一点才试，避免远处乱跳）
                             if abs(_mdx) <= 250:
-                                self._press_game_key(_jump_key, duration=80)
+                                self._press_game_key(_jump_key, duration=120)
                                 self._transit_jump_probe_y = mpy
                                 self._transit_jump_probe_t = now_ms
                                 self._transit_jump_probe_next = 0
@@ -17313,7 +17371,7 @@ class MinimapRouteRecorder:
                 if now >= getattr(self, '_platform_retreat_next_jump', 0):
                     _jump_key = fight_cfg.get("jump_key", "")
                     if _jump_key:
-                        self._press_game_key(_jump_key, duration=80)
+                        self._press_game_key(_jump_key, duration=120)
                     self._platform_retreat_next_jump = now + random.randint(1200, 2500)
                 # 拟人：2%概率触发下一次停顿（0.1~0.25秒）
                 if random.random() < 0.02:
@@ -17840,7 +17898,7 @@ class MinimapRouteRecorder:
                 if getattr(self, '_aux_enable_unblock', True) and self._check_move_blocked(now, px, move_dir, jump_key):
                     return
                 self._pre_teleport_release()   # 瞬移前先松攻击键+前摇(攻击硬直会吞瞬移),方向键保持
-                self._press_game_key(_tp_key, duration=60)
+                self._press_game_key(_tp_key, duration=120)
                 self._combat_last_h_teleport = now
                 self._char_relocate_until = now + 700
                 self._combat_tp_pending = {'axis': 'x', 'dir': 1 if move_dir == 'right' else -1,
@@ -17862,7 +17920,7 @@ class MinimapRouteRecorder:
                 self._combat_timed_keys = [t for t in self._combat_timed_keys if t[0] != _vvk]
                 self._combat_timed_keys.append((_vvk, now + 120))
                 self._pre_teleport_release()   # 瞬移前先松攻击键+前摇(攻击硬直会吞瞬移),竖直方向键保持
-                self._press_game_key(_tp_key, duration=60)
+                self._press_game_key(_tp_key, duration=120)
                 self._combat_last_h_teleport = now
                 self._char_relocate_until = now + 700
                 self._combat_tp_pending = {'axis': 'y', 'dir': 1 if _dyv > 0 else -1,
@@ -17967,7 +18025,7 @@ class MinimapRouteRecorder:
                 if not getattr(self, '_below_down_since', 0):
                     self._below_down_since = now
                 if jump_key and (now - self._below_down_since) >= 50 and now - self._combat_last_jump > 450:
-                    self._press_game_key(jump_key, duration=70)
+                    self._press_game_key(jump_key, duration=120)
                     self._combat_last_jump = now
                     _debug_log("[下坡] 怪在正下方Y差%d,↓按住≥50ms+跳落层" % (t_cy - py_layer))
             return
@@ -17996,7 +18054,7 @@ class MinimapRouteRecorder:
                 # 该跳了(进入high_slope第一帧_slope_next_at=0,直接跳,不等)
                 # 跳高打在原图层原地起跳、人不会出界(用户2026-09-11),故不加打怪区域上下闸门,只跨层才限
                 if jump_key:
-                    self._press_game_key(jump_key, duration=70)
+                    self._press_game_key(jump_key, duration=120)
                     self._combat_last_jump = now
                     self._slope_phase = 'wait_attack'
                     # 跳后延时(到攻击):战士80~100ms空中打;法师1000±50ms(已落地)才打
@@ -18723,7 +18781,9 @@ class MinimapRouteRecorder:
                     # ④空帧(寻怪范围两帧池也没):不钉旧点、snap置None(红框这帧不画、直跳不拿旧坐标算差值),锁身份保留;连续LADDER_MERGE_WAIT_MS真没有才清锁回主线。
                     _white_now = [(c[0], c[1]) for c in self._lad_marks_cache]
                     _sel = None
-                    if getattr(self, '_climb_state', 'none') != 'none' and self._player_screen_pos:
+                    _climb_st = getattr(self, '_climb_state', 'none')
+                    if _climb_st != 'none' and _climb_st != 'descend' and self._player_screen_pos:
+                        # 用户2026-09-16:descend状态下不选梯(下跳前清梯子锁定,只有方式二找梯子时才重新锁)
                         try:
                             _psx, _psy = self._player_screen_pos
                             _cdir = int(getattr(self, '_climb_direction', 1) or 1)

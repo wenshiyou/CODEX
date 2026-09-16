@@ -14,8 +14,10 @@
     "lock_dead_lx": 31,
     "lock_dead_rx": 46,
     "lock_dead_y": 60,
-    "lock_idle_x": 29,
-    "lock_idle_y": 75
+    "lock_idle_x": 4,
+    "lock_idle_y": 75,
+    "lock_box_rx": 150,
+    "lock_box_ry": 150
   },
   "blocklist": [
     [
