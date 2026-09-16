@@ -6655,16 +6655,9 @@ class MinimapRouteRecorder:
         if not cands:
             # 本帧无合格团:不清除last_player_pos(留作下帧最近邻锚点),但仍返回None交主循环丢点逻辑
             return None
-        _last = getattr(self, "last_player_pos", None)
-        if _last is not None:
-            cands.sort(key=lambda c: (c[1] - _last[0]) ** 2 + (c[2] - _last[1]) ** 2)  # 离上一帧最近=自己
-            _ax, _ay = cands[0][1], cands[0][2]
-            if (_ax - _last[0]) ** 2 + (_ay - _last[1]) ** 2 > 28 * 28:  # 最近团也>28px=锚点失效,改取最大团
-                cands.sort(reverse=True)
-                _ax, _ay = cands[0][1], cands[0][2]
-        else:
-            cands.sort(reverse=True)  # 首帧无历史:取最大团
-            _ax, _ay = cands[0][1], cands[0][2]
+        # 用户2026-09-16:去掉"优先选离上一帧最近的团"的最近邻逻辑,直接取最大团(黄芒星=自己,不靠历史锚点,防止串点后甩不掉)
+        cands.sort(reverse=True)
+        _ax, _ay = cands[0][1], cands[0][2]
         # 整颗芒星连通域质心(对称星=视觉几何中心);_dot_center_off=最后1px级手动微调,默认0
         cx = int(round(_ax)) + int(getattr(self, '_dot_center_off_x', 0) or 0)
         cy = int(round(_ay)) + int(getattr(self, '_dot_center_off_y', 0) or 0)
