@@ -7784,6 +7784,14 @@ class MinimapRouteRecorder:
             self._key_state[vk] = pressed
 
     def _handle_hotkey(self, vk):
+        if vk == VK_F3:
+            # F3=小地图一屏视野绿框校准(用户2026-09-16指定F3):进入后在小地图点左下+右上两点(相对光点)、
+            # 点已画圆点选中后方向键微调,S保存、Q退出;校准中再按一次F3=保存并退出。绿框=一屏视野,光点居中时框住光点
+            if getattr(self, '_calibrating_blue_box', False):
+                self._save_and_exit_blue_box_calibration()
+            else:
+                self._start_blue_box_calibration()
+            return
         if vk == VK_F4:
             # F4=调试显示总开关:开=画全部框/线(锚点橙框/白搜索框/黄怪物框/蓝技能框/怪物点等);关=蒙板等同干净原画面。
             # 蒙板只负责显示、不参与识别,关掉不影响任何打怪逻辑。旧连拍采集已改由"人物特征"按钮的角色识别管理窗承担(方法保留备用)。
@@ -8329,6 +8337,17 @@ class MinimapRouteRecorder:
             map_h = getattr(self, '_last_map_h', MAP_H)
             map_x = int((x - UI_MAP_X) / UI_MAP_W * map_w)
             map_y = int((y - UI_MAP_Y) / UI_MAP_H * map_h)
+            # 【绿框校准·用户2026-09-16 F3】校准中:小地图点击只服务"定左下/右上两点"(相对光点)、点已画圆点=选中微调。
+            # 坐标用小地图实际贴放矩形_map_disp_*严格逆运算(和打怪区边界/绿线同源,避免公共map_y系统性偏上12px)
+            if getattr(self, '_calibrating_blue_box', False):
+                _bdx = getattr(self, '_map_disp_x', UI_MAP_X)
+                _bdy = getattr(self, '_map_disp_y', UI_MAP_Y)
+                _bdw = getattr(self, '_map_disp_w', UI_MAP_W)
+                _bdh = getattr(self, '_map_disp_h', UI_MAP_H)
+                _cmx = int((x - _bdx) / _bdw * map_w) if _bdw else map_x
+                _cmy = int((y - _bdy) / _bdh * map_h) if _bdh else map_y
+                self._handle_blue_box_click(_cmx, _cmy)
+                return
             # 【梯删除·用户2026-09-09】右上角"梯删除"按钮：点一下进入待选(再点退出)
             if self._btn_ladder_delete and _in(self._btn_ladder_delete, x, y):
                 self._ladder_delete_mode = not self._ladder_delete_mode
@@ -8634,6 +8653,12 @@ class MinimapRouteRecorder:
         # 存储当前小地图原始尺寸，供鼠标拖动时坐标转换用
         self._last_map_w = w
         self._last_map_h = h
+        # 一屏视野比例绿框(用户2026-09-16恢复显示:光点在屏幕中心时框中心=光点;先验证84x52标定比例还准不准,
+        # 后续作为人物识别第二道范围框的可视化)。画在resize前的原始块上(与find_player_dot/蓝框标定同一像素空间)。
+        try:
+            self._draw_blue_box(display)
+        except Exception as _bbe:
+            _debug_log("[绿框] 绘制异常:%s" % _bbe)
         # 【模块B】在小地图上画自动校准点（红点=基点小地图坐标，绿点=记录的绿点位置，蓝点=记录的蓝点位置）
         auto_base = getattr(self, '_auto_calib_base', None)
         auto_stage = getattr(self, '_auto_calib_stage', 0)
@@ -18510,7 +18535,7 @@ class MinimapRouteRecorder:
                     # ①recent累积约两帧白框(同一把邻帧≤归并半径就刷新位置),单帧扫不到邻帧扫到仍在池里;
                     # ②未锁:在池里按"怪→梯+梯→人总距离最短"建锁(只用一次),当场反查钉录制端;
                     # ③已锁:不再全局重选,只在池里找离上一帧锁点最近的=同一把,坐标随它动(身份固定、值在动);
-                    # ④空帧(两帧窗也没):保持上一帧锁定位置、snap不清None,对齐/三步直跳不断;连续LADDER_MERGE_WAIT_MS真没有才放弃回主线。
+                    # ④空帧(寻怪范围两帧池也没):不钉旧点、snap置None(红框这帧不画、直跳不拿旧坐标算差值),锁身份保留;连续LADDER_MERGE_WAIT_MS真没有才清锁回主线。
                     _white_now = [(c[0], c[1]) for c in self._lad_marks_cache]
                     _sel = None
                     if getattr(self, '_climb_state', 'none') != 'none' and self._player_screen_pos:
@@ -18582,7 +18607,7 @@ class MinimapRouteRecorder:
                                     _stage = '未锁无候选'
                             else:
                                 # ③已锁·用户2026-09-15冻像素块:优先拿建锁冻结的这把梯实拍小块,在上一帧位置附近搜索区重定位
-                                # (坐标随动、不串另一把、白框闪空也能找回);冻结块这帧没认回才回退"白框邻域最近邻";都没有才空帧保持,连续1500ms真丢才清锁
+                                # (坐标随动、不串另一把、白框闪空也能找回);冻结块这帧没认回就在【寻怪范围白框池】重找同一把新点(用户2026-09-16:不钉旧点、不全屏);池里一把都没有才snap=None保身份,连续1500ms真丢才清锁
                                 _lx, _ly, _lt = _lock
                                 _patch = getattr(self, '_ladder_lock_patch', None)
                                 _frf = self._raw_frame
@@ -18603,32 +18628,34 @@ class MinimapRouteRecorder:
                                             _sel = (_rx, _ry, True)
                                             _stage = '冻结块跟踪'
                                 if _sel is None:
-                                    # 冻结块这帧没认回:回退白框邻域最近邻(第二保险,不依赖冻结块也能跟同一把)
-                                    _near_same = [p for p in _half
-                                                  if abs(p[0] - _lx) <= LADDER_LOCK_MAX_STEP_X
-                                                  and abs(p[1] - _ly) <= LADDER_LOCK_MAX_STEP_Y]
-                                    if _near_same:
-                                        _nx, _ny = min(_near_same, key=lambda p: (p[0] - _lx) ** 2 + (p[1] - _ly) ** 2)
+                                    # 冻结块这帧没认回:直接在【寻怪范围两帧白框池_half】里重找同一把(用户2026-09-16:不钉旧点、
+                                    # 丢了就在寻怪范围找、绝不全屏;白框本就只在寻怪范围crop扫、结果现成不另算)。镜头主要横滚、梯Y相邻帧几乎不动:
+                                    # 先在Y±LADDER_LOCK_MAX_STEP_Y内取离上帧锁点最近(不串到上下另一把),Y池一把没有再放宽全池宁跟勿断;
+                                    # X不再卡120硬邻域(快滚一帧位移>120正是旧法接不上、掉去钉旧点的根因)。
+                                    _same_y = [p for p in _half if abs(p[1] - _ly) <= LADDER_LOCK_MAX_STEP_Y]
+                                    _pool = _same_y if _same_y else _half
+                                    if _pool:
+                                        _nx, _ny = min(_pool, key=lambda p: (p[0] - _lx) ** 2 + (p[1] - _ly) ** 2)
                                         _rx, _ry = _nx, _ny
-                                        self._ladder_lock = (_rx, _ry, _now_lm)    # 身份不变、坐标更新到这把梯的最新位置
+                                        self._ladder_lock = (_rx, _ry, _now_lm)    # 身份不变、坐标更新到寻怪范围里重找到的最新位置
                                         self._ladder_snap_x = _rx
                                         _sel = (_rx, _ry, True)
-                                        _stage = '跟踪'
+                                        _stage = '寻怪范围重找'
                                     else:
-                                        # ④空帧保持:冻结块+白框这帧都没有,沿用上一帧锁定位置、绝不跟到另一把(snap不断)
-                                        _rx, _ry = _lx, _ly
-                                        self._ladder_snap_x = _lx
-                                        _sel = (_lx, _ly, True)
-                                        _stage = '空帧保持'
+                                        # ④这帧寻怪范围两帧池一把白框都没有(全被挡/没扫到):不钉旧点(旧法吐上帧坐标,镜头滚后框钉死1~2秒、
+                                        # 直跳拿旧坐标算出差值乱跳),snap置None=红框这帧不画、直跳不拿旧坐标算差值;但保留_ladder_lock身份,
+                                        # 下帧继续在寻怪范围找同一把;只有连续LADDER_MERGE_WAIT_MS池里真一把都没有才清锁(身份/冻结块一起清),下帧重选/回主线
+                                        self._ladder_snap_x = None
+                                        _sel = None
+                                        _stage = '空帧无新点'
                                         if _now_lm - _lt >= LADDER_MERGE_WAIT_MS:
-                                            # 连续1500ms冻结块和白框都再没见到=真丢失:连冻结块一起清,下帧重新选梯/放弃回主线
                                             _hold_ms = int(_now_lm - getattr(self, '_ladder_lock_t0', _now_lm))
-                                            _debug_log("[梯子·掉锁] 真丢失:连续%dms冻结块和白框都没再见到(最后锁点(%d,%d),这把已锁%dms),清锁回主线重选/打怪" % (
+                                            _debug_log("[梯子·掉锁] 真丢失:寻怪范围连续%dms一把白框都没有(最后锁点(%d,%d),这把已锁%dms),清锁回主线重选/打怪" % (
                                                 LADDER_MERGE_WAIT_MS, _lx, _ly, _hold_ms))
                                             self._ladder_lock = None
                                             self._ladder_snap_x = None
                                             self._ladder_lock_patch = None
-                                            _sel = None; _rx = _ry = None
+                                            _rx = _ry = None
                                             _stage = '真丢失放弃'
                             if _now_lm - getattr(self, '_snap_dbg_t', 0) >= 300:
                                 self._snap_dbg_t = _now_lm
