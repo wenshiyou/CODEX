@@ -11214,8 +11214,8 @@ class MinimapRouteRecorder:
         # 找梯子范围【定死=寻怪范围】(用户2026-09-15):X/Y全部读寻怪配置,不再因上梯精准态切成Y±150窄带——
         # 窄带会把"人上方约140px、贴着裁剪边"的梯裁掉一截,整张模板相似度跌破0.70→连续扫空→身份锁1.5秒被清(白框看着在却锁不上)。
         _rx = max(50, int(_fc.get("far_range_x", COMBAT_FAR_RANGE) or COMBAT_FAR_RANGE))
-        _yu = getattr(self, '_far_range_y_up', FAR_RANGE_Y_UP_DEFAULT)
-        _yd = getattr(self, '_far_range_y_down', FAR_RANGE_Y_DOWN_DEFAULT)
+        _yu = max(10, int(_fc.get("far_range_y_up", FAR_RANGE_Y_UP_DEFAULT) or FAR_RANGE_Y_UP_DEFAULT))   # Y与X同款直接读寻怪配置(用户2026-09-17:梯子识别范围=寻怪范围,停止态也用配置值不再卡默认150)
+        _yd = max(10, int(_fc.get("far_range_y_down", FAR_RANGE_Y_DOWN_DEFAULT) or FAR_RANGE_Y_DOWN_DEFAULT))
         x1 = max(0, ppx - _rx)
         x2 = min(fw, ppx + _rx)
         y1 = max(DETECT_TOP_MARGIN, ppy - _yu)
