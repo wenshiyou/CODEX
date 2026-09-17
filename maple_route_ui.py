@@ -1367,11 +1367,11 @@ class MinimapRouteRecorder:
         self._btn_bound_area = None     # UI小地图区"打怪区域"切换按钮矩形(每帧draw更新供点击命中)
         self._bound_clear_menu = None   # 右键Y界线→"清除"气泡 {'which':'A'/'B','mx','my'(块坐标),'rect'(显示空间命中框,每帧刷新)}
         # === 掉台归位·独占辅助线(用户2026-09-09)：单平台(只勾一个台)时持续监测光点是否还在该台折线上,
-        # 连续离开>防抖时长=掉下去→关主线、用_move_to回原台,光点重新回到原台折线=归位完成→恢复主线 ===
+        # 连续离开>防抖时长=掉下去→关主线、用_move_horizontal回原台(同层;跨层回台待迁独立线程),光点重新回到原台折线=归位完成→恢复主线 ===
         self._fall_returning = False    # 是否正在掉台归位(归位期间主线锁怪/巡路/打怪暂停)
         self._fall_off_since = 0        # 首次检测到光点离开home台的时间(ms)，用于防抖(正常跳跃瞬离不触发)
         self._fall_home_pf_id = None    # 归位目标平台id(=pf['id'])，单平台锁定
-        self._fall_home_target = None   # 归位目标点(小地图坐标)，喂给_move_to
+        self._fall_home_target = None   # 归位目标点(小地图坐标)，喂给_move_horizontal
         # === 卡住解卡·独占辅助线(用户2026-09-09)：主线移动中检测到卡住→关主线,独占"向前+跳"试X,脱困/上限后恢复 ===
         self._unblock_state = None      # None=未在解卡；dict{dir,jump,tries,dot0,act_t,phase}=解卡进行中(主线暂停)
         # === 辅助线隔离排查开关(用户2026-09-09)：只留主线_combat_tick排查"哪条辅助线抢行动/导致不锁不打"。
@@ -5708,7 +5708,7 @@ class MinimapRouteRecorder:
         返回True=本帧已由状态机处理(调用方直接return);False=state为none未处理。"""
         if self._climb_state == 'none':
             return False
-        _now_ms = now_ms   # 状态块整体从_move_to搬出,块内沿用_now_ms局部名,这里做别名(不影响_move_to自身)
+        _now_ms = now_ms   # 状态块早期从移动函数搬进_climb_state_machine,块内沿用_now_ms局部名作别名(第二批-B:移动脚已不再tick状态机)
         if self._climb_state == "descend":
             return self._descend_step(px, py, _now_ms)
         if self._climb_state == "to_ladder":
@@ -5909,124 +5909,20 @@ class MinimapRouteRecorder:
         return True
 
 
-    def _move_to(self, player_pos, target_x, target_y):
-        """移动角色到目标位置（小地图坐标），支持梯子攀爬。返回是否到达"""
+    def _move_horizontal(self, player_pos, target_x, target_y):
+        """纯同层水平移动脚(小地图坐标)·第二批-B收口(2026-09-17)。
+        只负责: 水平按左右键走到目标X + 卡住1.5s小跳脱困 + 录制绿线上坡跑跳 + 同层微高差边走边跳。
+        【不再有跨层脑子】不判上下层、不tick爬梯状态机、不发起上梯/下跳/瞬移——跨层决策唯一归
+        _transit_step(选台)/_try_platform_transition(cross), 爬梯成套动作唯一由_transit_step每帧tick。
+        返回True=同层到达(|dx|<=4且|dy|<=6); False=还没到(调用方下一帧继续调)。
+        掉台归位当前整套硬关闭(_aux_enable_fall=False/主循环写死False), 其跨层回台待迁独立线程时
+        由该线程自行驱动爬梯状态机, 不在本水平脚内决策。"""
         if player_pos is None:
             return False
         px, py = player_pos
         dx = target_x - px
         dy = target_y - py
-        # 【用户2026-09-08】爬梯失败冷却期内不重新进入爬梯（治"失败后原地乱跳"）：
-        # _try_platform_transition检查了冷却但_move_to没检查，导致失败后下一轮立刻又跳。
-        _now_ms = time.time() * 1000
-        if getattr(self, '_climb_fail_pause_until', 0) and _now_ms < self._climb_fail_pause_until:
-            return False
-
-        # 打怪区域·上下跨层闸门(用户2026-09-11改:手划横线防不住→改认平台绿线身份,一条界线可由多个相连台子合并;只限跨层,跳高打不在此列)。
-        # 人站在【上限组】任一台上不发起向上跨层、站在【下限组】任一台上不发起向下跨层/下跳(判当前站哪条绿线);
-        # 尚未进爬梯状态机才拦,已在descend/to_ladder/climbing进行中不拦(中途打断反而把人挂梯子上);编辑态不拦;未选上下限=放行。
-        if getattr(self, '_climb_state', 'none') == 'none' and not getattr(self, '_bound_edit', False):
-            if dy < 0 and self._bound_block_up():
-                _debug_log("[打怪区域] 上闸门:人在上限组%s,不发起向上跨层" % self._bound_top_grp)
-                return False
-            if dy > 0 and self._bound_block_down():
-                _debug_log("[打怪区域] 下硬防:人在下限组%s,不发下跳/下爬" % self._bound_bot_grp)
-                return False
-
-        # ============================================================
-        # 爬梯状态机（2026-09-08 重写·简洁版）
-        # 点位全部用小地图距离：固定点6跑跳、<2直跳
-        # 到顶判断：小地图人物光标Y 与 梯子顶端 y_top（下行 y_bottom）对齐
-        # ============================================================
-        # 下行descend状态机优先(用户2026-09-09)：走到怪X直接下跳→按↓到底,跳不了走梯子,与上梯to_ladder完全分开
-        if self._climb_state_machine(px, py, _now_ms):
-            return False
-        # === 正常移动（非攀爬状态）===
-        # 需要上下层时：先找梯子（上行直接去梯子；下行先尝试下跳，下跳失败再走梯子）
-        if abs(dy) > 8 and target_y < py:
-            # 上行跨层(用户2026-09-15全图乱打):不再用小地图_find的"梯端Y和怪层±1对齐"门槛卡人,
-            # 怪在上方就直接进to_ladder;选哪把梯/对位/起跳全程屏幕就近(Y最近、X最近),梯顶端点选中后再借录制Y判到顶。
-            self._climb_state = "to_ladder"
-            self._ladder_precise_mode = True  # 手动进to_ladder立刻关怪扫(不等下一帧状态机,堵首帧空窗;用户2026-09-15)
-            self._climb_ladder_x = 0; self._climb_ladder_y_top = 0; self._climb_ladder_y_bottom = 0
-            self._ladder_target_mon_x = None; self._ladder_target_mon_y = None  # 选台/walk路径无屏幕怪:总距离缺怪→梯段、退化为梯→人最近,端点由主循环选中反查(用户2026-09-15)
-            self._climb_target_y = target_y
-            self._climb_direction = 1
-            self._lad_scr_enter_t = 0
-            _debug_log("[路线] 目标在上层dy=%.0f,进to_ladder屏幕两段总距离选梯上" % dy)
-            return False
-
-        # 【用户2026-09-09补·下行跨层入口】旧代码这里只有 target_y<py(上行)半套;下行(target_y>py)只能靠后面兜底块、
-        # 却被其 `not _combat_transit` 挡死(跨层进行中恒True)→怪在下方时既不跳也不选梯、人原地不动不跳(真机"下方尤其不动")。
-        # 补对称下行入口(跨层中也生效):水平基本对齐且落差不大→直接下跳;否则找离人最近梯子按↓爬下去(下行选梯不要求Y对齐)。
-        # 【用户2026-09-09重定义下行】去下层一律走descend状态机:先水平走到怪正头上/最近X→按住↓直接下跳(Y变大)→持续按↓到底;
-        # 直接跳不了状态机内部再水平走到梯子X按住↓下(两小层补下跳)。不再要求"小地图X差≤15/落差≤60"才跳——旧门槛让下方怪
-        # 总被逼去走梯子、还错套上梯的"直跳+按↑判Y变小",向下Y只会变大必然失败(真机"下方怪不下去反退避"的根因)。
-        if abs(dy) > 8 and target_y > py:
-            # 用户2026-09-11:不用录制绿线判最底层(有的图没录平台);py/target_y是小地图世界Y,人原地跳/镜头滚都不改世界Y,
-            # target_y>py即目标光点确实在更下方=真下层。跳前点基线已解决腾空误判,删掉旧3秒冻结;防重靠enter_descend进入descend状态机。
-            self._enter_descend(target_x, target_y, px, py, _now_ms)
-            _debug_log("[下行] 目标在下层dy=%.0f,进descend:原地直接下跳(不对齐怪X=%.0f),跳不了再走梯子" % (dy, target_x))
-            return False
-
-        # 垂直差异大且水平已对齐 → 跳跃/瞬移（没梯子时的兜底）
-        # 【用户2026-09-08】跨层移动中不触发这个兜底跳：到顶后人物黄点和梯子上端重合=到顶，左右走就好了，不要跳（一跳就掉回第一层）
-        if abs(dy) > 8 and abs(dx) <= 25 and not getattr(self, '_combat_transit', False):
-            now_ms = time.time() * 1000
-            fight_cfg = self._get_fight_config()
-            tp_key = fight_cfg.get("teleport_key", "")
-            tp_dist = fight_cfg.get("teleport_distance_y", 0)  # 垂直瞬移看Y瞬移距离(空/0=不垂直瞬移→走跳/梯子)
-            jump_key = fight_cfg.get("jump_key", "")
-            vertical_gap = abs(dy)
-            going_up = target_y < py  # 小地图y越小越靠上
-            aligned = abs(dx) <= 15  # 水平对齐才跳，避免乱跳（下跳放宽到15）
-
-            # --- 去上层：先跳 → 瞬移 → 梯子 ---
-            if going_up:
-                # 1. 小高度差且水平对齐才跳
-                if vertical_gap <= 15 and jump_key and aligned:
-                    self._climb_state = "jump_up"
-                    self._climb_target_y = target_y
-                    self._climb_start_y = py
-                    self._climb_action_time = now_ms
-                    self._press_game_key(jump_key, duration=150)
-                    # 跳起后按住上键（向上移动；Y检测在jump_up状态里）
-                    if VK_UP not in self._random_move_keys:
-                        self._key_down(VK_UP)
-                    _debug_log("[上跳] 目标y=%.0f 当前y=%.0f，间距=%.0f，尝试跳跃" % (
-                        target_y, py, vertical_gap))
-                    return False
-                # 2. 瞬移（没配置直接忽略）
-                if tp_key and tp_dist > 0 and tp_dist >= vertical_gap:
-                    self._climb_state = "teleport"
-                    self._climb_target_y = target_y
-                    self._climb_direction = 1
-                    self._do_teleport(py)
-                    _debug_log("[瞬移] 目标y=%.0f 当前y=%.0f，间距=%.0f，瞬移距离=%d，向上" % (
-                        target_y, py, vertical_gap, tp_dist))
-                    return False
-                # 3. 都不行→爬梯子(屏幕就近选梯,不再卡小地图Y对齐门槛;用户2026-09-15)
-                self._climb_state = "to_ladder"
-                self._ladder_precise_mode = True  # 手动进to_ladder立刻关怪扫(不等下一帧状态机,堵首帧空窗;用户2026-09-15)
-                self._climb_ladder_x = 0; self._climb_ladder_y_top = 0; self._climb_ladder_y_bottom = 0
-                self._ladder_target_mon_x = None; self._ladder_target_mon_y = None  # 兜底入口无屏幕怪:退化为梯→人最近,端点由主循环选中反查(用户2026-09-15)
-                self._climb_target_y = target_y
-                self._climb_direction = 1
-                self._lad_scr_enter_t = 0
-                _debug_log("[爬梯] 目标y=%.0f 当前y=%.0f,进to_ladder屏幕两段总距离选梯向上" % (target_y, py))
-                return False
-
-            # --- 去下层(用户2026-09-09)：非跨层场景也统一走descend(先走到怪X直接下跳,跳不了走梯子),与跨层下行入口一致 ---
-            else:
-                # 用户2026-09-11:跳前点基线解决腾空误判,删掉旧3秒冻结,直接进descend状态机
-                self._enter_descend(target_x, target_y, px, py, now_ms)
-                _debug_log("[下行·兜底入口] 目标在下层dy=%.0f,进descend" % vertical_gap)
-                return False
-
-            # 没有梯子，小高度差尝试普通跳跃
-            if abs(dy) <= 20 and jump_key:
-                self._press_game_key(jump_key, duration=150)
-                return False
+        now_ms = time.time() * 1000
 
         # 水平移动
         if abs(dx) > 4:
@@ -6042,7 +5938,6 @@ class MinimapRouteRecorder:
                     self._key_down(VK_LEFT)
 
             # === 卡住检测：水平移动时每1.5秒确认X是否变化，没变化=被障碍物卡住→跳跃脱困 ===
-            now_ms = time.time() * 1000
             if not getattr(self, '_move_stuck_inited', False) or self._move_stuck_dir != (1 if dx > 0 else -1):
                 self._move_stuck_last_x = px
                 self._move_stuck_last_time = now_ms
@@ -6061,9 +5956,8 @@ class MinimapRouteRecorder:
                 self._move_stuck_last_time = now_ms
 
             # === 录制绿线坡度优先(用户2026-09-07；2026-09-10再定稿)：前方【录制绿线】Y波动>6判坡——
-            # 低向高(上坡)=按住方向跑+连跳爬上去。这是"被地形/台阶挡住过不去"的正道解法,跨层去梯子路上被挡同样靠它跑跳过去,
-            # 故绿线坡跳全程生效、不屏蔽(用户:有东西挡住就用绿线波动6px跑跳解决,不靠看门狗重置)；高向低(下坡)=只走不跳。
-            # 只有下面的"平台对接跳"(按目标点dy,易被小地图光点±几px抖动误判成台阶=离梯很远乱跳的真凶)才在跨层中屏蔽、且下限提到6。
+            # 低向高(上坡)=按住方向跑+连跳爬过去,这是被地形/台阶挡住过不去的正道解法,跨层去梯子路上被挡同样靠它;
+            # 高向低(下坡)=只走不跳。只有"平台对接跳"(按目标点dy,易被光点±几px抖动误判台阶)才在跨层中屏蔽、下限6。
             _in_transit_walk = getattr(self, '_combat_transit', False)
             _grn_slope = self._platform_slope_ahead(px, py, 1 if dx > 0 else -1)
             _grn_jkey = self._get_fight_config().get("jump_key", "")
@@ -6076,7 +5970,7 @@ class MinimapRouteRecorder:
             elif _grn_slope == 'down':
                 pass  # 下坡只走，不跳，也不进微高差跳
             elif (not _in_transit_walk) and 6 <= abs(dy) <= 20:
-                # 微高差平台对接：按目标点dy判(非录制绿线),易被小地图抖动误触发→跨层去梯子时屏蔽、下限3→6(用户2026-09-10)
+                # 微高差平台对接：按目标点dy判(非录制绿线),易被小地图抖动误触发→跨层去梯子时屏蔽、下限提到6
                 jump_key = _grn_jkey
                 if jump_key:
                     last_jump = getattr(self, '_last_platform_gap_jump', 0)
@@ -6091,11 +5985,8 @@ class MinimapRouteRecorder:
                 self._key_up(VK_RIGHT)
             self._move_stuck_inited = False  # 到达目标X，重置卡住检测
 
-        # 到达判断
-        if abs(dx) <= 4 and abs(dy) <= 6:
-            self._reset_climb()
-            return True
-        return False
+        # 同层到达判断(纯水平脚不再调_reset_climb; 爬梯复位由状态机到顶/调用方收尾负责)
+        return abs(dx) <= 4 and abs(dy) <= 6
 
     def _play_alert(self, count=5):
         """播放报警音count次"""
@@ -9191,7 +9082,7 @@ class MinimapRouteRecorder:
             self._log_scroll = 0       # 新打怪日志回到顶部
 
     def _rlog_throttle(self, key, msg, interval_ms=700, color=None, log='combat'):
-        """同一key限频上屏到日志滚动区(默认700ms最多一条)，用于_combat_tick/_move_to等每帧热路径，
+        """同一key限频上屏到日志滚动区(默认700ms最多一条)，用于_combat_tick/_transit_step等每帧热路径，
         避免状态日志刷屏；一次性状态转换事件请直接用_rlog。log分类同_rlog。"""
         _now = int(time.time() * 1000)
         _last = getattr(self, '_rlog_last', {}).get(key, 0)
@@ -14181,7 +14072,7 @@ class MinimapRouteRecorder:
         """设置持续移动方向，direction='left'/'right'/None。流畅切换不卡顿。
         allow_in_transit=True=跨层transit自身走路(走台子路径点)调用,放行；默认False=战斗追怪/待机/回退调用。
         【根因收口·用户2026-09-09】跨层去梯/走台进行中(_combat_transit)默认一律挡下战斗侧水平移动并松战斗左右键：
-        水平移动权唯一归transit(_transit_step/_move_to),否则cross帧去梯按右、pursue帧追别的层怪按左,两套水平键
+        水平移动权唯一归transit(_transit_step/_move_horizontal),否则cross帧去梯按右、pursue帧追别的层怪按左,两套水平键
         高速相抵=人物被钉在原地空卡(真机卡约50秒的根因)。真要停下来打怪时,上层会先把_combat_transit清False再走到这,不受挡。"""
         if not allow_in_transit and getattr(self, '_combat_transit', False):
             self._release_combat_key(VK_LEFT)
@@ -14985,7 +14876,7 @@ class MinimapRouteRecorder:
         """掉台归位·独占辅助线(用户2026-09-09)。单台锁定时持续监测光点是否还在该台折线上:
         - 光点在home台=正常(或已归位)：结束归位、返回False把控制权交还主线;
         - 光点连续FALL_OFF_DEBOUNCE_MS离开home台、且不是主线主动跨层/攀爬=掉下去:启动归位,
-          归位期间复用主线同一套 _move_to(自动找梯/跳/瞬移)回home台最近点,主线(_random_step/_combat_tick)由主循环暂停;
+          归位当前整套硬关闭;启用后同层用纯水平脚 _move_horizontal 回home台最近点(跨层回台待迁独立线程),主线(_random_step/_combat_tick)由主循环暂停;
         - 光点重新回到home台折线(FALL_ON_TOL内)=归位完成,松键复位、恢复主线。
         返回True=正在归位(主循环应暂停主线),False=正常/已归位(主线运行)。"""
         if not getattr(self, '_running', False):
@@ -15011,7 +14902,7 @@ class MinimapRouteRecorder:
         now_ms = time.time() * 1000
         mmp = getattr(self, '_player_map_pos', None)
         # 仅当【主线主动跨层】(_combat_transit=True)才视为正常离开、不判掉台。注意不能用_climb_state判断:
-        # 归位自身复用_move_to回台时也会让_climb_state变成攀爬态,但那时_combat_transit=False,必须继续归位、不能被误停
+        # (归位当前整套硬关闭;将来迁独立线程后跨层回台由该线程自管状态机)判掉台只认主线_combat_transit=True为正常离开
         if getattr(self, '_combat_transit', False):
             self._fall_off_since = 0
             return False
@@ -15050,7 +14941,7 @@ class MinimapRouteRecorder:
         # 归位中：复用主线移动/爬梯状态机朝home台最近点走(自动找梯/跳/瞬移)；是否完成以"光点回台"为准
         _t = self._fall_home_target
         if _t:
-            self._move_to(mmp, _t[0], _t[1])
+            self._move_horizontal(mmp, _t[0], _t[1])  # 第二批-B:纯同层水平回台;跨层回台待迁独立线程(归位当前整套硬关闭)
         return True
 
     def _get_current_platform(self):
@@ -15185,7 +15076,7 @@ class MinimapRouteRecorder:
 
 
     def _transit_step(self):
-        """跨层行进执行：每帧朝目标平台（小地图坐标）移动，复用_move_to攀爬状态机（跳/瞬移/梯子，带Y验证）
+        """跨层行进执行：每帧朝目标平台（小地图坐标）移动，ladder段由_climb_state_machine成套动作驱动(唯一tick点),选台同层/水平对齐段用纯水平脚_move_horizontal
         到达后重置探测随机序；失败后不停顿（有怪战斗先打=先清再上，没怪马上重试），达随机上限(2~3)才放弃换目标"""
         if not self._combat_transit or not self._player_map_pos:
             self._combat_transit = False
@@ -15337,11 +15228,42 @@ class MinimapRouteRecorder:
             self._climb_state_machine(mpx, mpy, now_ms)
             return
         if self._transit_target:
-            # 选台模式:目标=录制台点(真实小地图坐标),走_move_to旧路径(随机/掉台也复用),到点才重锁
-            arrived = self._move_to(self._player_map_pos, self._transit_target[0], self._transit_target[1])
-            if not arrived:
+            # 选台模式:目标=录制台点(真实小地图坐标)。第二批-B(2026-09-17):走路脚退化为纯同层_move_horizontal,
+            # 跨层决策收口到本唯一大脑——同层水平走;跨层先水平对齐,对齐后过闸门+失败冷却,再由唯一入口发起
+            # 上梯/下跳;发起后本帧return,下一帧由上方 _climb_state!=none 分支唯一tick状态机(不递归/不双tick)。
+            _sel_tx, _sel_ty = self._transit_target[0], self._transit_target[1]
+            _sel_mdx = _sel_tx - mpx
+            _sel_mdy = _sel_ty - mpy
+            _SEL_SAME_FLOOR_DY = 8    # 同层Y阈值(与旧移动脚一致)
+            _SEL_ALIGN_DX = 25        # 跨层前水平对齐阈值(与旧垂直兜底一致)
+            if abs(_sel_mdy) <= _SEL_SAME_FLOOR_DY:
+                # 1) 同层:纯水平脚走到台点,到点_reset_lock_after_arrival后落下方公共收尾重锁
+                if not self._move_horizontal((mpx, mpy), _sel_tx, _sel_ty):
+                    return
+                self._reset_lock_after_arrival()
+            elif abs(_sel_mdx) > _SEL_ALIGN_DX:
+                # 2) 跨层但水平没对齐:先纯水平走,不发起跨层
+                self._move_horizontal((mpx, mpy), _sel_tx, _sel_ty)
                 return
-            self._reset_lock_after_arrival()
+            else:
+                # 3) 水平已对齐、确有落差:过上下闸门+爬梯失败冷却后由唯一入口发起,本帧return(下帧状态机tick)
+                _sel_vdir = 'up' if _sel_mdy < 0 else 'down'
+                if self._bound_blocked_vertical(_sel_vdir):
+                    self._release_move_conflicts()
+                    self._rlog_throttle('sel_bound_gate', "选台:已到%s边界,不跨层,松键等待" % (
+                        '上' if _sel_vdir == 'up' else '下'), 1000, log='behavior')
+                    return
+                if getattr(self, '_climb_fail_pause_until', 0) and now_ms < self._climb_fail_pause_until:
+                    self._release_move_conflicts()
+                    return
+                if _sel_mdy < 0:
+                    # 选台无屏幕怪参照:怪参照传None→to_ladder退化为"梯→人最近"选梯(与旧移动脚上入口等价,不新写选梯)
+                    self._enter_to_ladder_up(mpx, mpy, now_ms, None, None)
+                    _debug_log("[选台跨层] 目标在上层dy=%.0f且水平对齐,进to_ladder屏幕选梯上" % _sel_mdy)
+                else:
+                    self._enter_descend(_sel_tx, _sel_ty, mpx, mpy, now_ms)
+                    _debug_log("[选台跨层] 目标在下层dy=%.0f,进descend原地先下跳、跳不了走梯" % _sel_mdy)
+                return
         else:
             # cross上/下梯集合:状态机已自行回none收尾(到顶/失败/落地已重锁),这里只做公共收尾,不重复重锁
             arrived = True
@@ -15377,7 +15299,7 @@ class MinimapRouteRecorder:
         ·绿线相连(walk):人+怪都在相连绿线→沿绿线组合路径点走(目标=真实小地图绿线点,保留,不关怪扫)。
         ·上行(怪屏幕Y在人上方):直接进to_ladder纯屏幕集合(主窗口选梯/对位/跑跳直跳,到顶只比录制梯顶Y)。
         ·下行(怪屏幕Y在人下方):进descend横跳集合(首跳即关怪扫,跳不动直接主窗口找梯,下跳动作不变)。
-        ·无cross怪:选台模式去下一选中台(录制台点=真实小地图坐标,保留_move_to旧路径);全图未选台→False等刷。
+        ·无cross怪:选台模式去下一选中台(录制台点=真实小地图坐标,交_transit_step选台分支(水平脚_move_horizontal+跨层状态机));全图未选台→False等刷。
         返回True=已启动;False=无可去目标(松手等刷)。"""
         if not self._player_map_pos or not self._player_screen_pos:
             self._trans_stall_diag('no_pos(人物小地图/屏幕坐标缺失,多为人物特征没匹配上)', now,
@@ -15475,7 +15397,7 @@ class MinimapRouteRecorder:
                 self._enter_descend(mpx, mpy + 1, mpx, mpy, now)  # 横跳下台;方式一不用target值,仅表方向向下
                 print("[跨层] 下层怪(屏幕人Y%.0f 怪Y%.0f),进descend横跳集合" % (spy, fy))
             return True
-        # 选台模式:目标=录制台点(真实小地图坐标),state保持none交_move_to旧路径
+        # 选台模式:目标=录制台点(真实小地图坐标),state保持none交_transit_step选台分支(水平脚+跨层状态机)
         self._ladder_precise_mode = True
         self._transit_target = target_mid
         print("[跨层] 选台模式前往目标台(%.0f,%.0f)" % (target_mid[0], target_mid[1]))
@@ -16192,7 +16114,7 @@ class MinimapRouteRecorder:
             return
 
         # 【用户2026-09-08】爬梯不是单独的线，是找怪→锁定→移动→打怪这条线内的一部分（移动方式包括走路/跳/爬梯/下跳）
-        # 不在这里单独拦截跨层，让找怪逻辑正常执行，state=cross时自然走跨层移动，爬梯在_move_to内部处理
+        # 不在这里单独拦截跨层，让找怪逻辑正常执行，state=cross时自然走跨层移动，爬梯由_transit_step每帧唯一tick _climb_state_machine处理
         # 之前改成"跨层就return不找怪"=另起一条线，弄错了
 
         # === 不过滤怪物：保留所有检测到的怪，目标选择时同平台优先 ===
@@ -16224,7 +16146,7 @@ class MinimapRouteRecorder:
             self._combat_locked_target = None
             # 【模块A】无怪时重置所有战斗状态，恢复巡路
             self._combat_active = False          # 取消战斗活跃，巡路恢复移动
-            # 跨层行进中：感知不到怪也继续走向目标平台（_move_to自动跳/瞬移/爬梯）
+            # 跨层行进中：感知不到怪也继续走向目标平台（_transit_step驱动状态机爬梯/水平脚走路）
             if self._combat_transit:
                 self._transit_step()
             self._release_combat_move()
@@ -16381,7 +16303,7 @@ class MinimapRouteRecorder:
         # 只要已进入攀爬动作(_climb_state!=none：抓梯/爬梯/上下跳/瞬移)，这一帧不管决策成cast/pursue还是cross，
         # 都先把巡路走完(到顶_reset_climb回none)，绝不在梯子上中途切去打怪，否则松↑/按跳会把人从梯上弄下来。
         # 【2026-09-09修复】独占只看_climb_state!=none,不再要求_combat_transit(旧条件在transit被取消分支清零后失效→爬梯中仍发攻击键)。
-        # 跨层行进由_transit_step持续驱动_move_to(持续按↑到顶)；非跨层爬梯(掉台归位/随机)由各自tick驱动,这里只松攻击、不碰移动键,return不抢动作。
+        # 跨层行进由_transit_step每帧唯一tick _climb_state_machine(持续按↑到顶)；非跨层爬梯(掉台归位/随机)由各自tick驱动,这里只松攻击、不碰移动键,return不抢动作。
         # 【不可打断态收窄·用户2026-09-11】只有"已抓梯在爬/已起跳/下落/瞬移中"才硬冻走完巡路(爬一半被近身怪
         # 拉下来会掉梯);to_ladder=平地走向/对齐梯子、还没抓上,不属于硬冻——放行到下面移动权裁决,
         # 让"近身技能范围内刷可直打怪→三步走解绑回主线先打"生效(原条件!=none把to_ladder也冻住=梯框合不上时干卡数秒的根因)。
