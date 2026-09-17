@@ -1581,6 +1581,9 @@ class MinimapRouteRecorder:
         self._raw_monsters = []             # 后台线程算出的原始合并怪列表 [(x1,y1,x2,y2,score)]
         self._raw_hp_bars = []              # 后台线程算出的血条 [(x,y,w,h)]
         self._raw_char_pos = None           # 后台线程算出的人物脚位置
+        self._monster_scan_enabled = True   # 怪物识别B线程百分百总开关(锁梯/上梯/下跳关,回打怪开):关=主线程当帧拿不到任何怪数据
+        self._raw_monster_packet = ([], {}) # B线程原子发布(怪框列表, metric几何表)同帧配对; metric={框四角:(cx,cy,x_gap,dy)}
+        self._monsters_metric = {}          # 主线程本帧怪几何表(与self._monsters同源), combat选怪直接读、不再现算距离
         # 世界快照仓(识别线程唯一出口)。动作权仲裁器/范围迟滞门已按用户2026-09-15整套删除:打怪/巡路一条线直连,不再有第三方劝架。
         self._snap_store = SnapshotStore()
         self._raw_cached_feature_monsters = []  # 后台线程算出的怪物特征匹配结果
@@ -15234,6 +15237,30 @@ class MinimapRouteRecorder:
             _debug_log("[MP界面] 底部横带匹配度%.3f<%.2f, 判定非游戏画面(小退/弹窗)" % (max_val, self.MP_LABEL_THRESH))
         return visible
 
+    def set_monster_scan(self, on, reason=''):
+        """怪物识别B线程百分百总开关(用户2026-09-17)。关=当帧清空全部怪输出与跨帧缓存(2秒宽限/时序平滑/怪物血条/几何包),
+        主线程self._monsters当帧为空、metric为空→算不到人怪距离→百分百不打怪/不巡路/不锁梯;开=下一帧恢复检测。
+        上梯/下跳另有_ladder_precise_mode自动关怪(B循环_scan_mon已OR),本开关供需要彻底停怪的环节统一调用,关得干净、没有后门能偷偷重开。"""
+        on = bool(on)
+        if on == bool(getattr(self, '_monster_scan_enabled', True)):
+            return
+        self._monster_scan_enabled = on
+        _debug_log("[怪物识别开关] -> %s (%s)" % ('开' if on else '关', reason))
+        if not on:
+            # __init__已初始化的输出直接清
+            self._raw_monsters = []
+            self._raw_hp_bars = []
+            self._raw_cached_feature_monsters = []
+            self._raw_monster_packet = ([], {})
+            self._detect_last_monsters = None
+            self._detect_last_monsters_time = 0
+            # B线程私有缓存(线程启动17108才初始化),存在才清,避免未运行时调用AttributeError
+            for _at in ('_yolo_cache', '_feat_cache', '_bars_cache', '_detect_recent'):
+                if hasattr(self, _at):
+                    setattr(self, _at, [])
+            if hasattr(self, '_monster_static_track'):
+                self._monster_static_track = {}
+
     def _check_auto_potion(self):
         """自动吃药检测：HP/MP低于设定百分比时按键，带冷却和随机误差"""
         if self.hwnd is None:
@@ -16960,14 +16987,18 @@ class MinimapRouteRecorder:
             else:
                 self._precise_adapt_p = None  # 离开高帧:自适应档位清空,下次进按核数目标重新起步
                 self._precise_ov_n = self._precise_rx_n = 0
-                _period = self._perf_val('detect_busy_ms') if _busy else self._perf_val('detect_idle_ms')  # 忙/闲周期按CPU性能档
+                # 人物地基帧率保底(用户2026-09-17):人物识别是永不停的地基线程、吃这里的帧,不能被闲时省电拖到3fps(333ms延迟);
+                # 截图(mss BitBlt释放GIL)很便宜,YOLO/模板在B线程另按时间节流、帧多也不会多跑。忙(锁怪/0.4s内见怪)保底60ms≈16fps,闲保底100ms≈10fps;上梯高帧档(_precise_now)不变。
+                _PERSON_BUSY_MAX_MS, _PERSON_IDLE_MAX_MS = 60, 100
+                _period = (min(self._perf_val('detect_busy_ms'), _PERSON_BUSY_MAX_MS) if _busy
+                           else min(self._perf_val('detect_idle_ms'), _PERSON_IDLE_MAX_MS))
             # [CPU诊断2026-09-07] 每约1秒汇总检测线程各阶段耗时(毫秒)，定位检测侧CPU大头
             _dt_rounds += 1
             _dt_now = time.time()
             if _dt_now - _dt_last_report >= 1.0:
-                _msg = "[截图耗时] %d轮 周期%s 截图%d (ms/秒)" % (
+                _msg = "[截图耗时] %d轮 周期%s 截图%d 目标%.0fms 本轮%.0fms (ms/秒)" % (
                     _dt_rounds, "精" if _precise_now else ("忙" if _busy else "闲"),
-                    _dt_grab * 1000)
+                    _dt_grab * 1000, _period, _elapse)
                 print(_msg)
                 _debug_log(_msg)
                 _dt_grab = 0.0
@@ -17098,6 +17129,7 @@ class MinimapRouteRecorder:
                     self._detect_recent = []
                     self._monster_static_track = {}
                     self._raw_monsters = []
+                    self._raw_monster_packet = ([], {})
                     _debug_log("[识别B] 硬重置seq=%d,清怪/血条缓存并全量重扫" % _seen_reset_seq)
                 _frame = self._latest_frame                 # A发布的最新帧(原子引用,B只读不改)
                 _seq = getattr(self, '_latest_frame_seq', 0)
@@ -17111,14 +17143,20 @@ class MinimapRouteRecorder:
                 # 玩家HP/MP加药在主线程_check_auto_potion独立常开(直接用截图A),不经过这里,上梯照常吃药、绝不在此关玩家血条。
                 _precise = bool(getattr(self, '_ladder_precise_mode', False)) \
                     and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing', 'descend')
-                if _precise:
-                    # 只清怪物位置/检测缓存,不碰任何血条;【不再continue】——落到本循环尾部做梯子白框高频扫描。
-                    # (旧写法continue把尾部梯子扫描也跳过→选梯/爬梯时_lad_marks_cache冻结不更新=选梯反而不实时,已修)
+                # 怪物识别百分百总闸:_monster_scan_enabled(锁梯/上梯/下跳由set_monster_scan关) 或 上梯精准模式,任一关=当帧清空全部怪输出
+                # (含2秒宽限/时序平滑/怪物血条/几何包这些'旧怪复活'漏口),主线程当帧拿不到任何怪→不打怪不巡路;不continue,落到尾部仍扫梯子白框
+                _scan_mon = (not _precise) and bool(getattr(self, '_monster_scan_enabled', True))
+                if not _scan_mon:
                     self._raw_monsters = []
+                    self._raw_hp_bars = []
                     self._raw_cached_feature_monsters = []
-                    self._yolo_cache, self._feat_cache = [], []
+                    self._raw_monster_packet = ([], {})
+                    self._yolo_cache, self._feat_cache, self._bars_cache = [], [], []
                     self._detect_last_monsters = None
-                if not _precise:
+                    self._detect_last_monsters_time = 0
+                    self._detect_recent = []
+                    self._monster_static_track = {}
+                if _scan_mon:
                     _fh, _fw = _frame.shape[:2]
                     # 识别物理边界=游戏画面(客户区)子矩形,标题栏/边框那圈不扫(用户2026-09-14);取不到退回整帧
                     _csub = getattr(self, 'client_subrect', None)
@@ -17200,7 +17238,16 @@ class MinimapRouteRecorder:
                     _merged = self._temporal_smooth_detections(_merged)  # 单帧漏检不清目标
                     _merged = [b for b in _merged if _band_y1 <= (b[1] + b[3]) // 2 <= _band_y2]  # 识别带兜底剔UI误检
                     self._raw_cached_feature_monsters = _feat
+                    # 几何距离在B线程算(同帧人物点_ch):cx中心/cy脚/x_gap水平差/dy垂直差(负=怪在上),与怪框打包原子发布;
+                    # 主线程整包取,phantom过滤只删怪不改坐标,剩余怪四角key必命中;_ch丢失(人物没识别到)则metric空、主线程兜底现算
+                    _metric = {}
+                    if _ch is not None:
+                        for (_bx1, _by1, _bx2, _by2, _bs) in _merged:
+                            _bcx = (_bx1 + _bx2) // 2
+                            _bcy = _by2
+                            _metric[(_bx1, _by1, _bx2, _by2)] = (_bcx, _bcy, abs(_bcx - _ch[0]), _bcy - _ch[1])
                     self._raw_monsters = _merged
+                    self._raw_monster_packet = (list(_merged), _metric)
                     self._raw_hp_bars = _bars
                     if not self._monster_templates:
                         self._monster_feature_matches = []
@@ -17611,7 +17658,7 @@ class MinimapRouteRecorder:
             # 用户2026-09-11定稿:绿线只辅助【寻路】、不参与【打怪分层】。战斗决策这里传None=纯按Y差分层,
             # 不再用录制绿线把远处隔着地形的怪破格成同层(实锤:绿线画长/弯折时Y差111的远怪被判同层锁了却走不到=发呆)。
             # 规则=先水平走到X射程内,再纯判Y:Y在主攻/高跳带=能打,仍超=cross找梯子/下台。(跨层寻路_try_platform_transition仍用绿线)
-            same_platform_fn=None)
+            same_platform_fn=None, metric=getattr(self, '_monsters_metric', None))
         self._combat_target_hp_confirmed = _dl['hp_confirmed']
         self._combat_gone_frames = _dl['gone_frames']
         # 回存本帧锁定类别(in/out/cross)作下一帧维持依据;idle/drop重选时由决策结果自带,无目标=None自然清(两类锁怪)
@@ -18410,8 +18457,14 @@ class MinimapRouteRecorder:
                         self._raw_cached = self._raw_cached_feature_monsters
                         # 2026-09-07 用户定稿：不再做"静止怪"静态过滤(冒险岛大量怪本就站桩,会误剔近身真怪→有怪不锁/空打)。
                         # 检测到的怪全部保留,真假统一靠"打一下,250ms内无血条且无伤害数字→放弃"来判；只保留已放弃空怪的短时去重
-                        self._monsters = list(self._raw_monsters)
-                        self._monsters = self._filter_dropped_phantoms(self._monsters)
+                        _mpkt = getattr(self, '_raw_monster_packet', None)
+                        if _mpkt is not None:
+                            _rmons, _rmetric = _mpkt
+                            self._monsters_metric = _rmetric
+                            self._monsters = self._filter_dropped_phantoms(list(_rmons))
+                        else:
+                            self._monsters_metric = {}
+                            self._monsters = self._filter_dropped_phantoms(list(self._raw_monsters))
                         _t3 = time.time()
                         self._fps_char_time += (_t3 - _t2)  # 读后台结果耗时（原人物匹配耗时）
                         # 蒙板重绘节流(2026-09-07 CPU优化)：原每帧InvalidateRect→WM_PAINT高达30次/秒，

@@ -38,6 +38,11 @@ LAYER_Y_GAP = 150
 # 已锁定目标用 skill_range+本滞回 作为"维持cross"宽线,吸收射程边界逐帧抖动,不在pursue/cross间横跳。
 CROSS_X_HYST = 30
 
+# 【用户2026-09-17定稿·跨层(要梯子/下跳)唯一条件】跳高也够不到 且 X差不远:
+# abs(Y差)>=CROSS_DY_MIN 且 X差<CROSS_X_MAX 才判cross;X差>=CROSS_X_MAX 再高也先水平走近;Y差<CROSS_DY_MIN(攻击带~跳高可达)原地/跳高打。
+CROSS_DY_MIN = 200   # 跨层最小Y差:超过跳高上限、必须梯子/下跳(用户:Y差>=200)
+CROSS_X_MAX = 300    # 跨层最大X差:X差>=300先pursue水平走近,靠近后仍Y>=200才跨层(用户:X差<300)
+
 
 def _mk(state, target, direction, dist, cross_candidates=None, group=None, tier=None):
     return {"state": state, "target": target, "direction": direction, "dist": dist,
@@ -108,7 +113,7 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                          now=0, lock_time=0, freeze_lock=False, lock_tier=None,
                          group_priority=False, group_radius=0,
                          aoe_y_up=None, aoe_y_down=None, aoe_dual=False,
-                         same_platform_fn=None):
+                         same_platform_fn=None, metric=None):
     """决策核心。
 
     参数:
@@ -153,8 +158,15 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
             _pool_y_down = max(_pool_y_down, aoe_y_down)
 
     for (x1, y1, x2, y2, _score) in monsters:
-        cx = (x1 + x2) // 2
-        cy = y2  # 脚位置
+        # 几何(中心cx/脚cy/X差/Y差)优先用B识别线程同帧算好的metric(与怪框同帧原子包),主线程不再重复算距离;读不到(人物点丢失/兜底)才现算
+        _mt = metric.get((x1, y1, x2, y2)) if metric else None
+        if _mt is not None:
+            cx, cy, x_gap, dy = _mt
+        else:
+            cx = (x1 + x2) // 2
+            cy = y2  # 脚位置
+            x_gap = abs(cx - px)
+            dy = cy - py  # 怪脚Y - 人物脚Y（负=怪在人物上方，正=怪在人物下方）
         # 平台过滤：只打选中平台上的怪（空列表=全图模式）
         if selected_platforms:
             pf = get_monster_platform(cx, cy)
@@ -163,9 +175,6 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                     continue
             else:
                 continue
-        # X差和Y差分开算
-        x_gap = abs(cx - px)
-        dy = cy - py  # 怪脚Y - 人物脚Y（负=怪在人物上方，正=怪在人物下方）
         # 【分类滞回·用户2026-09-10治cross/pursue逐帧横跳】只对"当前锁定目标target"用更宽"维持带"分桶,
         # 吸收怪框脚Y、人物跳中py在攻击Y带边界的抖动;一切新怪仍走原窄带,纳入标准一寸不变:
         # 锁定怪不会一帧落cand(pursue)一帧落cross,从根消除两套移动键对消。注意【不能放宽cur_cross】:它是已判跨层、
@@ -191,17 +200,15 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                 _same_pf = bool(same_platform_fn(cx, cy))
             except Exception:
                 _same_pf = False
-        # 【用户2026-09-11定稿·要不要跨层必须走到X范围内再判】锁了怪就先水平朝它走,不许在技能范围外就判cross站着:
-        # 同层(Y在带/同录制平台)→cand;X还远(>技能射程,锁定目标含CROSS_X_HYST滞回)→也进cand先pursue走近;
-        # 只有X已走进技能射程、Y仍超带且非同平台→才落cross找梯子/下台。治"同层远怪/缓坡Y略超→直接cross无梯站桩"。
-        _x_cross_line = skill_range + (CROSS_X_HYST if _is_hold else 0)
-        # 同录制平台破格加Y差硬上限(用户2026-09-15):差着整整一层(abs(dy)>=LAYER_Y_GAP)时_same_pf不算同层,
-        # 必须落cross去上梯/下台,杜绝"头顶一整层怪被当同层→cast原地空打+目标左右横跳抖动";缓坡(Y差<150)仍破格。
-        _same_layer = y_ok or (_same_pf and abs(dy) < LAYER_Y_GAP)
-        if _same_layer or x_gap > _x_cross_line:
-            cand.append((x_gap, cx, cy))   # 同层,或X还远(先水平走过去;走到X范围内仍Y超才跨层)
-        elif allow_cross:
-            cross.append((x_gap, cx, cy))   # X已进技能射程、Y仍超带且非同条录制平台=真要跨层(梯子/下台)
+        # 【用户2026-09-17定稿·cross唯一条件,固定阈值百分百死守,不再用攻击Y带/X射程线/锁定滞回分桶】
+        # ①X差>=300:再高也先pursue水平走近(走近后仍Y>=200才跨层);②abs(Y差)>=200且X<300:跳高也够不到=cross梯子/下跳;
+        # ③其余(Y在攻击带~跳高可达,<200):原地打/跳高打/走近,一律cand。选定阶段cand优先、cand空才取cross=同层清空才上梯。
+        if x_gap >= CROSS_X_MAX:
+            cand.append((x_gap, cx, cy))   # X还很远,先水平走近,不判跨层
+        elif abs(dy) >= CROSS_DY_MIN and allow_cross:
+            cross.append((x_gap, cx, cy))  # 跳高也够不到、X<300=真要梯子/下跳
+        else:
+            cand.append((x_gap, cx, cy))   # Y差<200(攻击带/跳高可达):原地打或跳高打或走近
 
     # === 维持已有锁定（用户2026-09-07：锁定和攻击分开；攻击中不换目标，追怪中出现能直打的立刻换）===
     # 规则：锁定怪必须【仍在本帧检测列表 cand 里】才维持——绝不对脱检旧坐标 cast 空打。
@@ -441,7 +448,7 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                 attacked=False, attack_y_up=None, attack_y_down=None, allow_cross=True,
                 freeze_lock=False, group_priority=False, group_radius=0,
                 aoe_y_up=None, aoe_y_down=None, aoe_dual=False, can_strike=True, lock_tier=None,
-                same_platform_fn=None):
+                same_platform_fn=None, metric=None):
     """组合 select_combat_target + lock_status + decide_attack，得到本tick完整的战斗决策。
 
     参数: 见各部分；now/lock_time 单位ms。
@@ -479,7 +486,7 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                             ls["alive"], is_on_platform, get_monster_platform,
                             probe_side, probe_switched, cur_cross, attack_y_up, attack_y_down,
                             allow_cross, now, lock_time, freeze_lock, lock_tier, group_priority, group_radius,
-                            aoe_y_up, aoe_y_down, aoe_dual, same_platform_fn=same_platform_fn)
+                            aoe_y_up, aoe_y_down, aoe_dual, same_platform_fn=same_platform_fn, metric=metric)
     # 技能施放决策
     skill = 'none'
     if d['target'] is not None and d['dist'] is not None:
