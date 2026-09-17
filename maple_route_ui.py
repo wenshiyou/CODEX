@@ -2039,7 +2039,7 @@ class MinimapRouteRecorder:
     def _save_target_window_size(self):
         """记录目标窗口大小（绑定成功后调用）。写死 GAME_W x GAME_H(1280x800)，不读当前窗口——用户要写死固定，窗口变大会被_ensure_window_size拉回。
         同时移除窗口的WS_THICKFRAME(可调大小边框)——用户改不了大小，但保留标题栏WS_CAPTION仍可拖动移动位置。"""
-        if self.hwnd and self.window_rect:
+        if self.hwnd:   # 2026-09-17根因:有句柄即写死目标尺寸,不依赖window_rect此刻就绪(rect由_ensure自取),根治启动竞态target卡None
             self._target_window_size = (GAME_W, GAME_H)
             print("[窗口固定] 目标大小已写死: %dx%d" % self._target_window_size)
             try:
@@ -2051,9 +2051,17 @@ class MinimapRouteRecorder:
 
     def _ensure_window_size(self):
         """检测窗口大小是否变动，变动则拉回目标大小"""
-        if self.hwnd is None or self._target_window_size is None:
-            _debug_log("[窗口固定诊断] 不拉回: hwnd=%s _target_window_size=%s" % (self.hwnd, self._target_window_size))
+        if self.hwnd is None:
             return
+        if self._target_window_size is None:
+            # 2026-09-17根因自愈:有有效句柄却没目标尺寸(启动时rect未就绪_save跳过/下拉手切换漏设),补齐写死1280x800+去可调边框,不再静默return不拉回
+            self._target_window_size = (GAME_W, GAME_H)
+            try:
+                _sty = win32gui.GetWindowLong(self.hwnd, win32con.GWL_STYLE)
+                win32gui.SetWindowLong(self.hwnd, win32con.GWL_STYLE, _sty & ~win32con.WS_THICKFRAME)
+            except Exception as _se:
+                _debug_log("[窗口固定] 自愈去边框异常: %s" % _se)
+            _debug_log("[窗口固定] 检测到目标尺寸缺失,已补写死 %dx%d" % (GAME_W, GAME_H))
         self._update_window_rect()
         cur_w = self.window_rect["width"]
         cur_h = self.window_rect["height"]
@@ -4728,7 +4736,7 @@ class MinimapRouteRecorder:
             for idx, tpl in enumerate(self._ladder_templates):
                 row = tk.Frame(sf, relief="solid", borderwidth=1)
                 row.pack(fill="x", pady=2, padx=2)
-                tk.Label(row, text="#%d" % tpl["id"], font=("微软雅黑", 9, "bold"), width=3).pack(side="left")
+                tk.Label(row, text="#%d" % (idx + 1), font=("微软雅黑", 9, "bold"), width=3).pack(side="left")
                 tk.Label(row, text="%dx%d" % (tpl["width"], tpl["height"]),
                          font=("微软雅黑", 8), fg="gray").pack(side="left", padx=5)
                 try:
@@ -4744,7 +4752,7 @@ class MinimapRouteRecorder:
 
                 def mk_del(i):
                     def od():
-                        if messagebox.askyesno("确认", "删除梯子特征#%d？" % self._ladder_templates[i]["id"]):
+                        if messagebox.askyesno("确认", "删除梯子特征#%d？" % (i + 1)):
                             self._delete_ladder_template(i)
                             refresh()
                     return od
@@ -8324,6 +8332,7 @@ class MinimapRouteRecorder:
                                 self._hwnd_auto = False  # 下拉手选窗口=手动模式,看门狗不自动抢
                                 self._update_window_rect()
                                 self._detect_minimap()
+                                self._save_target_window_size()   # 2026-09-17:下拉手选切换窗口此前漏设目标尺寸,对齐其余绑定路径写死1280x800
                                 self._add_log("切换到: %s" % next_w["title"][:20])
                             else:
                                 self.hwnd = None
@@ -10416,6 +10425,22 @@ class MinimapRouteRecorder:
         _cv.resizeWindow(win, fw, fh)  # 客户区(图像显示区)=游戏窗口尺寸
         _cv.imshow(win, frame)
         _cv.waitKey(1)  # 先让窗口真正创建出来,下面才能FindWindow做精确对齐
+        # [2026-09-17 根因] 框选窗必须全程压在游戏/怪物蒙板(独立线程TOPMOST每帧重顶)之上:否则时前时后,
+        # 被盖到游戏后面时鼠标落在蒙板/游戏上→拖不出框、坐标无效、回车也保存不了。先取句柄供首次置顶与循环保顶。
+        _box_u = None
+        _box_hwnd = None
+        try:
+            import ctypes as _ctb
+            from ctypes import wintypes as _wtb
+            _box_u = _ctb.windll.user32
+            _box_u.FindWindowW.restype = _wtb.HWND
+            _box_u.FindWindowW.argtypes = [_wtb.LPCWSTR, _wtb.LPCWSTR]
+            _box_u.SetWindowPos.argtypes = [_wtb.HWND, _wtb.HWND, _ctb.c_int, _ctb.c_int,
+                                           _ctb.c_int, _ctb.c_int, _wtb.UINT]
+            _box_hwnd = _box_u.FindWindowW(None, win)
+        except Exception:
+            _box_u = None
+            _box_hwnd = None
         # 客户区精确覆盖游戏window_rect:OpenCV自带窗有标题栏/边框,moveWindow只对齐"窗外框",图像客户区会比
         # 真实游戏窗口错位一个标题栏+边框;黑名单存的是窗口绝对坐标,错位即表现为"保存后红框和原窗口对不上"。
         # 用win32反推客户区屏幕原点、移动窗外框使客户区原点=(window_rect.left,top)、客户区尺寸=fw×fh,
@@ -10466,7 +10491,18 @@ class MinimapRouteRecorder:
             elif ev == _cv.EVENT_RBUTTONDOWN:
                 s["cancel"] = True
 
+        def _box_bring_top(_activate=False):
+            if _box_u and _box_hwnd:
+                try:
+                    _fl = 0x0001 | 0x0002 | (0x0040 if _activate else 0x0010)  # NOSIZE|NOMOVE;首次SHOWWINDOW并激活,平时NOACTIVATE只保顶
+                    _box_u.SetWindowPos(_box_hwnd, -1, 0, 0, 0, 0, _fl)  # HWND_TOPMOST=-1
+                    if _activate:
+                        _box_u.SetForegroundWindow(_box_hwnd)
+                except Exception:
+                    pass
+        _box_bring_top(True)   # 首次:置顶并拿前台焦点(回车/ESC/方向键需要)
         _cv.setMouseCallback(win, on_mouse)
+        _box_top_t = 0.0
         while True:
             disp = frame.copy()
             if state["x2"] >= 0:
@@ -10495,6 +10531,10 @@ class MinimapRouteRecorder:
                         if _zx + _zw <= fw and _zy + _zh <= fh and _zx >= 0 and _zy >= 0:
                             disp[_zy:_zy+_zh, _zx:_zx+_zw] = _zoom  # 含蓝框的"框+周边10px"一起放大
             _cv.imshow(win, disp)
+            _box_now = time.time()
+            if _box_now - _box_top_t >= 0.05:
+                _box_top_t = _box_now
+                _box_bring_top(False)   # 每50ms重申TOPMOST,压过怪物蒙板独立线程的置顶刷新;NOACTIVATE不抢键
             k = _cv.waitKey(1)
             kf = k & 0xFF
             if kf == 27 or state["cancel"]:
@@ -10869,19 +10909,41 @@ class MinimapRouteRecorder:
         ch, cw = cap.shape[:2]
         self._ladder_templates.append({"id": new_id, "img": cap, "width": cw, "height": ch})
         self._save_ladder_templates(self.current_route)
+        self._reset_ladder_display_cache()   # 新增/替换模板后清旧白框,下一帧用新模板重扫、编号重排
+        _new_no = len(self._ladder_templates)   # 显示序号=列表位置(连续);内部id仅用于存盘兼容
         self._add_log("梯子特征#%d已保存(%dx%d) 共%d套，已存入方案%d" % (
-            new_id, cw, ch, len(self._ladder_templates), self.current_route))
-        print("[梯子特征] #%d 已存 %dx%d，共%d套" % (new_id, cw, ch, len(self._ladder_templates)))
+            _new_no, cw, ch, _new_no, self.current_route))
+        print("[梯子特征] #%d 已存 %dx%d，共%d套" % (_new_no, cw, ch, _new_no))
+
+    def _reset_ladder_display_cache(self):
+        """梯子模板增/删后清主窗口画面白框、选框、冻结身份缓存(用户2026-09-17):被删梯子的框当帧消失、
+        编号随列表重排;识别线程下一帧用最新模板重扫。只做原子赋None/[],跨线程安全。"""
+        self._lad_marks_cache = []
+        self._lad_marks_recent = []
+        self._ladder_lock = None
+        self._ladder_lock_patch = None
+        self._ladder_snap_x = None
+        self._locked_ladder = None
+        try:
+            _ov = getattr(self, '_monster_overlay_data', None)
+            if isinstance(_ov, dict):
+                _ov["ladder_marks"] = []
+                _ov["ladder_sel"] = None
+        except Exception:
+            pass
 
     def _delete_ladder_template(self, index):
         if 0 <= index < len(self._ladder_templates):
-            t = self._ladder_templates.pop(index)
+            _del_no = index + 1
+            self._ladder_templates.pop(index)
             self._save_ladder_templates(self.current_route)
-            self._add_log("已删除梯子特征#%d" % t["id"])
+            self._reset_ladder_display_cache()   # 画面上对应梯子框立即删除,不残留旧白框/冻结块
+            self._add_log("已删除梯子特征#%d" % _del_no)
 
     def _clear_ladder_templates(self):
         n = len(self._ladder_templates)
         self._ladder_templates = []
+        self._reset_ladder_display_cache()
         try:
             p = self._ladder_tpl_path(self.current_route)
             if os.path.exists(p):
@@ -11165,11 +11227,11 @@ class MinimapRouteRecorder:
         if self._ladder_use_yolo():
             # YOLO通道:同范围推理全部'梯子',直接返回[(cx,cy,score)]按X排序,不走模板dilate/NMS
             _yc = self._detect_ladder_yolo(frame, (x1, y1, x2, y2))
-            return sorted([(int(cx), int(cy), round(s, 3)) for cx, cy, s in _yc], key=lambda c: c[0])
+            return sorted([(int(cx), int(cy), round(s, 3), None) for cx, cy, s in _yc], key=lambda c: c[0])  # YOLO无模板序号,编号留空由绘制按位置兜底
         _sim = float(getattr(self, '_ladder_tpl_sim', LADDER_TPL_DEFAULT_SIM) or LADDER_TPL_DEFAULT_SIM)
         peaks = []
         _ker = np.ones((5, 5), dtype=np.uint8)
-        for tpl in self._ladder_templates:
+        for _ti, tpl in enumerate(self._ladder_templates):  # _ti+1=模板列表显示序号(与特征弹窗一致)
             timg = tpl["img"]
             th, tw = timg.shape[:2]
             if th > ch or tw > cw:
@@ -11180,10 +11242,10 @@ class MinimapRouteRecorder:
             cand = sorted(((float(res[y, x]), x1 + x + tw // 2, y1 + y + th // 2)
                            for y, x in zip(ys, xs)), reverse=True)
             for s, cx, cy in cand:                    # 按分数从高到低贪心NMS:近邻已选则跳过
-                if all(abs(cx - qx) > LADDER_MARK_NMS_X for _, qx, qy in peaks):
-                    peaks.append((s, int(cx), int(cy)))
+                if all(abs(cx - qx) > LADDER_MARK_NMS_X for _, qx, qy, _t in peaks):
+                    peaks.append((s, int(cx), int(cy), _ti + 1))   # 带模板列表序号,画面编号与弹窗一致
         peaks.sort(key=lambda p: p[1])
-        return [(cx, cy, round(s, 3)) for s, cx, cy in peaks]
+        return [(cx, cy, round(s, 3), _tn) for s, cx, cy, _tn in peaks]
 
     def _scr_nudge_timing(self, n):
         """碎步第n拍(0基)的(按住时长ms, 松开后停顿ms, 单拍步长px),上行段3/下行方式二段C共用。
@@ -12399,14 +12461,16 @@ class MinimapRouteRecorder:
                                 if _lm_pen:
                                     gdi_objs.append(_lm_pen)
                                     _o_lm = gdi32.SelectObject(hdc, _lm_pen)
-                                    for _i, (_lmx, _lmy) in enumerate(data.get('ladder_marks', [])):
+                                    for _i, _lm in enumerate(data.get('ladder_marks', [])):
+                                        _lmx, _lmy = _lm[0], _lm[1]
+                                        _ltid = _lm[2] if len(_lm) > 2 else None     # 模板列表序号(与弹窗一致);YOLO兜底为None
                                         if _sel_x is not None and abs(_lmx - _sel_x) <= LADDER_MARK_NMS_X:
                                             continue   # 被选中的这把白框不画(下面原地转红框)
                                         gdi32.Rectangle(hdc, _lmx - 25, _lmy - 60, _lmx + 25, _lmy + 60)  # 宽50高120,中心=白框中心
-                                        # 给每个梯子打编号(用户2026-09-16)
+                                        # 编号=模板序号(用户2026-09-17:弹窗/画面同一套连续编号);无模板(YOLO)才按位置兜底
                                         gdi32.SetTextColor(hdc, 0xFFFFFF)
                                         gdi32.SetBkMode(hdc, 1)
-                                        _num_txt = "#%d" % (_i + 1)
+                                        _num_txt = ("#%d" % _ltid) if _ltid else ("#%d" % (_i + 1))
                                         gdi32.TextOutW(hdc, _lmx - 8, _lmy - 78, _num_txt, len(_num_txt))
                                     gdi32.SelectObject(hdc, _o_lm)
                                 if _ld_sel:
@@ -12417,10 +12481,16 @@ class MinimapRouteRecorder:
                                         _o_sp = gdi32.SelectObject(hdc, _sel_pen)
                                         gdi32.Rectangle(hdc, _sx - 25, _sy - 60, _sx + 25, _sy + 60)
                                         gdi32.SelectObject(hdc, _o_sp)
+                                    # 红框编号:按坐标从当帧白框反查它命中的模板序号(选锁距离逻辑不动,仅显示层反查)
+                                    _sel_tid = None
+                                    for _lm in data.get('ladder_marks', []):
+                                        if len(_lm) > 2 and _lm[2] and abs(_lm[0] - _sx) <= LADDER_MARK_NMS_X and abs(_lm[1] - _sy) <= 60:
+                                            _sel_tid = _lm[2]
+                                            break
                                     gdi32.SetTextColor(hdc, 0x0000FF)
                                     gdi32.SetBkMode(hdc, 1)
-                                    _stxt = "选中"
-                                    gdi32.TextOutW(hdc, _sx - 15, _sy - 78, _stxt, len(_stxt))
+                                    _stxt = ("#%d" % _sel_tid) if _sel_tid else "选中"
+                                    gdi32.TextOutW(hdc, _sx - 8, _sy - 78, _stxt, len(_stxt))
                                 for (x1, y1, x2, y2, score) in data.get('monsters', []):
                                     mx, my = (x1 + x2) // 2, (y1 + y2) // 2
                                     dist = int(((mx - cx) ** 2 + (my - cy) ** 2) ** 0.5)
@@ -18800,7 +18870,7 @@ class MinimapRouteRecorder:
             if not hasattr(self, '_lad_marks_cache'):
                 self._lad_marks_cache = []
             # 全部梯子白框都下发显示(不隐藏/不禁任何候选);选中那把另由 ladder_sel 红框标出(用户2026-09-15:不能把别的梯禁掉)
-            self._monster_overlay_data["ladder_marks"] = [(c[0], c[1]) for c in self._lad_marks_cache]
+            self._monster_overlay_data["ladder_marks"] = [(c[0], c[1], (c[3] if len(c) > 3 else None)) for c in self._lad_marks_cache]  # 下发(cx,cy,模板序号)
             if not self._running:
                 self._monster_overlay_data["ladder_sel"] = None
                 self._monster_overlay_data["ladder_rect"] = None

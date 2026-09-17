@@ -30,9 +30,5 @@
   "far_range_y_down": "350",
   "slope_jump_y_min": "-25",
   "slope_jump_y_max": "-180",
-  "hp_value": "35",
-  "match_sim": {
-    "char": "0.70",
-    "monster": "0.70"
-  }
+  "hp_value": "35"
 }
