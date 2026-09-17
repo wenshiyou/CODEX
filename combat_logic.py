@@ -38,10 +38,11 @@ LAYER_Y_GAP = 150
 # 已锁定目标用 skill_range+本滞回 作为"维持cross"宽线,吸收射程边界逐帧抖动,不在pursue/cross间横跳。
 CROSS_X_HYST = 30
 
-# 【用户2026-09-17定稿·跨层(要梯子/下跳)唯一条件】跳高也够不到 且 X差不远:
-# abs(Y差)>=CROSS_DY_MIN 且 X差<CROSS_X_MAX 才判cross;X差>=CROSS_X_MAX 再高也先水平走近;Y差<CROSS_DY_MIN(攻击带~跳高可达)原地/跳高打。
-CROSS_DY_MIN = 200   # 跨层最小Y差:超过跳高上限、必须梯子/下跳(用户:Y差>=200)
-CROSS_X_MAX = 300    # 跨层最大X差:X差>=300先pursue水平走近,靠近后仍Y>=200才跨层(用户:X差<300)
+# 【用户2026-09-17定稿·跨层(要梯子/下跳)唯一条件;2026-09-18修正】cross高度线不写死,一律按面板自定义的
+# "这套打法实际够得着的高度"判定,与主线执行层(high_slope跳高段/_below2下台段)同一口径:
+# 上方=跳高打上限slope_jump_y_max(没开跳高/跳高打空降级=主攻上带attack_y_up),下方=attack_y_down;群攻再按aoe_y放宽。
+# 超过该可达带=原地/跳高都够不到=cross走梯子/下跳;X差>=CROSS_X_MAX再高也先水平走近,靠近后仍超可达带才跨层。
+CROSS_X_MAX = 300    # 跨层最大X差:X差>=300先pursue水平走近,靠近后仍超面板可达带才跨层(用户:X差<300)
 
 
 def _mk(state, target, direction, dist, cross_candidates=None, group=None, tier=None):
@@ -200,15 +201,20 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                 _same_pf = bool(same_platform_fn(cx, cy))
             except Exception:
                 _same_pf = False
-        # 【用户2026-09-17定稿·cross唯一条件,固定阈值百分百死守,不再用攻击Y带/X射程线/锁定滞回分桶】
-        # ①X差>=300:再高也先pursue水平走近(走近后仍Y>=200才跨层);②abs(Y差)>=200且X<300:跳高也够不到=cross梯子/下跳;
-        # ③其余(Y在攻击带~跳高可达,<200):原地打/跳高打/走近,一律cand。选定阶段cand优先、cand空才取cross=同层清空才上梯。
+        # 【用户2026-09-17定稿cross条件;2026-09-18修正:高度线读面板实际可达带,删掉写死的200——治Y=198头顶怪
+        # 超跳高上限180却<200,导致跳高不接/主攻超带/cross不够=三路不管站桩呆住;决策层与主线执行层口径对齐】
+        # ①X差>=300:再高也先pursue水平走近,靠近后再判Y;②X<300且Y超出这套打法面板可达高度(上=跳高上限/主攻上带,
+        # 下=下方技能带,与主线high_slope/_below2同口径):原地/跳高都够不到=cross梯子/下跳;③可达带内一律cand。
+        # 边界用严格不等号:正好等于上限仍归cand(跳高段<=上限可跳打、下方段>下限才下台),临界不横跳。
+        # cand优先、cand空才取cross=同层清空才上梯。
         if x_gap >= CROSS_X_MAX:
             cand.append((x_gap, cx, cy))   # X还很远,先水平走近,不判跨层
-        elif abs(dy) >= CROSS_DY_MIN and allow_cross:
-            cross.append((x_gap, cx, cy))  # 跳高也够不到、X<300=真要梯子/下跳
+        elif allow_cross and (
+                (_pool_y_up is not None and dy < -_pool_y_up) or      # 怪在上方、超过面板上可达高度(跳高上限/主攻上带)=跳高也够不到
+                (_pool_y_down is not None and dy > _pool_y_down)):    # 怪在下方、超过面板下方技能带(同主线_below2口径)=够不到
+            cross.append((x_gap, cx, cy))  # 实际够不着、X<300=走梯子/下跳
         else:
-            cand.append((x_gap, cx, cy))   # Y差<200(攻击带/跳高可达):原地打或跳高打或走近
+            cand.append((x_gap, cx, cy))   # 在面板可达带内:原地打/跳高打/走近
 
     # === 维持已有锁定（用户2026-09-07：锁定和攻击分开；攻击中不换目标，追怪中出现能直打的立刻换）===
     # 规则：锁定怪必须【仍在本帧检测列表 cand 里】才维持——绝不对脱检旧坐标 cast 空打。

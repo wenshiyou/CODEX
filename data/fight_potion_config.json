@@ -15,24 +15,20 @@
   "scale_y_offset": "-0.80",
   "atk1_interval": "150",
   "teleport_key": "d",
-  "teleport_distance": "200",
+  "teleport_distance": "250",
   "aoe_key": "z",
   "aoe_interval": "150",
   "aoe_distance": "250",
   "attack_y_up": "-100",
-  "attack_y_down": "70",
+  "attack_y_down": "75",
   "mp_key": "end",
   "hp_key": "pgdn",
   "aoe_y_up": "-100",
-  "aoe_y_down": "70",
+  "aoe_y_down": "75",
   "far_range_x": "500",
   "far_range_y_up": "350",
   "far_range_y_down": "350",
   "slope_jump_y_min": "-25",
   "slope_jump_y_max": "-180",
-  "hp_value": "35",
-  "match_sim": {
-    "char": "0.70",
-    "monster": "0.65"
-  }
+  "hp_value": "35"
 }
