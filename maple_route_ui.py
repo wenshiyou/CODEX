@@ -489,16 +489,10 @@ AJ_WIN_MS = 1500           # 横跳观察窗:最近1.5s
 AJ_FLIP_MIN = 4            # 窗内左右换向≥4次(来回≥2个回合)才算横跳
 AJ_NET_MAP_DX = 15         # 且窗内小地图光点净位移<此值=原地没挪窝(真在走的换向不算)
 AJ_TRIG_COOLDOWN = 2500    # 监管置横跳令的冷却,防刷屏/连环拉回
-AJ_HOLD_MS = 900           # A级拉回:锁定净一侧900ms(只在这侧选怪/移动),方向唯一不再左右摆
-AJ_ESCALATE_MS = 1000      # A级后1s内又横跳→升级B级(完整硬清零重来,用户2026-09-11确认先A后B)
-# === 全局2秒总兜底看门狗(用户2026-09-10:不动/卡住/出问题,任何异常状态都不许存在超过2秒→全部清零重新开始) ===
-ENABLE_GLOBAL_STALL_FALLBACK = False  # 【总开关·2026-09-15测试期暂停】用户:监护线全局兜底先停、正式弄好再改回True;只关不删、watchdog函数本体保留。注意15545监管线硬重置/15568左右横跳B级硬重置不走此开关,仍正常生效
-GLOBAL_STALL_MS = 3000       # 有任务在身却连续3秒无任一"进展心跳"→总复位(用户2026-09-11由2秒改3秒,给正常动作留余量,减少误重置)
 GLOBAL_MOVE_PX = 6           # 屏幕基点累计位移≥此值=在移动(进展)
 GLOBAL_MAP_D = 2             # 小地图光点累计位移≥此值=在移动(进展)
 GLOBAL_SKILL_HB_MS = 2000    # 最近这么多ms内放过主攻/群攻=站桩输出中(进展,不误判施法站桩)
 STALL_OBSERVE_MS = 1000     # 停滞纯观测阈值:有任务却连续1秒无任一进展心跳→【异常】栏报一条(只观测不干预,2026-09-17)
-GLOBAL_RESET_COOLDOWN_MS = 3000  # 总复位后冷却:给重识别/重决策留时间,冷却内不再次复位
 # 监管线专用背景运动采样区(用户2026-09-09截图指定)：不能放人物边上(旁边怪动会误判),选远离人物/怪的纯背景。
 # 只用【上、右】两块,两块画面同时帧差超阈=人物在正确移动(镜头在滚);单块变化可能是怪/特效/绳索摆动,忽略。整窗坐标(含标题栏)。
 WD_BG_REGIONS = [
@@ -1395,21 +1389,12 @@ class MinimapRouteRecorder:
         self._wd_log_last = {}             # 同类监管日志去重 {key:t}
         self._wd_bg_last = [None, None]  # 监管线独立的上/右两块上一帧ROI(与原镜头检测_bg_last_frames分开,互不干扰绿框)
         self._wd_jump_gate_until = 0     # 跳后静默截止时间戳(ms)：此前不做背景帧差(起跳时在_press_game_key置,1秒必落地)
-        self._wd_stall_req = None        # 监管线程→主线的"水平停滞重处理"请求{axis,dir,t,win};主线每帧consume,跨线程只经_wd_lock传递(线程本身绝不发键)
         self._wd_recover_cnt = 0         # 同一移动段连续停滞重处理次数(真动了清零);累计到WD_STALL_RECOVER_MAX放弃本次跨层回主线
         self._wd_recover_seg = None      # 上轮重处理对应的意图段标识(方向);换向/重新规划自动清零计数
-        # === 监管线掌控的跨线程硬重置(用户2026-09-10)：监管线程独立轮询实时发现卡死,不等主线串行跑完(慢几拍) ===
-        self._hard_reset_req = None     # 监管线程→主线帧首的硬重置令{reason,t}(经_wd_lock传递)；监管实时发令、主线帧首统一清零
-        self._hard_reset_last_t = 0.0   # 监管侧上次发令时间(ms)，GLOBAL_RESET_COOLDOWN_MS冷却内不重复发，防连环重置刷屏
-        # 横跳探测(第二层监管):_wd_x_flips=主线登记的X换向[(t,小地图X)];_wd_antijitter_req=线程→主线拉回令;
-        # _aj_hold_side=主线A级锁侧态{dir:±1,until};_aj_stage/last=A→B升级计数
+        # 横跳探测(第二层监管,只记录不干预):_wd_x_flips=主线登记的X换向[(t,小地图X)];_wd_aj_last_req=日志节流
+
         self._wd_x_flips = []
-        self._wd_antijitter_req = None
-        self._aj_hold_side = None
-        self._aj_stage = 0
-        self._aj_last_trigger_t = 0.0
         self._wd_aj_last_req = 0.0     # 监管侧上次置横跳令时间(AJ_TRIG_COOLDOWN节流)
-        self._detect_reset_seq = 0      # 检测线程自清版本号：主线硬重置时+1，检测线程循环顶部见新版本就清跨帧怪表缓存并立即全量重扫
         # === 原地直跳二次失败退开(用户2026-09-09)：<2对齐直跳连续2次没抓住梯子→主动退开120~150屏幕px再回主线,
         # 退开途中本层有怪先打怪(cast/pursue优先),本层无怪(cross)才继续横走,走够/超时后恢复正常选梯自动再上 ===
         self._combat_busy_until = 0  # 后摇锁定时间戳
@@ -14418,20 +14403,14 @@ class MinimapRouteRecorder:
             intents = {a: dict(v) for a, v in self._mv_intent.items()}
         mmp = getattr(self, '_player_map_pos', None)
         in_gate = now < self._wd_jump_gate_until
-        # 原地左右横跳探测不依赖当前intent(换向间隙intent可能已clear),独立先判,置拉回令交主线consume
+        # 原地左右横跳探测不依赖当前intent(换向间隙intent可能已clear),独立先判,只记录报异常栏、不置令不干预
         self._wd_check_antijitter(now, mmp, in_gate)
         if not intents:
             return  # 无移动意图不做背景帧差(省CPU)
         # 跳后静默窗内不截背景(基准帧停在跳前地面);否则算上/右两块几块在动
         bg_count = 0 if in_gate else self._wd_bg_motion_count(getattr(self, '_raw_frame', None))
-        _req_t0 = self._hard_reset_req['t'] if self._hard_reset_req else 0
         for axis, it in intents.items():
             self._wd_check_axis(axis, it, mmp, bg_count, in_gate, now)
-        # 锁外即时停手:_wd_check_axis持锁段只能置令(锁不可重入),这里在同一轮、锁外检测本轮是否新发硬重置令,
-        # 若新发则幂等松全部键让人物当刻停下(不等主线帧首),满足"监管实时反应、不慢几拍"
-        _req = self._hard_reset_req
-        if _req and _req.get('t', 0) > _req_t0:
-            self._wd_immediate_release(_req.get('reason', ''))
 
     def _wd_check_axis(self, axis, it, mmp, bg_count, in_gate, now):
         """单轴：段内累计"真实运动"次数,段末(X=1s/Y=1.5s)看是否≥WD_SEG_MIN_HITS;不足=停滞报警(去重)。"""
@@ -14486,7 +14465,7 @@ class MinimapRouteRecorder:
     def _wd_check_antijitter(self, now, mmp, in_gate):
         """第二层监管·原地左右横跳探测(线程侧,只置令不发键)。最近AJ_WIN_MS内X换向≥AJ_FLIP_MIN次、
         且小地图光点净位移<AJ_NET_MAP_DX=方向来回摆、人却没挪窝(锁怪在左右怪间横跳/两个脑子抢方向)。
-        跳后1秒(in_gate)不判;置令冷却AJ_TRIG_COOLDOWN;真正松键/锁侧/重置由主线_consume_anti_jitter执行。"""
+        跳后1秒(in_gate)不判;AJ_TRIG_COOLDOWN仅作日志节流;全程只记录、绝不松键/锁侧/重置(干预已于2026-09-17删除)。"""
         if in_gate or mmp is None:
             return
         with self._wd_lock:
@@ -14555,7 +14534,7 @@ class MinimapRouteRecorder:
         """停滞纯观测(2026-09-17,只报【异常】栏、绝不发键/不干预、不另起线程,主线combat_tick后独立try调):
         运行中【有任务在身】却连续STALL_OBSERVE_MS无任一进展心跳(屏幕基点>=6/光点>=2/近2秒放过技能/怪数减少),
         满1秒首报、之后每秒一条"停滞N秒 当前=X 下一步=Y";无怪待命/拟人休息/正常长动作(确实在爬/下跳/起跳空中/平台回退)不报,恢复时报一条。
-        判据口径与_global_stall_watchdog一致(那个是干预型、总开关关着只关不删),本方法只观测。"""
+        判据=有任务在身却连续无任一进展心跳;本方法只观测报【异常】栏、绝不发键(2026-09-17干预型兜底已物理删除)。"""
         if not self._running:
             return
         self._note_stale_feeds(now)   # H:人物坐标/识别B线程陈旧观测(独立限频,不干预、不影响下面停滞判定)
@@ -14596,195 +14575,6 @@ class MinimapRouteRecorder:
             self._obs_active = True
             self._rlog("停滞%d秒 当前=%s；下一步=%s" % (secs, self._stall_state_text(cs), self._stall_next_text(cs)),
                        log='exception', color=LOG_RED)
-
-    def _global_stall_watchdog(self, now):
-        """全局2秒总兜底(用户2026-09-10:任何卡住/不动/异常都不许存在超过2秒,到点全部清零重新开始)。主线内每帧调,不另起线程。
-        判据:【有任务在身】(画面有怪/有锁定/在跨层/在爬梯)却连续GLOBAL_STALL_MS无任一"进展心跳"→总复位;纯空闲(无怪无任务)站着等刷怪不算故障。
-        进展心跳(任一):①屏幕基点移动≥6 ②小地图光点移动≥2 ③最近2秒放过技能(站桩输出) ④怪比段起点少(打死了)
-        ⑤豁免的正常长动作(确实在爬/下跳/起跳空中/独占解卡/平台回退——自带完成与超时判据,不被2秒打断)。"""
-        if not self._running:
-            return False
-        if not ENABLE_GLOBAL_STALL_FALLBACK:
-            return False   # 全局总兜底总开关关闭(用户2026-09-10:先关、只关不删,正式用改ENABLE_GLOBAL_STALL_FALLBACK=True恢复);函数本体完整保留
-        if now < getattr(self, '_gsr_cooldown', 0):
-            self._gsr_hb = now
-            self._gsr_sp = self._player_screen_pos
-            self._gsr_mp = self._player_map_pos
-            self._gsr_nmon = len(self._monsters or [])
-            return False
-        cs = getattr(self, '_climb_state', 'none')
-        has_job = bool(self._monsters) or self._combat_locked_target is not None \
-            or getattr(self, '_combat_transit', False) or cs != 'none'
-        exempt = (
-            (cs == 'climbing' and getattr(self, '_climb_move_confirmed', False)) or  # 确实在爬(另有12s总超时兜底)
-            cs == 'descend' or
-            getattr(self, '_ladder_jump_phase', None) == 'post_jump' or              # 起跳抓梯空中
-            getattr(self, '_unblock_state', None) is not None or                     # 独占解卡中
-            getattr(self, '_platform_retreat_active', False)                          # 平台边界回退中
-        )
-        sp = self._player_screen_pos
-        mp = self._player_map_pos
-        if not hasattr(self, '_gsr_hb'):
-            self._gsr_hb = now
-            self._gsr_sp, self._gsr_mp = sp, mp
-            self._gsr_nmon = len(self._monsters or [])
-        moved = bool(sp is not None and self._gsr_sp is not None and
-                     (abs(sp[0] - self._gsr_sp[0]) + abs(sp[1] - self._gsr_sp[1])) >= GLOBAL_MOVE_PX)
-        mapmoved = bool(mp is not None and self._gsr_mp is not None and
-                        (abs(mp[0] - self._gsr_mp[0]) + abs(mp[1] - self._gsr_mp[1])) >= GLOBAL_MAP_D)
-        _last_atk = max(self._attack_last.values()) if self._attack_last else 0
-        casting = (now - _last_atk) < GLOBAL_SKILL_HB_MS
-        killed = len(self._monsters or []) < self._gsr_nmon
-        if exempt or moved or mapmoved or casting or killed or not has_job:
-            self._gsr_hb = now
-            self._gsr_sp, self._gsr_mp = sp, mp
-            self._gsr_nmon = len(self._monsters or [])
-            return False
-        if now - self._gsr_hb >= GLOBAL_STALL_MS:
-            return self._global_stall_reset(now, cs)
-        return False
-
-    def _global_stall_reset(self, now, cs, reason=''):
-        """2秒全局自动兜底入口(主线内每帧判,总开关ENABLE_GLOBAL_STALL_FALLBACK)；统一走_hard_reset_state单一清零出口。"""
-        _msg = reason or ("全局兜底:有动作却%.0f秒无移动/输出/推进(cs=%s,怪%d),全部清零重新开始" % (
-                         GLOBAL_STALL_MS / 1000.0, cs, len(self._monsters or [])))
-        return self._hard_reset_state(now, _msg)
-
-    def _mark_hard_reset_locked(self, reason, now=None):
-        """【调用方必须已持有_wd_lock】冷却判断+置硬重置令,不在此松键(_release_all_keys会经_wd_sync_from_keys
-        重入本把不可重入锁→监管线程自死锁、主线抢锁即UI卡死,2026-09-09教训)。返回True=本轮新发令。"""
-        now = now if now is not None else time.time() * 1000
-        if now - self._hard_reset_last_t < GLOBAL_RESET_COOLDOWN_MS:
-            return False
-        self._hard_reset_last_t = now
-        self._hard_reset_req = {'reason': reason, 't': now}
-        return True
-
-    def _wd_immediate_release(self, reason):
-        """【锁外调用】监管线程发现卡死当刻幂等松全部键立即停手(不等主线串行跑完);keyup幂等、键没按也无害。"""
-        try:
-            self._release_all_keys()
-            self._release_combat_move()
-        except Exception as e:
-            _debug_log("[监管线] 硬重置即时停手异常:%s" % e)
-        self._wd_log('wd_hard_reset_req', "监管线即时停手并请求硬重置: " + reason, color=(0, 0, 255))
-
-    def _request_hard_reset(self, reason):
-        """【锁外通用入口】非持锁场景发硬重置令:加锁置令,再在锁外即时停手。"""
-        now = time.time() * 1000
-        with self._wd_lock:
-            fired = self._mark_hard_reset_locked(reason, now)
-        if fired:
-            self._wd_immediate_release(reason)
-        return fired
-
-    def _consume_hard_reset(self):
-        """【主线帧首·最高优先级】取走监管线程硬重置令并执行统一清零。返回True=本帧应跳过旧的random/combat决策,下一帧从识别重来。"""
-        with self._wd_lock:
-            req = self._hard_reset_req
-            self._hard_reset_req = None
-        if not req:
-            return False
-        return self._hard_reset_state(time.time() * 1000, req.get('reason', '监管线硬重置'))
-
-    def _consume_anti_jitter(self, now):
-        """【主线帧首】消费第二层监管的横跳拉回令(线程只置令、发键在主线)。
-        A级=锁定净一侧AJ_HOLD_MS(只在这侧选怪/移动,方向唯一不再左右摆);A级后AJ_ESCALATE_MS内又横跳→B级=完整硬清零重来。
-        返回True=本帧已拉回(调用方跳过旧决策)。无令时只负责让到期的锁侧态解除。"""
-        with self._wd_lock:
-            req = self._wd_antijitter_req
-            self._wd_antijitter_req = None
-        if not req:
-            _hs = self._aj_hold_side
-            if _hs and now >= _hs['until']:
-                self._aj_hold_side = None
-            return False
-        # A→B升级:距上次拉回很近且已来过A级=A级没压住
-        if 0 < now - self._aj_last_trigger_t < AJ_ESCALATE_MS and self._aj_stage >= 1:
-            self._aj_stage = 2
-        else:
-            self._aj_stage = 1
-        self._aj_last_trigger_t = now
-        if self._aj_stage >= 2:
-            self._aj_hold_side = None
-            self._wd_log('aj_B', "横跳A级未压住,升级B级硬清零重新决策", color=(0, 0, 255))
-            return self._hard_reset_state(now, "原地左右横跳·B级硬重置")
-        # A级:定净方向=优先当前锁定怪相对人物的方向,没有则默认向右(下帧锁侧过滤会自然校正)
-        _sp = getattr(self, '_player_screen_pos', None)
-        _lk = self._combat_locked_target
-        _d = 1
-        if _lk and _sp:
-            _d = 1 if _lk[0] >= _sp[0] else -1
-        self._release_combat_move()
-        for _vk in (VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN):
-            if _vk in self._random_move_keys:
-                self._key_up(_vk)
-        self._aj_hold_side = {'dir': _d, 'until': now + AJ_HOLD_MS}
-        self._wd_log('aj_A', "横跳拉回A:锁定%s侧%.0fms,只在这侧选怪/移动" % (
-            '右' if _d > 0 else '左', AJ_HOLD_MS), color=(0, 0, 255))
-        return True
-
-    def _hard_reset_state(self, now, reason):
-        """【唯一硬清零出口·跨三个线程域】用户2026-09-10:任何卡死/两套拉扯,不管之前在做什么、做没做完,全部停止、从"识别→锁怪→巡路→打怪"干净重来。
-        ①主线决策域:松全部键+爬梯/跨层/锁怪/战斗/跳阶段状态全归零;
-        ②检测线程域:版本号+1令检测线程在自己循环顶部自清跨帧怪表缓存(它正在迭代的list由它自己清,避免跨线程改迭代对象),
-          主线侧同时原子清空已发布怪表与检测节流,保证重置后不被1.5~2秒前的时序平滑/2秒宽限旧怪带偏;
-        ③监管自身域:清移动意图/未消费请求/续跑计数/仲裁滞回,以及空怪/压制侧/静止投票等旧偏见,防刚复位又被残留请求二次触发。返回True。"""
-        self._gsr_cooldown = now + GLOBAL_RESET_COOLDOWN_MS
-        self._gsr_hb = now
-        self._wd_log('gsr_reset', reason, color=(0, 0, 255))
-        try:
-            # ① 主线决策域
-            self._release_all_keys()
-            self._release_combat_move()
-            try:
-                self._reset_climb()
-            except Exception as e:
-                _debug_log("[硬重置]_reset_climb异常:%s" % e)
-            self._combat_transit = False
-            self._transit_target = None
-            self._clear_locked_ladder('硬重置')
-            self._combat_locked_target = None
-            self._combat_active = False
-            self._combat_had_target = False
-            self._unblock_state = None
-            self._platform_retreat_active = False
-            self._ladder_jump_phase = None
-            self._ladder_post_jump_step = None
-            # ② 检测线程域:版本号通知检测线程自清 + 主线侧原子清已发布结果与节流(下轮≤150ms即全量重扫)
-            self._detect_reset_seq = getattr(self, '_detect_reset_seq', 0) + 1
-            self._yolo_last_t = 0.0
-            self._bars_last_t = 0.0
-            if hasattr(self, '_feat_last_t'):
-                self._feat_last_t = 0.0
-            self._raw_monsters = []
-            self._raw_hp_bars = []
-            self._monsters = []
-            # ③ 监管自身域 + 选怪旧偏见
-            with self._wd_lock:
-                self._mv_intent.clear()
-                self._wd_stall_req = None
-            self._wd_recover_cnt = 0
-            self._wd_recover_seg = None
-            # 战斗瞬移生效校验状态一并清零,避免重置后被旧的待校验/失败禁用误伤
-            self._combat_tp_pending = None
-            self._combat_tp_fail_key = None
-            self._combat_tp_fail_cnt = 0
-            self._combat_tp_block_until = 0
-            # 横跳拉回状态/未消费令一并清,防重置后被旧锁侧/旧拉回令二次触发
-            self._wd_antijitter_req = None
-            self._wd_x_flips = []
-            self._aj_hold_side = None
-            self._aj_stage = 0
-            self._combat_dropped_phantoms = []
-            self._combat_suppress_side = None
-            self._monster_static_track = {}
-            self._gsr_sp = self._player_screen_pos
-            self._gsr_mp = self._player_map_pos
-            self._gsr_nmon = len(self._monsters or [])
-        except Exception as e:
-            _debug_log("[硬重置]复位异常:%s" % e)
-        return True
 
     def _move_watchdog_loop(self):
         """监管线独立线程：只在自动运行时每WD_POLL_MS巡检一次，全程try自保护，绝不发键、绝不崩主线。"""
@@ -16007,7 +15797,6 @@ class MinimapRouteRecorder:
         """识别B线程(物理拆分·用户2026-09-12):【自己不截图】,只从A线程发布的最新帧槽取新帧,低频跑重活
         (怪模板匹配+YOLO+血条+合并/时序平滑/2秒宽限),原子发布_raw_monsters/_raw_hp_bars。
         人物由A线程高频出,B重活跑多慢都不拖人物。按帧槽seq只处理新帧,重活各自节流,没新帧轻睡10ms,全程try自保护绝不崩。"""
-        _seen_reset_seq = 0
         _last_seq = -1
         _dt_feat = _dt_yolo = _dt_bars = 0.0
         _dt_rounds = 0
@@ -16018,18 +15807,6 @@ class MinimapRouteRecorder:
             self._bars_cache, self._bars_last_t = [], 0.0
         while self._monster_running:   # 方案B:怪物线程只在"开始运行"期间跑,停止即退出(截图/人物常开不受影响)
             try:
-                # 硬重置版本号自清(清的全是怪/血条跨帧缓存,归怪物线程;人物不清)
-                if self._detect_reset_seq != _seen_reset_seq:
-                    _seen_reset_seq = self._detect_reset_seq
-                    self._yolo_cache, self._feat_cache, self._bars_cache = [], [], []
-                    self._yolo_last_t = self._feat_last_t = self._bars_last_t = 0.0
-                    self._detect_last_monsters = None
-                    self._detect_last_monsters_time = 0
-                    self._detect_recent = []
-                    self._monster_static_track = {}
-                    self._raw_monsters = []
-                    self._raw_monster_packet = ([], {})
-                    _debug_log("[识别B] 硬重置seq=%d,清怪/血条缓存并全量重扫" % _seen_reset_seq)
                 _frame = self._latest_frame                 # A发布的最新帧(原子引用,B只读不改)
                 _seq = getattr(self, '_latest_frame_seq', 0)
                 if _frame is None or _seq == _last_seq:
@@ -16276,9 +16053,6 @@ class MinimapRouteRecorder:
                     (self._rest_until - now) / 1000.0, (self._rest_next_at - now) / 60000.0))
                 return
 
-        # 全局2秒总兜底(用户2026-09-10):任何卡住/不动/异常满2秒→全部清零重来;放在所有决策之前,覆盖战斗/追怪/跨层/爬梯,返回True本帧交还下帧
-        if self._global_stall_watchdog(now):
-            return
 
         # === 【模块B】手动录制平台边界检测 + 回退（拟人化2026-09-07）===
         # 人物到了平台边缘触发回退：随机回退15~28%、先松键借惯性滑、回退中偶尔顿/小跳
@@ -16351,8 +16125,7 @@ class MinimapRouteRecorder:
                     _rem.append((_vk, _rel))
             self._combat_timed_keys = _rem
 
-        # 单向走不动(地形挡)不在此处理,靠录制绿线6px跑跳+卡住跳脱困;硬重置只认左右互搏冲突。
-        # 注:旧"主线每帧消费水平停滞→续跑/放弃"已撤,统一在主循环帧首 _consume_hard_reset 跨线程清零,不在combat_tick中途串行处理。
+        # 单向走不动(地形挡)不在此处理,靠录制绿线6px跑跳+卡住跳脱困;监管线(按键互搏/停滞/横跳)只检测记录报异常栏,不发键不重置(干预已于2026-09-17物理删除)。
 
         # === 人物/怪/YOLO/血条 已由后台检测线程同一帧算好，主循环过滤进 self._monsters / self._player_screen_pos ===
         # 这里主线程不再做检测重活，只保留镜头死区(右键拖动检测框) + 人物定位日志 + 怪物计数日志
@@ -16535,17 +16308,7 @@ class MinimapRouteRecorder:
             return
         # 每帧先核对上一次战斗瞬移是否真的让人物位移(用户2026-09-11:瞬移不过去要立刻知道、转跳/梯子,不卡住空闪)
         self._check_combat_teleport(now, px, py)
-        # 第二层横跳拉回·A级锁侧(用户2026-09-11):锁侧窗口内只把净方向那一侧(含正上方15px容差)的怪交给决策,
-        # 从数据源头断掉"在左右怪间反复横跳选目标";该侧一只都没有时不过滤(避免无怪空站),交下一轮B级处理。
         _combat_mons = self._monsters
-        _ajhs = self._aj_hold_side
-        if _ajhs and now < _ajhs['until']:
-            _kept = [_m for _m in _combat_mons
-                     if (((_m[0] + _m[2]) // 2 - px) * _ajhs['dir']) >= -15]
-            if _kept:
-                _combat_mons = _kept
-        elif _ajhs and now >= _ajhs['until']:
-            self._aj_hold_side = None
         _dl = combat_logic.combat_step(
             now, px, py_layer, _combat_mons, self._selected_platforms, skill_range, aoe_range,
             _far_x, self._combat_locked_target, self._monster_hp_bars, _has_dmg,
@@ -17505,17 +17268,9 @@ class MinimapRouteRecorder:
             else:
                 _bound_pulling = self._bound_pull_tick(time.time() * 1000)
             _aux_busy = _fall_returning or _unblocking or _bound_pulling
-            # 监管线硬重置·帧首最高优先级(用户2026-09-10):监管线程独立轮询实时发现卡死、已当场松键停手并发令,
-            # 主线这里(跑任何锁怪/巡路/打怪之前)第一件事统一跨线程清零;重置当帧不再跑random/combat旧决策,
-            # 下一帧从"识别→锁怪→巡路→打怪"干净重来,不再等主线串行跑完慢几拍
-            _hard_reset_done = self._consume_hard_reset() if not _aux_busy else False
-            # 第二层横跳拉回(仅在没有辅助线独占、也没被硬重置接管时):A级锁侧/B级内部转硬重置
-            _anti_jitter_done = False
-            if not _aux_busy and not _hard_reset_done:
-                _anti_jitter_done = self._consume_anti_jitter(time.time() * 1000)
             self._seg_loop['3misc'] = self._seg_loop.get('3misc', 0) + time.time() - self._lk.get('before_scale', time.time())
             self._lk['before_route'] = time.time()
-            if not _aux_busy and not _hard_reset_done and not _anti_jitter_done:
+            if not _aux_busy:
                 self._random_step(self._player_map_pos)  # 2026-09-16:光点改由人物高频线程写全局_player_map_pos,这里读它
             self._seg_loop['4route'] = self._seg_loop.get('4route', 0) + time.time() - self._lk.get('before_route', time.time())
             self._lk['after_route'] = time.time()
@@ -17542,7 +17297,7 @@ class MinimapRouteRecorder:
             self._seg_loop['5premisc'] = self._seg_loop.get('5premisc', 0) + time.time() - self._lk.get('after_route', time.time())
             self._lk['before_combat'] = time.time()
             try:
-                if not _aux_busy and not _hard_reset_done:
+                if not _aux_busy:
                     self._combat_tick()
             except Exception as e:
                 print("[战斗] 异常:", e)
@@ -17553,7 +17308,7 @@ class MinimapRouteRecorder:
                     pass
             # 停滞纯观测(2026-09-17):独立try、只读不发键,有任务却1秒无进展报【异常】栏
             try:
-                if not _aux_busy and not _hard_reset_done:
+                if not _aux_busy:
                     self._stall_observer(time.time() * 1000)
             except Exception as _oe:
                 _debug_log("[停滞观测] 异常: %s" % _oe)
