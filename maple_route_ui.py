@@ -497,6 +497,7 @@ GLOBAL_STALL_MS = 3000       # 有任务在身却连续3秒无任一"进展心�
 GLOBAL_MOVE_PX = 6           # 屏幕基点累计位移≥此值=在移动(进展)
 GLOBAL_MAP_D = 2             # 小地图光点累计位移≥此值=在移动(进展)
 GLOBAL_SKILL_HB_MS = 2000    # 最近这么多ms内放过主攻/群攻=站桩输出中(进展,不误判施法站桩)
+STALL_OBSERVE_MS = 1000     # 停滞纯观测阈值:有任务却连续1秒无任一进展心跳→【异常】栏报一条(只观测不干预,2026-09-17)
 GLOBAL_RESET_COOLDOWN_MS = 3000  # 总复位后冷却:给重识别/重决策留时间,冷却内不再次复位
 # 监管线专用背景运动采样区(用户2026-09-09截图指定)：不能放人物边上(旁边怪动会误判),选远离人物/怪的纯背景。
 # 只用【上、右】两块,两块画面同时帧差超阈=人物在正确移动(镜头在滚);单块变化可能是怪/特效/绳索摆动,忽略。整窗坐标(含标题栏)。
@@ -523,13 +524,15 @@ BOUND_DEFAULT_INSET = 6     # 默认竖线距小地图左右边的内缩(块px):
 BOUND_FILE = os.path.join(DATA_DIR, "bound_lines.json")  # 边界持久化 {l,r,top_pf,bot_pf}(退出编辑时写、启动懒加载)
 
 # === 战斗瞬移生效校验(用户2026-09-11:台子有距离、有的瞬移不过去;按完键必须核对人物是否真朝该轴位移) ===
-TP_VERIFY_MS = 350        # 瞬移后等350ms(给瞬移动作+人物特征重定位时间)再开始校验
-TP_VERIFY_TIMEOUT = 800   # 最多等到800ms,仍没朝预期方向位移=本次瞬移无效(被台距/墙挡/没蓝)
+TP_VERIFY_MS = 450        # 瞬移后等450ms(给瞬移动作+人物特征全图重定位时间)再开始校验(2026-09-17:350→450,人物识别约330ms/帧,原350窗内常拿不到瞬移后新坐标)
+TP_VERIFY_TIMEOUT = 1400  # 最多等到1400ms,覆盖全图重捕最坏2~3帧;坐标持续刷新却仍没朝预期位移才判本次瞬移无效(被台距/墙挡/没蓝)
 TP_MIN_SCREEN_DX = 25     # 水平瞬移有效:人物屏幕X朝预期方向至少变25px(真瞬移远大于此)
 TP_MIN_SCREEN_DY = 20     # 竖直瞬移有效:人物屏幕Y朝预期方向至少变20px
 TP_FAIL_MAX = 2           # 同一目标连续瞬移无效达2次→暂时对它禁用瞬移,改走路/跳/梯子
 TP_BLOCK_MS = 3000        # 对该目标禁用瞬移3秒(绑定目标,换目标自动解除),过后可再试
-TP_ATK_RELEASE_MS = 50    # 瞬移前置:先松主攻键再等50ms前摇(本游戏攻击硬直/瞬移前后摇没给够会吞键失效,用户2026-09-11:150→50先试)
+TP_ATK_RELEASE_MS = 120   # 瞬移前置:先松主攻键再等120ms前摇(攻击硬直没结束会吞瞬移键;2026-09-17真机:50ms太短瞬移被吞、肉眼没看到闪,提到120与"单次按键≥120ms"铁律一致)
+TP_POST_MS = 250          # 瞬移后摇:瞬移落地250ms内不发主攻/群攻/跳高打(瞬移硬直期发攻击会被吞),移动追怪照常,避免瞬移后空挥/发呆(2026-09-17用户定)
+TP_COORD_FRESH_MS = 400   # 瞬移生效校验:人物画面坐标在400ms内刷新过才算"新鲜";坐标陈旧=全图重定位还没出新点,不判瞬移无效继续等(治"闪了却被误判无位移")
 
 # === 梯子特征模板（YOLO前过渡方案，用户2026-09-09定稿：随方案永久存盘，仅上梯近距在主窗口匹配梯子竖条X，辅助精准起跳）===
 LADDER_TPL_MAX = 10            # 每方案最多梯子模板数
@@ -1129,6 +1132,7 @@ class MinimapRouteRecorder:
         self._combat_tp_fail_key = None           # 累计失败对应的目标键(锁定坐标),换目标自动重新计
         self._combat_tp_fail_cnt = 0              # 该目标连续瞬移无效次数
         self._combat_tp_block_until = 0           # 对该目标禁用瞬移到的时间戳(ms)
+        self._combat_tp_post_until = 0            # 瞬移后摇截止时间戳(ms):此前压制主攻/群攻/跳高打出手,移动照常(2026-09-17)
         # 【模块B】端点按钮按下特效状态
         self._calib_left_pressed = False
         self._calib_right_pressed = False
@@ -1215,12 +1219,28 @@ class MinimapRouteRecorder:
         self._last_maint_ts = 0        # 定期维护(日志留5分钟/清调试缓存)时间戳，0=启动即执行一次
         self._log_tab_combat = None    # 【打怪】tab按钮矩形(UI坐标)
         self._log_tab_behavior = None  # 【行为】tab按钮矩形(UI坐标)
+        self._exception_logs = []      # 异常日志[{t,msg,color}]:停滞/频繁异常/失败事件(2026-09-17新增第三栏)
+        self._exception_scroll = 0     # 异常日志垂直滚动位置
+        self._log_tab_exception = None # 【异常】tab按钮矩形(UI坐标)
         # 人工查看日志(用户2026-09-09)：手动滚轮/拖垂直条/拖水平条时暂停自动跟随最新,停手3秒恢复;底部水平条看长日志右边
         self._log_hscroll = 0          # 打怪日志横向像素偏移(0=最左,正数=左移露出右边)
         self._behavior_hscroll = 0     # 行为日志横向像素偏移
         self._log_manual_t = 0         # 打怪日志最近一次人工滚动时刻(ms),3秒内不被新日志拉回最新
         self._behavior_manual_t = 0    # 行为日志最近一次人工滚动时刻(ms)
         self._dragging_log_hscroll = False  # 正在拖底部水平滚动条
+        # 停滞纯观测(2026-09-17):有任务无进展满1秒报【异常】栏,只观测不干预(基准/上次秒数/是否在停滞态)
+        self._obs_hb = 0
+        self._obs_sp = None
+        self._obs_mp = None
+        self._obs_nmon = 0
+        self._obs_active = False
+        self._obs_last_rep = 0
+        # 高频异常计数(2026-09-17):连续空打streak(第2次才报)+1秒滑动窗高频事件(锁怪/找梯>=3次)
+        self._phantom_streak = 0
+        self._freq_events = {}
+        self._recognize_beat_t = 0    # 识别B线程处理新帧心跳(ms),H陈旧观测用(关怪扫上梯时仍扫梯子照跳)
+        self._recog_err_last = 0      # 识别B线程异常上屏节流(ms)
+        self._stale_rep = {}          # 人物坐标/识别线程陈旧观测上屏节流
         # 窗口大小固定：绑定时记录目标大小，运行中监控拉回
         self._target_window_size = None  # (width, height) 或 None
         # 蓝色框校准（一屏范围在小地图上的对应尺寸，光点在框内归一化=人物在屏幕内归一化）
@@ -1299,6 +1319,7 @@ class MinimapRouteRecorder:
         self._potion_last = {}  # potionN_key -> 上次释放时间戳
         self._attack_last = {}  # atk1/aoe -> 上次释放时间戳
         self._player_screen_pos = None  # (x,y) 人物画面坐标
+        self._player_screen_t = 0       # 人物画面坐标最近一次刷新时间戳(ms),判坐标陈旧用(瞬移生效校验/坐标陈旧观测)
         self._role_track = None         # 新多锚点跟踪状态:last锚点/foot脚点/miss失配/last_full全图时间/face朝向/score
         self._role_face = None          # 面部锚点判定的朝向 'L'/'R'(打怪左右决策用)
         self._role_anchor_polys = {}    # 本帧识别到(过阈)的各锚点缩小多边形{key:([(x,y)...],score)},供蒙板画框
@@ -1584,6 +1605,7 @@ class MinimapRouteRecorder:
         self._raw_monsters = []             # 后台线程算出的原始合并怪列表 [(x1,y1,x2,y2,score)]
         self._raw_hp_bars = []              # 后台线程算出的血条 [(x,y,w,h)]
         self._raw_char_pos = None           # 后台线程算出的人物脚位置
+        self._raw_char_t = 0                # 后台线程最近一次发布人物脚位置的时间戳(ms)
         self._monster_scan_enabled = True   # 怪物识别B线程百分百总开关(锁梯/上梯/下跳关,回打怪开):关=主线程当帧拿不到任何怪数据
         self._raw_monster_packet = ([], {}) # B线程原子发布(怪框列表, metric几何表)同帧配对; metric={框四角:(cx,cy,x_gap,dy)}
         self._monsters_metric = {}          # 主线程本帧怪几何表(与self._monsters同源), combat选怪直接读、不再现算距离
@@ -4002,6 +4024,7 @@ class MinimapRouteRecorder:
             self._role_rec.setdefault("blocklist", []).append(added)
             self._save_role_recognize()
             self._add_log("已加角色黑名单 %s" % added)
+            self._rlog("新增角色识别黑名单 %s" % added, log='behavior')
             if hasattr(self, "_role_refresh_blocklist"):
                 try: self._role_refresh_blocklist()
                 except Exception: pass
@@ -5285,7 +5308,7 @@ class MinimapRouteRecorder:
         if self._ladder_realign_round >= LADDER_REALIGN_MAX_ROUNDS:
             _debug_log("[失败集合] 已%d轮校准仍没抓住(%s),放弃回主线重新算怪距打怪"
                        % (self._ladder_realign_round, why))
-            self._rlog("梯子校准%d轮没挂上,回主线打怪" % self._ladder_realign_round, LOG_RED, log='behavior')
+            self._rlog("梯子校准%d轮都没挂上,回主线打怪(三次直跳失败)" % self._ladder_realign_round, LOG_RED, log='exception')
             self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS
             self._reset_climb()
             self._decide_climb_fail_action()
@@ -5582,7 +5605,7 @@ class MinimapRouteRecorder:
         # 进屏幕段超过合并等待上限仍没锁定任何白框X=识别不到这把梯:放弃回主线(不硬按↓、不死等)
         if _tx is None:
             if now_ms - self._desc_scr_enter_t >= LADDER_MERGE_WAIT_MS:
-                self._rlog("下行主窗口%.0fms没识别到梯子白框,放弃回主线" % LADDER_MERGE_WAIT_MS, LOG_RED, log='behavior')
+                self._rlog("下行主窗口%.0fms没识别到梯子白框,放弃回主线" % LADDER_MERGE_WAIT_MS, LOG_RED, log='exception')
                 self._key_up(VK_LEFT)
                 self._key_up(VK_RIGHT)
                 self._reset_climb()
@@ -5813,7 +5836,7 @@ class MinimapRouteRecorder:
                 # 第二次还失败,转方式二找梯子
                 _debug_log("[下行·方式一] 观察%.0fms Y始终没增大(屏幕Δ%s/世界Δ%.0f)=实心台,直接主窗口找梯(不走小地图)" % (
                     _el, ("%.0f" % _dsy) if _dsy is not None else "NA", _dmy))
-                self._rlog("横跳%.0fms没下去,直接主窗口找梯子" % _el, log='behavior')
+                self._rlog("下台阶横跳%.0fms没下去,转主窗口找梯子" % _el, LOG_RED, log='exception')
                 self._enter_desc_lad_scr(now_ms)
             # 其余(未到最早判定/还在腾空下落途中):不按任何键继续观察
             return False
@@ -5942,7 +5965,10 @@ class MinimapRouteRecorder:
             if _arrived:
                 self._key_up(VK_DOWN)
                 _debug_log("[下行] %s(Y=%.0f),落地接下一动作" % (_why, py))
-                self._rlog("%s,落地接下一动作" % _why, log='behavior')
+                if "超时" in str(_why):
+                    self._rlog("下台保命超时兜底:%s(强制松键接下一动作)" % _why, LOG_RED, log='exception')
+                else:
+                    self._rlog("%s,落地接下一动作" % _why, log='behavior')
                 self._reset_climb()
                 self._reset_lock_after_arrival('下行自由落')
             return False
@@ -5991,7 +6017,7 @@ class MinimapRouteRecorder:
             if getattr(self, '_lad_scr_enter_t', 0) == 0:
                 self._lad_scr_enter_t = now_ms
             if now_ms - self._lad_scr_enter_t >= LADDER_MERGE_WAIT_MS:
-                self._rlog("屏幕连续%.0fms找不到梯子,松键回主线打怪(不死等)" % LADDER_MERGE_WAIT_MS, LOG_RED, log='behavior')
+                self._rlog("屏幕连续%.0fms找不到梯子,松键回主线打怪(不死等)" % LADDER_MERGE_WAIT_MS, LOG_RED, log='exception')
                 _debug_log("[梯子·掉锁] 屏幕连续%.0fms一把白框都没识别到(无梯模板/相似度不够/已离开梯旁),松左右键回主线打怪" % LADDER_MERGE_WAIT_MS)
                 self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
                 self._reset_climb(); self._decide_climb_fail_action()
@@ -6045,7 +6071,10 @@ class MinimapRouteRecorder:
                 _arrive_why = "总超时%dms保命收尾(录制爬升%s+2s)" % (_climb_to, ("%.1fs" % float(_cdur)) if isinstance(_cdur, (int, float)) and float(_cdur) >= 1.0 else "无录制默认12s")
             if _arrived:
                 _debug_log("[爬梯] %s(光点Y=%.0f 梯端Y=%.0f),松键开主线" % (_arrive_why, py, _end_y or 0))
-                self._rlog("%s,到顶开打" % _arrive_why, LOG_OK, log='behavior')
+                if str(_arrive_why).startswith("总超时"):
+                    self._rlog("爬梯保命超时收尾:%s(没录到梯端或光点没重合,强制松键开打)" % _arrive_why, LOG_RED, log='exception')
+                else:
+                    self._rlog("%s,到顶开打" % _arrive_why, LOG_OK, log='behavior')
                 if VK_UP in self._random_move_keys:
                     self._key_up(VK_UP)
                 if VK_DOWN in self._random_move_keys:
@@ -7926,10 +7955,12 @@ class MinimapRouteRecorder:
                     print("No platform extracted,", len(self.platform_points), "points")
                 self.platform_points = []
                 self.recording_platform = False
+                self._rlog("平台录制结束(F5):本次提取%d段,累计%d段" % (len(np_) if np_ else 0, len(self.platforms)), log='behavior')
             else:
                 self.recording_platform = True
                 self.platform_points = []
                 print("Platform recording started...")
+                self._rlog("开始录制平台(F5)", log='behavior')
         elif vk == VK_F6:
             if self.recording_platform:
                 print("Stop platform first (F5)")
@@ -7953,6 +7984,9 @@ class MinimapRouteRecorder:
                     if not replaced:
                         self.ladders.append(new_ld)
                     print("Extracted 1 ladder,", len(self.ladder_points), "points,", "覆盖旧梯" if replaced else "新增", "ladders总数=", len(self.ladders))
+                    self._rlog("梯子录制结束(F6):%s,共%d把%s" % (
+                        "覆盖旧梯" if replaced else "新增", len(self.ladders),
+                        (" 爬升%.1fs" % new_ld['duration_sec']) if new_ld.get('duration_sec') else ""), log='behavior')
                 else:
                     print("No ladder extracted,", len(self.ladder_points), "points")
                 self.ladder_points = []
@@ -7965,14 +7999,17 @@ class MinimapRouteRecorder:
                 self._ladder_seg_t0 = None  # 新录制段重置首末时间(用户2026-09-17)
                 self._ladder_seg_t1 = None
                 print("Ladder recording started...")
+                self._rlog("开始录制梯子(F6)", log='behavior')
         elif vk == VK_F7:
             self.platform_points = []
             self.ladder_points = []
             self.platforms = []
             self.ladders = []
             print("Cleared all (points + saved platforms/ladders)")
+            self._rlog("清空本次平台/梯子录制点(F7,不删已存特征)", log='behavior')
         elif vk == VK_F8:
             self._save()
+            self._rlog("手动保存方案(F8)", log='behavior')
         elif vk == VK_F9:
             print("Manual select triggered (F9)")
             self.manual_select_region()
@@ -8242,19 +8279,30 @@ class MinimapRouteRecorder:
         line_h = 16
         _lch = UI_LOG_H - (UI_LOG_CONTENT_Y - UI_LOG_Y) - 4   # 与绘制块同一内容高度
         max_lines = max(1, _lch // line_h)
-        _is_beh = (self._log_view == 'behavior')
-        _entries = self._behavior_logs if _is_beh else self._runtime_logs
+        _view = self._log_view
+        if _view == 'behavior':
+            _entries = self._behavior_logs
+        elif _view == 'exception':
+            _entries = self._exception_logs
+        else:
+            _entries = self._runtime_logs
         # 滚动单位=折行后的渲染行(最新在上、条内首行在上)，和绘制处保持一致(否则长消息折行后滚动条对不齐)
         _avail_w = UI_LOG_W - 4 - 8 - 2 - 6
         total = len(self._log_display_lines(_entries, _avail_w))
         max_scroll = max(0, total - max_lines)
 
         def _get_scr():
-            return self._behavior_scroll if _is_beh else self._log_scroll
+            if _view == 'behavior':
+                return self._behavior_scroll
+            if _view == 'exception':
+                return self._exception_scroll
+            return self._log_scroll
 
         def _set_scr(v):
-            if _is_beh:
+            if _view == 'behavior':
                 self._behavior_scroll = v
+            elif _view == 'exception':
+                self._exception_scroll = v
             else:
                 self._log_scroll = v
 
@@ -8270,6 +8318,9 @@ class MinimapRouteRecorder:
                 return
             if _tab_hit(self._log_tab_behavior):
                 self._log_view = 'behavior'
+                return
+            if _tab_hit(self._log_tab_exception):
+                self._log_view = 'exception'
                 return
 
         # 鼠标滚轮（在日志区域内滚动3行）
@@ -9211,14 +9262,19 @@ class MinimapRouteRecorder:
         line_h = 16
         # 双日志视图(用户2026-09-09)：combat=打怪日志 / behavior=行为日志，标题栏两个tab点开切换
         _view = self._log_view
-        _logs = self._runtime_logs if _view == 'combat' else self._behavior_logs
-        _scroll = self._log_scroll if _view == 'combat' else self._behavior_scroll
+        if _view == 'behavior':
+            _logs, _scroll = self._behavior_logs, self._behavior_scroll
+        elif _view == 'exception':
+            _logs, _scroll = self._exception_logs, self._exception_scroll
+        else:
+            _logs, _scroll = self._runtime_logs, self._log_scroll
         # tab按钮矩形(标题栏内)，每帧更新供鼠标点击命中(无论缓存是否命中)
         _tab_w, _tab_h = 50, 17
         _tab_y = ly + 3
         _tab_x0 = lx + 4 + 45  # 打怪/行为分栏整体右移45px(用户2026-09-10,让开日志底板左上位置)
         self._log_tab_combat = (_tab_x0, _tab_y, _tab_w, _tab_h)
         self._log_tab_behavior = (_tab_x0 + _tab_w + 4, _tab_y, _tab_w, _tab_h)
+        self._log_tab_exception = (_tab_x0 + 2 * (_tab_w + 4), _tab_y, _tab_w, _tab_h)
         max_lines = max(1, log_content_h // line_h)
         _avail_w = lw - 4 - 8 - 2 - 6   # 左留白4 + 右滚动条(8+2) + 余量6
         display = self._log_display_lines(_logs, _avail_w)  # 从上到下:最新条目在最上,条内首行(带时间)在上
@@ -9233,7 +9289,8 @@ class MinimapRouteRecorder:
             draw_asset(frame, self._ui_log_bg, lx, ly, lw, lh)  # 未命中：先贴日志底板
             # 两个tab：当前选中=深绿底白字，未选=深灰底灰字
             for _tv, _tr, _tn in (('combat', self._log_tab_combat, '打怪'),
-                                  ('behavior', self._log_tab_behavior, '行为')):
+                                  ('behavior', self._log_tab_behavior, '行为'),
+                                  ('exception', self._log_tab_exception, '异常')):
                 _tx, _tyy, _tw, _th = _tr
                 _sel = (_view == _tv)
                 cv2.rectangle(frame, (_tx, _tyy), (_tx + _tw, _tyy + _th),
@@ -10198,6 +10255,11 @@ class MinimapRouteRecorder:
             if len(self._behavior_logs) > self._log_max:
                 self._behavior_logs = self._behavior_logs[-self._log_max:]
             self._behavior_scroll = 0   # 新行为日志回到顶部
+        elif log == 'exception':
+            self._exception_logs.append(_entry)
+            if len(self._exception_logs) > self._log_max:
+                self._exception_logs = self._exception_logs[-self._log_max:]
+            self._exception_scroll = 0  # 新异常日志回到顶部
         else:
             self._runtime_logs.append(_entry)
             if len(self._runtime_logs) > self._log_max:
@@ -10676,6 +10738,7 @@ class MinimapRouteRecorder:
         msg = "人物特征#%d已保存(%s) (%dx%d) 共%d套" % (new_id, dir_name, cw, ch, len(self._char_templates))
         self._add_log(msg)
         print("[人物特征]", msg)
+        self._rlog(msg, log='behavior')
     def _clear_character_features(self):
         """清除所有人物特征模板"""
         count = len(self._char_templates)
@@ -10691,6 +10754,7 @@ class MinimapRouteRecorder:
         if os.path.exists(CHAR_TEMPLATE_META):
             os.remove(CHAR_TEMPLATE_META)
         self._add_log("已清除 %d 套人物特征" % count)
+        self._rlog("清空全部人物特征(%d套)" % count, log='behavior')
         print("[特征清除] 已清除 %d 套" % count)
 
     def _delete_char_template(self, index):
@@ -10829,6 +10893,7 @@ class MinimapRouteRecorder:
         msg = "怪物特征#%d已保存(%s) (%dx%d) 共%d套" % (new_id, dir_name, cw, ch, len(self._monster_templates))
         self._add_log(msg)
         print("[怪物特征]", msg)
+        self._rlog(msg, log='behavior')
 
     def _clear_monster_features(self):
         """清除所有怪物特征模板"""
@@ -10844,6 +10909,7 @@ class MinimapRouteRecorder:
         if os.path.exists(MONSTER_TEMPLATE_META):
             os.remove(MONSTER_TEMPLATE_META)
         self._add_log("已清除 %d 套怪物特征" % count)
+        self._rlog("清空全部怪物特征(%d套)" % count, log='behavior')
         print("[怪物特征] 已清除 %d 套" % count)
 
     def _delete_monster_template(self, index):
@@ -10858,6 +10924,7 @@ class MinimapRouteRecorder:
         self._monster_feature_matches = []  # 删除特征后清空匹配结果，避免旧点继续显示
         self._monsters = []  # 删除特征后也清空小地图怪物点，避免旧点继续显示
         self._add_log("已删除怪物特征#%d" % t["id"])
+        self._rlog("删除怪物特征#%d" % t["id"], log='behavior')
         print("[怪物特征] 已删除 #%d")
 
     # ==================== 梯子特征模板（随方案永久存盘，仅上梯近距匹配竖条X，辅助精准起跳；YOLO前过渡） ====================
@@ -10937,6 +11004,7 @@ class MinimapRouteRecorder:
         self._add_log("梯子特征#%d已保存(%dx%d) 共%d套，已存入方案%d" % (
             _new_no, cw, ch, _new_no, self.current_route))
         print("[梯子特征] #%d 已存 %dx%d，共%d套" % (_new_no, cw, ch, _new_no))
+        self._rlog("梯子特征#%d已保存(%dx%d),共%d套" % (_new_no, cw, ch, _new_no), log='behavior')
 
     def _reset_ladder_display_cache(self):
         """梯子模板增/删后清主窗口画面白框、选框、冻结身份缓存(用户2026-09-17):被删梯子的框当帧消失、
@@ -10962,6 +11030,7 @@ class MinimapRouteRecorder:
             self._save_ladder_templates(self.current_route)
             self._reset_ladder_display_cache()   # 画面上对应梯子框立即删除,不残留旧白框/冻结块
             self._add_log("已删除梯子特征#%d" % _del_no)
+            self._rlog("删除梯子特征#%d" % _del_no, log='behavior')
 
     def _clear_ladder_templates(self):
         n = len(self._ladder_templates)
@@ -10974,6 +11043,7 @@ class MinimapRouteRecorder:
         except Exception:
             pass
         self._add_log("已清除 %d 套梯子特征" % n)
+        self._rlog("清空全部梯子特征(%d套)" % n, log='behavior')
         print("[梯子特征] 已清除 %d 套" % n)
 
     def _match_ladder_screen_x(self, frame, ppos, direction, monster_x):
@@ -11316,7 +11386,7 @@ class MinimapRouteRecorder:
             self._lad_scr_enter_t = now_ms
         if (not _merged) and now_ms - self._lad_scr_enter_t >= LADDER_MERGE_WAIT_MS:
             # 进屏幕对位超过上限仍没选中任何白框(没录梯图/没YOLO/相似度不够):不硬跳也不死等,放弃回主线打怪
-            self._rlog("进主窗口%.0fms仍没识别到梯子白框,放弃回主线" % LADDER_MERGE_WAIT_MS, LOG_RED, log='behavior')
+            self._rlog("进主窗口%.0fms仍没识别到梯子白框,放弃回主线" % LADDER_MERGE_WAIT_MS, LOG_RED, log='exception')
             self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
             self._reset_climb(); self._decide_climb_fail_action()
             return False
@@ -15648,6 +15718,73 @@ class MinimapRouteRecorder:
         else:
             self._wd_clear_intent('y')
 
+    def _note_freq_event(self, key, limit, win_ms, msg):
+        """滑动窗高频事件计数:窗内达limit次往【异常】栏报一条,窗长冷却防刷屏。仅主线程调用。"""
+        now = int(time.time() * 1000)
+        d = self._freq_events
+        lst = d.setdefault(key, [])
+        lst[:] = [t for t in lst if now - t <= win_ms]
+        lst.append(now)
+        cdkey = '_cd_' + key
+        if len(lst) >= limit and now - d.get(cdkey, 0) >= win_ms:
+            d[cdkey] = now
+            try:
+                self._rlog(msg % len(lst), log='exception', color=LOG_RED)
+            except Exception:
+                pass
+
+    def _note_phantom_drop(self, kind):
+        """连续空打计数:第1次不报,第2次报【异常】栏(命中血条时在决策回传处清零)。"""
+        self._phantom_streak = getattr(self, '_phantom_streak', 0) + 1
+        if self._phantom_streak == 2:
+            try:
+                self._rlog("连续空打%d次(%s):出手无血条无伤害,疑似假怪/够不着,已连续换目标" % (self._phantom_streak, kind),
+                           log='exception', color=LOG_RED)
+            except Exception:
+                pass
+
+    def _note_stale_feeds(self, now):
+        """H 坐标/识别线程陈旧纯观测(5秒一条,只报异常栏不干预):
+        人物坐标>800ms不刷新=人物识别停摆/丢失;识别B线程>1s没处理新帧=B卡死(会发呆/不锁怪)。
+        上梯关怪扫但B线程仍扫梯子、心跳照跳,不会误报;只有线程真卡死才报。"""
+        if now - self._stale_rep.get('feed', 0) < 5000:
+            return
+        rc = getattr(self, '_raw_char_t', 0)
+        if rc and now - rc > 800:
+            self._stale_rep['feed'] = now
+            try:
+                self._rlog("人物坐标%.1f秒没刷新(人物识别疑似停摆/丢失)" % ((now - rc) / 1000.0),
+                           log='exception', color=LOG_RED)
+            except Exception:
+                pass
+            return
+        bt = getattr(self, '_recognize_beat_t', 0)
+        if bt and getattr(self, '_monster_running', False) and now - bt > 1000:
+            self._stale_rep['feed'] = now
+            try:
+                self._rlog("怪物识别B线程%.1f秒没处理新帧(识别线程疑似卡住,会发呆/不锁怪)" % ((now - bt) / 1000.0),
+                           log='exception', color=LOG_RED)
+            except Exception:
+                pass
+
+    def _note_stale_target_attack(self, cx, cy, now):
+        """I 纯观测(不干预,5秒一条):主攻已出手但锁定坐标不在当前怪列表任一框附近=在打陈旧/空目标。
+        跨帧平滑可能短暂保留,故只低频提示;真正drop仍由空怪/列表规则负责。"""
+        if now - self._freq_events.get('_cd_stale_atk', 0) < 5000:
+            return
+        for m in (self._monsters or []):
+            try:
+                if abs((m[0] + m[2]) / 2 - cx) <= 45 and abs(m[3] - cy) <= 55:
+                    return
+            except Exception:
+                continue
+        self._freq_events['_cd_stale_atk'] = now
+        try:
+            self._rlog("主攻已出手但锁定目标(%d,%d)不在当前怪列表(疑似打陈旧/空目标)" % (int(cx), int(cy)),
+                       log='exception', color=LOG_RED)
+        except Exception:
+            pass
+
     def _wd_log(self, key, msg, color=(0, 0, 255)):
         """监管日志：行为日志栏显示+写debug，同类按WD_LOG_DEDUP_MS去重防刷屏；异常默认红字。"""
         now = time.time() * 1000
@@ -15799,6 +15936,100 @@ class MinimapRouteRecorder:
         self._wd_log('wd_antijitter',
                      "原地左右横跳:%.1fs内换向%d次、光点净位移仅%.1f<%d[只观察不干预]" % (
                          AJ_WIN_MS / 1000.0, n, net, AJ_NET_MAP_DX), color=(0, 0, 255))
+        try:
+            self._rlog("左右横跳:%.1fs内换向%d次、人没挪窝(净位移%.1f<%d),疑似打怪/巡路抢方向" % (
+                AJ_WIN_MS / 1000.0, n, net, AJ_NET_MAP_DX), log='exception', color=LOG_RED)
+        except Exception:
+            pass
+
+    def _stall_obs_baseline(self, now, active=False):
+        """重置停滞观测基准(进展/无任务/休息时调用)。"""
+        self._obs_hb = now
+        self._obs_sp = self._player_screen_pos
+        self._obs_mp = self._player_map_pos
+        self._obs_nmon = len(self._monsters or [])
+        self._obs_active = active
+        self._obs_last_rep = 0
+
+    def _stall_state_text(self, cs):
+        """停滞观测:把当前战斗/爬梯状态翻成白话(只读状态,不发键)。"""
+        _cs = {
+            'to_ladder': '走向梯子(平地接近,尚未抓上)',
+            'climbing': '爬梯子中',
+            'jump_up': '上跳起跳/空中',
+            'jump_down': '下台阶起跳/空中',
+            'teleport': '瞬移中',
+            'descend': '下梯子/下台中',
+        }.get(cs)
+        if _cs:
+            return _cs
+        if getattr(self, '_combat_transit', False):
+            return '跨层规划/执行中'
+        if self._combat_locked_target is not None:
+            return '打怪中·锁怪%s' % ('出手攻击' if getattr(self, '_combat_active', False) else '追怪靠近')
+        if self._monsters:
+            return '选怪中(画面有怪但还没锁定)'
+        return '无明确任务'
+
+    def _stall_next_text(self, cs):
+        """停滞观测:按当前状态给出"下一步本该做什么"的白话,一眼看出卡在哪。"""
+        if cs != 'none' or getattr(self, '_combat_transit', False):
+            if cs == 'to_ladder':
+                return '走到起跳点跑跳/直跳,失败走三次校准,三次都失败开怪识别打怪'
+            if cs == 'climbing':
+                return '持续按上直到小地图光点对梯顶,到顶多按200ms后开怪识别'
+            return '完成本次爬梯/跨层/瞬移动作,结束后回打怪'
+        if self._combat_locked_target is not None:
+            return '近身就出手;打不到就靠近,跨层(Y差>=200且X<300)才走梯子,否则换最近怪'
+        if self._monsters:
+            return '按Y差小+X近锁一只怪(同层优先,跨层最后)'
+        return '原地等刷怪(无怪待命,正常)'
+
+    def _stall_observer(self, now):
+        """停滞纯观测(2026-09-17,只报【异常】栏、绝不发键/不干预、不另起线程,主线combat_tick后独立try调):
+        运行中【有任务在身】却连续STALL_OBSERVE_MS无任一进展心跳(屏幕基点>=6/光点>=2/近2秒放过技能/怪数减少),
+        满1秒首报、之后每秒一条"停滞N秒 当前=X 下一步=Y";无怪待命/拟人休息/正常长动作(确实在爬/下跳/起跳空中/平台回退)不报,恢复时报一条。
+        判据口径与_global_stall_watchdog一致(那个是干预型、总开关关着只关不删),本方法只观测。"""
+        if not self._running:
+            return
+        self._note_stale_feeds(now)   # H:人物坐标/识别B线程陈旧观测(独立限频,不干预、不影响下面停滞判定)
+        if getattr(self, '_aux_enable_rest', True) and now < getattr(self, '_rest_until', 0):
+            self._stall_obs_baseline(now, active=False)
+            return
+        cs = getattr(self, '_climb_state', 'none')
+        has_job = bool(self._monsters) or self._combat_locked_target is not None \
+            or getattr(self, '_combat_transit', False) or cs != 'none'
+        exempt = (
+            (cs == 'climbing' and getattr(self, '_climb_move_confirmed', False)) or
+            cs == 'descend' or
+            getattr(self, '_ladder_jump_phase', None) == 'post_jump' or
+            getattr(self, '_platform_retreat_active', False)
+        )
+        sp = self._player_screen_pos
+        mp = self._player_map_pos
+        if self._obs_hb == 0:
+            self._stall_obs_baseline(now)
+            return
+        moved = bool(sp is not None and self._obs_sp is not None and
+                     (abs(sp[0] - self._obs_sp[0]) + abs(sp[1] - self._obs_sp[1])) >= GLOBAL_MOVE_PX)
+        mapmoved = bool(mp is not None and self._obs_mp is not None and
+                        (abs(mp[0] - self._obs_mp[0]) + abs(mp[1] - self._obs_mp[1])) >= GLOBAL_MAP_D)
+        _last_atk = max(self._attack_last.values()) if self._attack_last else 0
+        casting = (now - _last_atk) < GLOBAL_SKILL_HB_MS
+        killed = len(self._monsters or []) < self._obs_nmon
+        if exempt or moved or mapmoved or casting or killed or not has_job:
+            if self._obs_active:
+                self._rlog("停滞解除·恢复推进 当前=%s" % self._stall_state_text(cs),
+                           log='exception', color=(0, 140, 0))
+            self._stall_obs_baseline(now, active=False)
+            return
+        stall_ms = now - self._obs_hb
+        secs = int(stall_ms // STALL_OBSERVE_MS)
+        if stall_ms >= STALL_OBSERVE_MS and secs != self._obs_last_rep:
+            self._obs_last_rep = secs
+            self._obs_active = True
+            self._rlog("停滞%d秒 当前=%s；下一步=%s" % (secs, self._stall_state_text(cs), self._stall_next_text(cs)),
+                       log='exception', color=LOG_RED)
 
     def _global_stall_watchdog(self, now):
         """全局2秒总兜底(用户2026-09-10:任何卡住/不动/异常都不许存在超过2秒,到点全部清零重新开始)。主线内每帧调,不另起线程。
@@ -16247,10 +16478,16 @@ class MinimapRouteRecorder:
         瞬移无效(台子太远/被墙挡/没蓝);同一锁定目标连续TP_FAIL_MAX次无效→TP_BLOCK_MS内对它禁用瞬移,改走路/跳/梯子,
         换目标自动重新计数。只读坐标+置标记,不发键(发键统一在主线动作段)。"""
         pen = self._combat_tp_pending
-        if pen is None or px is None or py is None:
+        if pen is None:
             return
         dt = now - pen['t']
         if dt < TP_VERIFY_MS:
+            return
+        # 坐标还没出来(瞬移后全图重定位中,人物点暂时None):不能判瞬移无效,继续等;
+        # 到硬上限仍None=人物识别没跟上(不是瞬移的锅),清pending不计数,交"坐标陈旧"观测,既不误判也不永久挂起
+        if px is None or py is None:
+            if dt >= TP_VERIFY_TIMEOUT:
+                self._combat_tp_pending = None
             return
         if pen['axis'] == 'x':
             _prog = (px - pen['sx']) * pen['dir']     # 朝预期方向(右x增/左x减)为正
@@ -16263,9 +16500,15 @@ class MinimapRouteRecorder:
             self._combat_tp_fail_cnt = 0
             self._combat_tp_fail_key = None
             return
+        # 没动先看坐标新不新鲜:瞬移后人物要全图重捕,坐标若仍是旧帧(没刷新到瞬移后位置),读到的px/py是瞬移前旧点,
+        # _prog≈0是识别没跟上、不是瞬移失败——不计失败继续等;等满硬上限坐标仍陈旧=人物识别问题,清pending不计数(交坐标陈旧观测)
+        if (now - getattr(self, '_player_screen_t', 0)) > TP_COORD_FRESH_MS:
+            if dt >= TP_VERIFY_TIMEOUT:
+                self._combat_tp_pending = None
+            return
         if dt < TP_VERIFY_TIMEOUT:
             return
-        # 到超时仍无朝预期位移=本次瞬移无效
+        # 坐标持续刷新(新鲜)、人却没离开起点、又给足1400ms窗口=瞬移真无效(攻击硬直吞键/被墙挡/没蓝)
         _key = pen.get('key')
         if self._combat_tp_fail_key == _key:
             self._combat_tp_fail_cnt += 1
@@ -16273,14 +16516,15 @@ class MinimapRouteRecorder:
             self._combat_tp_fail_key = _key
             self._combat_tp_fail_cnt = 1
         _axis = '水平' if pen['axis'] == 'x' else '竖直'
+        _thr = TP_MIN_SCREEN_DX if pen['axis'] == 'x' else TP_MIN_SCREEN_DY
         self._combat_tp_pending = None
         if self._combat_tp_fail_cnt >= TP_FAIL_MAX:
             self._combat_tp_block_until = now + TP_BLOCK_MS
-            self._wd_log('tp_ineff', "%s瞬移连续%d次无位移=过不去,%.0f秒内对该目标改走路/跳/梯子" % (
-                _axis, self._combat_tp_fail_cnt, TP_BLOCK_MS / 1000.0), color=(0, 0, 255))
+            self._wd_log('tp_ineff', "%s瞬移连续%d次无位移=过不去,%.0f秒内改走路/跳/梯子(等%.0fms,进度%.0f/阈值%d,坐标新鲜)" % (
+                _axis, self._combat_tp_fail_cnt, TP_BLOCK_MS / 1000.0, dt, _prog, _thr), color=(0, 0, 255))
         else:
-            self._wd_log('tp_ineff1', "%s瞬移无位移(第%d次,进度%.0f),可能台距不够/被挡" % (
-                _axis, self._combat_tp_fail_cnt, _prog))
+            self._wd_log('tp_ineff1', "%s瞬移无位移(第%d次,进度%.0f/阈值%d,坐标新鲜),可能台距不够/被挡" % (
+                _axis, self._combat_tp_fail_cnt, _prog, _thr))
 
     def _start_unblock(self, move_dir, jump_key, dot_x, now):
         """进入卡住解卡独占态(只进一次)：记录方向/跳键/基准光点X，松开主线移动与攻击，等待_unblock_tick接管。"""
@@ -17131,6 +17375,7 @@ class MinimapRouteRecorder:
                 if _ch is not None and not (_band_y1 <= _ch[1] <= _band_y2):
                     _ch = None
                 self._raw_char_pos = _ch                 # 原子发布:动作线程直接读最新人物点
+                self._raw_char_t = time.time() * 1000    # 同步发布坐标时间戳(判坐标新鲜/陈旧,瞬移校验防误判)
                 self._char_feature_matches = getattr(self, '_char_feature_matches', [])
                 # 2026-09-16:小地图光点检测也搬到本高频线程(原在主循环,空闲300ms才更新一次→黑框滞后)。
                 # 每来新帧就从整帧按map_area_rect裁小地图块→find_player_dot→写全局_player_map_pos,跟着截图帧十几ms更新。
@@ -17371,6 +17616,7 @@ class MinimapRouteRecorder:
                 except Exception:
                     pass
                 _rn = time.time()   # B耗时统计每秒一条
+                self._recognize_beat_t = _rn * 1000.0   # H陈旧观测心跳:每处理一新帧刷新(关怪扫上梯时仍扫梯子、照跳)
                 if _rn - _dt_last_report >= 1.0:
                     _debug_log("[识别B耗时] %d新帧 怪模板%d YOLO%d 血条%d (ms/秒)" % (
                         _dt_rounds, _dt_feat * 1000, _dt_yolo * 1000, _dt_bars * 1000))
@@ -17381,6 +17627,13 @@ class MinimapRouteRecorder:
                 if self._monster_running:
                     print("[识别B] 异常:", _e)
                     _debug_log("[识别B] 异常:%s" % _e)
+                    try:
+                        _en = time.time() * 1000
+                        if _en - getattr(self, '_recog_err_last', 0) >= 3000:
+                            self._recog_err_last = _en
+                            self._rlog("怪物识别B线程异常:%s(已自保护未崩,见debug.log)" % str(_e)[:50], log='exception', color=LOG_RED)
+                    except Exception:
+                        pass
             time.sleep(0.010)
 
     def _precise_target_period(self):
@@ -17754,10 +18007,14 @@ class MinimapRouteRecorder:
             same_platform_fn=None, metric=getattr(self, '_monsters_metric', None))
         self._combat_target_hp_confirmed = _dl['hp_confirmed']
         self._combat_gone_frames = _dl['gone_frames']
+        if _dl.get('hp_confirmed'):
+            self._phantom_streak = 0   # 命中血条=真怪在掉血,连续空打计数清零
         # 回存本帧锁定类别(in/out/cross)作下一帧维持依据;idle/drop重选时由决策结果自带,无目标=None自然清(两类锁怪)
         self._combat_lock_tier = _dl.get('tier')
         self._combat_target_hp_confirmed = _dl['hp_confirmed']
         self._combat_gone_frames = _dl['gone_frames']
+        if _dl.get('hp_confirmed'):
+            self._phantom_streak = 0   # 命中血条=真怪在掉血,连续空打计数清零
         # 战斗状态切换才上屏一条(用户2026-09-09:每个状态一条不刷屏)；cross跨层交给行为日志报,这里不重复
         _cstate_map = {'cast': "正在打怪(射程内,持续攻击)", 'pursue': "正在找怪/靠近(射程外,走向目标)",
                        'switch': "切换锁定目标", 'idle': "无目标,待机找怪中"}
@@ -17837,6 +18094,7 @@ class MinimapRouteRecorder:
             _oldlk = self._combat_locked_target
             _is_new_target = (_oldlk is None) or (abs(_oldlk[0]-t_cx) > 40 or abs(_oldlk[1]-t_cy) > 50)
             if _is_new_target:
+                self._note_freq_event('lock_tgt', 3, 1000, "1秒内锁定/换锁怪%d次(疑似锁不住或假怪多)")
                 # 改打身边能直打的怪(cast)=不再去上层,清掉可能残留的锁定梯,防下帧又被拉回cross拉扯(用户2026-09-11)
                 # 用户2026-09-16定稿:选了梯子就不解绑了,一心上梯子,有怪也不打,上到顶再打怪
                 # if _dl['state'] == 'cast' and getattr(self, '_locked_ladder', None) is not None:
@@ -17889,10 +18147,12 @@ class MinimapRouteRecorder:
                     self._slope_high_mode = False
                     _debug_log("[跳高打] 出手无血条无伤害=当前位置够不着，放弃跳打改走梯子/瞬移 目标(%d,%d)" % (t_cx, t_cy))
                     self._rlog("跳高打打空:无血条无伤害=这位置够不着(怪在上%dpx),改走梯子/瞬移" % (py_layer - t_cy), LOG_RED)
+                    self._note_phantom_drop('跳高打空')
                 else:
                     # 普通空怪(假怪/刚打死)：记录位置，短时间不再重锁（防空怪"drop后又选同一只"死循环空打）
                     self._combat_dropped_phantoms.append((t_cx, t_cy, now))
                     self._rlog("怪无血条/无伤害(已死或假怪,在上%+dpx),放弃并重新锁怪" % (py_layer - t_cy), LOG_RED)
+                    self._note_phantom_drop('普通空怪')
                 self._combat_locked_target = None
                 self._combat_target_attacked = False  # 放弃后重置"已出手"，避免下帧误判同一空怪
                 self._combat_first_strike_time = 0    # 放弃后清零首次出手计时
@@ -18033,12 +18293,13 @@ class MinimapRouteRecorder:
                 # 用户2026-09-05：追怪稳稳按住方向键连续走，不停顿
                 self._set_combat_move(move_dir)
                 # 位移检测：按住方向却没走=卡住→已登记【独占解卡】，本帧停手
-                if getattr(self, '_aux_enable_unblock', True) and self._check_move_blocked(now, px, move_dir, jump_key):
+                if getattr(self, '_aux_enable_unblock', False) and self._check_move_blocked(now, px, move_dir, jump_key):
                     return
                 self._pre_teleport_release()   # 瞬移前先松攻击键+前摇(攻击硬直会吞瞬移),方向键保持
                 self._press_game_key(_tp_key, duration=120)
                 self._combat_last_h_teleport = now
                 self._char_relocate_until = now + 700
+                self._combat_tp_post_until = now + TP_POST_MS  # 瞬移后摇:落地250ms内压技能不压移动
                 self._combat_tp_pending = {'axis': 'x', 'dir': 1 if move_dir == 'right' else -1,
                                            'sx': px, 'sy': py, 't': now, 'key': (t_cx, t_cy)}
                 _debug_log("[瞬移追怪] 水平向=%s X差=%d≥%d,瞬移(不看Y)" % (move_dir, t_dist, _tp_x))
@@ -18061,6 +18322,7 @@ class MinimapRouteRecorder:
                 self._press_game_key(_tp_key, duration=120)
                 self._combat_last_h_teleport = now
                 self._char_relocate_until = now + 700
+                self._combat_tp_post_until = now + TP_POST_MS  # 瞬移后摇:落地250ms内压技能不压移动
                 self._combat_tp_pending = {'axis': 'y', 'dir': 1 if _dyv > 0 else -1,
                                            'sx': px, 'sy': py, 't': now, 'key': (t_cx, t_cy)}
                 _debug_log("[瞬移追怪] 竖直向=%s |Y差|=%d≥%d,瞬移(不看X)" % ("下" if _dyv > 0 else "上", abs(_dyv), _tp_y))
@@ -18068,7 +18330,7 @@ class MinimapRouteRecorder:
             # ③都不瞬移:稳稳按住水平方向连续走(用户2026-09-05)
             self._set_combat_move(move_dir)
             # 位移检测：按住方向却没走=卡住→已登记【独占解卡】(主线下帧起暂停,由_unblock_tick向前+跳、连试上限放弃重锁)，本帧停手
-            if getattr(self, '_aux_enable_unblock', True) and self._check_move_blocked(now, px, move_dir, jump_key):
+            if getattr(self, '_aux_enable_unblock', False) and self._check_move_blocked(now, px, move_dir, jump_key):
                 return
             return
 
@@ -18145,7 +18407,7 @@ class MinimapRouteRecorder:
                     self._release_combat_move()
                     return
                 self._set_combat_move(move_dir)
-                if getattr(self, '_aux_enable_unblock', True) and self._check_move_blocked(now, px, move_dir, jump_key):  # 卡住→登记独占解卡,本帧停手(连试上限由_unblock_tick放弃重锁)；隔离排查:关解卡线则不登记
+                if getattr(self, '_aux_enable_unblock', False) and self._check_move_blocked(now, px, move_dir, jump_key):  # 卡住→登记独占解卡,本帧停手(连试上限由_unblock_tick放弃重锁)；隔离排查:关解卡线则不登记
                     return
             else:
                 # 几乎正下方(|X|≤15)：锁定了平台编号时禁止落层(下层怪不属于勾选平台,本就不该锁;双保险防掉出绿线)；
@@ -18185,7 +18447,7 @@ class MinimapRouteRecorder:
                 self._release_combat_move()  # 到绿线边缘不水平走,只原地跳上坡
             elif _hmove is not None:
                 self._set_combat_move(_hmove)
-                if getattr(self, '_aux_enable_unblock', True) and self._check_move_blocked(now, px, _hmove, jump_key):
+                if getattr(self, '_aux_enable_unblock', False) and self._check_move_blocked(now, px, _hmove, jump_key):
                     return
             # ②极简循环:wait_jump到点→跳;wait_attack到点→攻击(出手前再核X仍在射程内才打,治离好远空打)
             if self._slope_phase == 'wait_jump' and now >= self._slope_next_at:
@@ -18204,7 +18466,7 @@ class MinimapRouteRecorder:
                         "法师" if _sj_mage else "战士", _above2, abs(_ref_x - px), _hmove))
             elif self._slope_phase == 'wait_attack' and now >= self._slope_next_at:
                 # 跳后延时到了,该攻击了(出手瞬间再核X:被怪撞开/没走到射程内本跳不出手,只等下一跳)
-                if abs(_ref_x - px) <= skill_range:
+                if abs(_ref_x - px) <= skill_range and now >= getattr(self, '_combat_tp_post_until', 0):
                     if _sj_mage:
                         self._release_combat_move()   # 法师落地站定放技能
                     _fvk = VK_RIGHT if _ref_x >= px else VK_LEFT   # 出手前短点朝怪方向掰脸40ms
@@ -18264,7 +18526,7 @@ class MinimapRouteRecorder:
                 if abs(_am_cx - px) <= aoe_dist and -_aoe_y_up <= _am_dy <= _aoe_y_down:
                     in_range += 1
             last = self._attack_last.get("aoe", 0)
-            if in_range >= 3 and now - last > aoe_cd:
+            if in_range >= 3 and now - last > aoe_cd and now >= getattr(self, '_combat_tp_post_until', 0):
                 if random.random() < 0.8:
                     # 群攻出手前同样短点朝锁定怪方向40ms(理由同主攻,治朝向漂移反打);双向近身群攻也不影响两侧出伤
                     _afvk = VK_RIGHT if t_cx >= px else VK_LEFT
@@ -18299,7 +18561,8 @@ class MinimapRouteRecorder:
             _cd_ok = (now - last > atk_cd)
             if (_stance_ok and in_attack_range   # 架构B:出手距离与走近/站定分水岭同源(实控=迟滞门;关=原t_dist<=stop_range)
                     and -_atk_y_up <= _dy_atk <= _atk_y_down
-                    and _cd_ok):
+                    and _cd_ok
+                    and now >= getattr(self, '_combat_tp_post_until', 0)):  # 瞬移后摇250ms内不发主攻(硬直吞键),移动照常不发呆
                 # 【用户2026-09-09·出手前必短点朝怪方向】人物特征无朝向,爬梯/瞬移/被撞/跳后真实朝向会漂,
                 # 不管变没变向,每次主攻出手前都无条件短点朝怪方向键40ms(同向也点),把脸掰回怪再打,治反着打/空打;
                 # 走_combat_timed_keys到期自动松,不进_combat_held_keys、不设move_dir→不会被下面"移动中不发技能"拦
@@ -18309,6 +18572,7 @@ class MinimapRouteRecorder:
                 self._press_game_key(atk_key)  # keybd_event tap(keydown+keyup)，能松开(用户：用特定模式)
                 self._attack_last["atk1"] = now
                 self._combat_target_attacked = True  # 已对锁定目标出手：空怪判定用
+                self._note_stale_target_attack(t_cx, t_cy, now)  # I纯观测:锁定目标不在当前怪列表(限频5s,不干预)
                 if not self._combat_first_strike_time:  # 仅记首次出手，持续攻击不刷新，保证130ms窗口后空怪能被drop
                     self._combat_first_strike_time = now
                 skill_cast = True
@@ -18546,6 +18810,7 @@ class MinimapRouteRecorder:
                         _t2 = time.time()
                         # 人物/怪/YOLO/血条 都由后台检测线程同一帧算好了，主线程只读结果+过滤假怪（主线程不再做重活）
                         self._player_screen_pos = self._raw_char_pos
+                        self._player_screen_t = self._raw_char_t   # 透传坐标时间戳,瞬移校验据此判陈旧、坐标陈旧观测据此报警
                         self._monster_hp_bars = self._raw_hp_bars
                         self._raw_cached = self._raw_cached_feature_monsters
                         # 2026-09-07 用户定稿：不再做"静止怪"静态过滤(冒险岛大量怪本就站桩,会误剔近身真怪→有怪不锁/空打)。
@@ -18666,7 +18931,7 @@ class MinimapRouteRecorder:
             _fall_returning = False
             # 卡住解卡独占线(用户2026-09-09)：仅在没有更高优先级辅助线(掉台归位)时运行
             # 【用户2026-09-15】卡住解卡先关闭·注释(同上代码层硬断,恢复=取消注释下一行)
-            # _unblocking = (self._unblock_tick() if not _fall_returning else False) if getattr(self, '_aux_enable_unblock', True) else False
+            # _unblocking = (self._unblock_tick() if not _fall_returning else False) if getattr(self, '_aux_enable_unblock', False) else False
             _unblocking = False
             # 打怪区域·左右越线强制拉回(用户2026-09-11):独立守护线程实时检测,主循环帧首第一时间消费=朝内固定走1000~1500ms再松手恢复主线;
             # 掉台归位/解卡优先级更高(它们进行时本帧不拉,并清掉进行中的拉回、松朝内键,避免两套辅助线抢键)。
@@ -18720,7 +18985,17 @@ class MinimapRouteRecorder:
                     self._combat_tick()
             except Exception as e:
                 print("[战斗] 异常:", e)
-                import traceback; _debug_log("[战斗] 异常: " + str(e) + "\n" + traceback.format_exc())
+                import traceback; _tb = traceback.format_exc(); _debug_log("[战斗] 异常: " + str(e) + "\n" + _tb)
+                try:
+                    self._rlog("战斗线程异常:%s(已捕获未崩溃,详见debug.log)" % str(e)[:60], log='exception', color=LOG_RED)
+                except Exception:
+                    pass
+            # 停滞纯观测(2026-09-17):独立try、只读不发键,有任务却1秒无进展报【异常】栏
+            try:
+                if not _aux_busy and not _hard_reset_done:
+                    self._stall_observer(time.time() * 1000)
+            except Exception as _oe:
+                _debug_log("[停滞观测] 异常: %s" % _oe)
             self._seg_loop['6combat'] = self._seg_loop.get('6combat', 0) + time.time() - self._lk.get('before_combat', time.time())
             self._lk['after_combat'] = time.time()
             # === 定期维护(启动即跑一次，之后每10分钟)：debug.log只留最近5分钟、清1天前调试缓存；backups全部保留 ===
@@ -18990,6 +19265,7 @@ class MinimapRouteRecorder:
                                     self._freeze_ladder_patch(_rx, _ry)
                                     _sel = (_rx, _ry, True)
                                     _stage = '建锁'
+                                    self._note_freq_event('lock_lad', 3, 1000, "1秒内反复锁定梯子%d次(疑似掉锁/白框不稳)")
                                     # C1 建锁成功详细日志(建锁只发生一次、不节流):候选数/甲剔几把/是否回退/选中两段距离/全部候选明细
                                     _det = ';'.join('%d,%d怪梯%d梯人%d总%d' % (c[3], c[4], (c[1] if c[1] >= 0 else 0), c[2], c[0])
                                                     for c in _cand_all) or '无'

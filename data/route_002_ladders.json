@@ -1,0 +1,75 @@
+{
+  "ladders": [
+    {
+      "id": 0,
+      "x": 68.0,
+      "y_top": 87.0,
+      "y_bottom": 101.0,
+      "duration_sec": 2.77
+    },
+    {
+      "id": 1,
+      "x": 76.0,
+      "y_top": 74.0,
+      "y_bottom": 85.0,
+      "duration_sec": 2.82
+    },
+    {
+      "id": 2,
+      "x": 81.0,
+      "y_top": 72.0,
+      "y_bottom": 72.0,
+      "duration_sec": 2.68
+    },
+    {
+      "id": 3,
+      "x": 102.0,
+      "y_top": 72.0,
+      "y_bottom": 94.0,
+      "duration_sec": 3.87
+    },
+    {
+      "id": 4,
+      "x": 156.0,
+      "y_top": 82.0,
+      "y_bottom": 95.0,
+      "duration_sec": 1.93
+    },
+    {
+      "id": 5,
+      "x": 120.0,
+      "y_top": 70.0,
+      "y_bottom": 72.0,
+      "duration_sec": 2.69
+    },
+    {
+      "id": 6,
+      "x": 113.0,
+      "y_top": 69.0,
+      "y_bottom": 72.0,
+      "duration_sec": 3.01
+    },
+    {
+      "id": 7,
+      "x": 117.0,
+      "y_top": 40.0,
+      "y_bottom": 64.0,
+      "duration_sec": 3.26
+    },
+    {
+      "id": 8,
+      "x": 73.0,
+      "y_top": 65.0,
+      "y_bottom": 72.0,
+      "duration_sec": 1.77
+    },
+    {
+      "id": 9,
+      "x": 23.0,
+      "y_top": 73.0,
+      "y_bottom": 106.0,
+      "duration_sec": 4.57
+    }
+  ],
+  "count": 10
+}
