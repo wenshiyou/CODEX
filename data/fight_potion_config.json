@@ -33,6 +33,6 @@
   "hp_value": "35",
   "match_sim": {
     "char": "0.70",
-    "monster": "0.70"
+    "monster": "0.65"
   }
 }
