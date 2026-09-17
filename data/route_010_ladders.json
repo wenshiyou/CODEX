@@ -2,82 +2,67 @@
   "ladders": [
     {
       "id": 0,
-      "x": 67.0,
-      "y_top": 86.0,
-      "y_bottom": 104.0
+      "x": 68.0,
+      "y_top": 87.0,
+      "y_bottom": 101.0,
+      "duration_sec": 2.77
     },
     {
       "id": 1,
-      "x": 101.0,
-      "y_top": 71.0,
-      "y_bottom": 93.0
+      "x": 76.0,
+      "y_top": 74.0,
+      "y_bottom": 85.0,
+      "duration_sec": 2.82
     },
     {
       "id": 2,
-      "x": 99.0,
-      "y_top": 71.0,
-      "y_bottom": 71.0
+      "x": 81.0,
+      "y_top": 72.0,
+      "y_bottom": 72.0,
+      "duration_sec": 2.68
     },
     {
       "id": 3,
-      "x": 75.0,
-      "y_top": 73.0,
-      "y_bottom": 86.0
+      "x": 102.0,
+      "y_top": 72.0,
+      "y_bottom": 94.0,
+      "duration_sec": 3.87
     },
     {
       "id": 4,
-      "x": 155.0,
-      "y_top": 81.0,
-      "y_bottom": 94.0
+      "x": 156.0,
+      "y_top": 82.0,
+      "y_bottom": 95.0,
+      "duration_sec": 1.93
     },
     {
       "id": 5,
-      "x": 144.0,
-      "y_top": 71.0,
-      "y_bottom": 81.0
+      "x": 120.0,
+      "y_top": 70.0,
+      "y_bottom": 72.0,
+      "duration_sec": 2.69
     },
     {
       "id": 6,
-      "x": 119.0,
+      "x": 113.0,
       "y_top": 69.0,
-      "y_bottom": 71.0
+      "y_bottom": 72.0,
+      "duration_sec": 3.01
     },
     {
       "id": 7,
-      "x": 112.0,
-      "y_top": 68.0,
-      "y_bottom": 71.0
+      "x": 117.0,
+      "y_top": 40.0,
+      "y_bottom": 64.0,
+      "duration_sec": 3.26
     },
     {
       "id": 8,
-      "x": 80.0,
-      "y_top": 71.0,
-      "y_bottom": 71.0
-    },
-    {
-      "id": 9,
-      "x": 179.0,
-      "y_top": 72.0,
-      "y_bottom": 92.0
-    },
-    {
-      "id": 10,
-      "x": 23.0,
-      "y_top": 73.0,
-      "y_bottom": 103.0
-    },
-    {
-      "id": 11,
-      "x": 160.0,
-      "y_top": 64.0,
-      "y_bottom": 72.0
-    },
-    {
-      "id": 12,
       "x": 73.0,
       "y_top": 65.0,
-      "y_bottom": 72.0
+      "y_bottom": 72.0,
+      "duration_sec": 1.77
     }
   ],
-  "count": 13
+  "count": 9
 }

@@ -1513,6 +1513,9 @@ class MinimapRouteRecorder:
         self._climb_direction = 0  # 1=up, -1=down
         self._climb_start_y = 0    # 跳跃/瞬移前的y坐标，用于检测是否生效
         self._climb_action_time = 0  # 跳跃/瞬移动作开始时间
+        self._climb_ladder_duration = None  # 当前爬的录制梯爬升耗时(秒),抓住梯后绑定;爬梯总超时=它+2s,无有效则回退12s(用户2026-09-17)
+        self._ladder_seg_t0 = None  # 小地图梯子录制段:首点时间戳
+        self._ladder_seg_t1 = None  # 小地图梯子录制段:末点时间戳
         # === 下行descend子状态机(用户2026-09-09重定义下行,替代旧"X对齐+小落差才跳、失败走上梯抓法")===
         self._desc_phase = None       # first_jump/to_ladder/lad_grab/lad_slide/lad_leap/lad_fall_wait/fall
         self._desc_base_y = 0         # 当前阶段基准光点Y(判Y变大=向下动了)
@@ -5007,9 +5010,15 @@ class MinimapRouteRecorder:
         self._climb_ladder_x = float(ld['x'])
         self._climb_ladder_y_top = float(ld['y_top'])
         self._climb_ladder_y_bottom = float(ld['y_bottom'])
-        _debug_log("[选梯·上梯后绑定] 光点(%.0f,%s)直配录制梯x=%.0f 顶=%.0f 底=%.0f(不走倍率,到顶比光点Y与梯端)" % (
+        _ld_dur = ld.get('duration_sec')  # 绑定录制梯时同步这把梯的录制爬升耗时(用户2026-09-17)
+        self._climb_ladder_duration = float(_ld_dur) if isinstance(_ld_dur, (int, float)) and float(_ld_dur) >= 1.0 else None
+        _bdur = self._climb_ladder_duration  # 已规范化: float>=1.0 或 None
+        _btimeout = ("%.1fs" % (_bdur + 2.0)) if isinstance(_bdur, (int, float)) else "默认12s"
+        _debug_log("[选梯·上梯后绑定] 光点(%.0f,%s)直配录制梯x=%.0f 顶=%.0f 底=%.0f 录制爬升=%s 保命超时=%s(不走倍率,到顶比光点Y与梯端)" % (
             _dx, ("%.0f" % _dy) if _dy is not None else "NA",
-            float(ld['x']), float(ld['y_top']), float(ld['y_bottom'])))
+            float(ld['x']), float(ld['y_top']), float(ld['y_bottom']),
+            ("%.2fs" % _bdur) if isinstance(_bdur, (int, float)) else "无(旧梯)",
+            _btimeout))
         return True
 
     def _reset_climb(self):
@@ -5036,6 +5045,7 @@ class MinimapRouteRecorder:
         self._climb_ladder_x = 0
         self._climb_ladder_y_top = 0      # 当前爬的梯子顶端Y（小地图，到顶验证用）
         self._climb_ladder_y_bottom = 0   # 当前爬的梯子底端Y（小地图，到底验证用）
+        self._climb_ladder_duration = None  # 出梯清录制爬升耗时,下把重新绑定(用户2026-09-17)
         self._climb_target_y = 0
         self._climb_direction = 0
         self._climb_start_y = 0
@@ -5472,6 +5482,7 @@ class MinimapRouteRecorder:
         self._ladder_snap_x = None
         self._ladder_snap_y = None
         self._ladder_lock_patch = None
+        self._climb_ladder_duration = None  # 下行不爬录制梯,清上把上行耗时,下行超时回退默认12s(用户2026-09-17)
         self._monster_overlay_data["ladder_sel"] = None
         self._climb_target_y = target_y
         self._climb_action_time = now_ms
@@ -5923,9 +5934,11 @@ class MinimapRouteRecorder:
             elif not _arrived and now_ms - self._desc_land_t >= JUMP_DOWN_LAND_STABLE_MS:
                 _arrived = True
                 _why = "光点Y稳定%.0fms不再下降=落地" % JUMP_DOWN_LAND_STABLE_MS
-            if not _arrived and self._climb_action_time and now_ms - self._climb_action_time > CLIMB_TOTAL_TIMEOUT_MS:
+            _cdur_d = getattr(self, '_climb_ladder_duration', None)  # 下行不爬录制梯,正常None→回退12s;万一有值也按+2s
+            _climb_to_d = int((float(_cdur_d) + 2.0) * 1000) if isinstance(_cdur_d, (int, float)) and float(_cdur_d) >= 1.0 else CLIMB_TOTAL_TIMEOUT_MS
+            if not _arrived and self._climb_action_time and now_ms - self._climb_action_time > _climb_to_d:
                 _arrived = True
-                _why = "下行总超时%dms兜底" % CLIMB_TOTAL_TIMEOUT_MS
+                _why = "下行总超时%dms兜底" % _climb_to_d
             if _arrived:
                 self._key_up(VK_DOWN)
                 _debug_log("[下行] %s(Y=%.0f),落地接下一动作" % (_why, py))
@@ -6024,9 +6037,12 @@ class MinimapRouteRecorder:
                         _arrived = True
                         _arrive_why = "光点重合梯端后多按%dms翻稳" % LADDER_TOP_HOLD_MS
             # 总超时保命(没录到梯端/异常防永久卡梯);已进hold(200ms内必收尾)不再被超时打断
-            if not _arrived and not self._climb_top_hold and self._climb_action_time and now_ms - self._climb_action_time > CLIMB_TOTAL_TIMEOUT_MS:
+            # 阈值=这把梯录制爬升耗时+2s(用户2026-09-17);取不到有效录制耗时(旧梯/录坏<1s)才回退写死12s
+            _cdur = getattr(self, '_climb_ladder_duration', None)
+            _climb_to = int((float(_cdur) + 2.0) * 1000) if isinstance(_cdur, (int, float)) and float(_cdur) >= 1.0 else CLIMB_TOTAL_TIMEOUT_MS
+            if not _arrived and not self._climb_top_hold and self._climb_action_time and now_ms - self._climb_action_time > _climb_to:
                 _arrived = True
-                _arrive_why = "总超时%dms保命收尾" % CLIMB_TOTAL_TIMEOUT_MS
+                _arrive_why = "总超时%dms保命收尾(录制爬升%s+2s)" % (_climb_to, ("%.1fs" % float(_cdur)) if isinstance(_cdur, (int, float)) and float(_cdur) >= 1.0 else "无录制默认12s")
             if _arrived:
                 _debug_log("[爬梯] %s(光点Y=%.0f 梯端Y=%.0f),松键开主线" % (_arrive_why, py, _end_y or 0))
                 self._rlog("%s,到顶开打" % _arrive_why, LOG_OK, log='behavior')
@@ -7922,6 +7938,9 @@ class MinimapRouteRecorder:
                 if nl:
                     # 梯子覆盖规则：同一梯子=X基本一样(差值<2) 且 Y范围有交叠，新录制覆盖旧记录(不管保没保存)；X差≥2 或 Y范围完全不重叠=不同梯子不覆盖
                     new_ld = nl[0]
+                    # 记录本把梯子录制爬升耗时(首末光点时间差),供爬梯总超时=耗时+2s兜底(用户2026-09-17)
+                    if getattr(self, '_ladder_seg_t0', None) is not None and getattr(self, '_ladder_seg_t1', None) is not None and self._ladder_seg_t1 >= self._ladder_seg_t0:
+                        new_ld['duration_sec'] = round(self._ladder_seg_t1 - self._ladder_seg_t0, 2)
                     replaced = False
                     for i, old in enumerate(self.ladders):
                         y_overlap = not (new_ld["y_bottom"] < old["y_top"] or new_ld["y_top"] > old["y_bottom"])  # Y范围有交叠
@@ -7938,9 +7957,13 @@ class MinimapRouteRecorder:
                     print("No ladder extracted,", len(self.ladder_points), "points")
                 self.ladder_points = []
                 self.recording_ladder = False
+                self._ladder_seg_t0 = None  # 一段录完清首末时间,下把F6重新计(用户2026-09-17)
+                self._ladder_seg_t1 = None
             else:
                 self.recording_ladder = True
                 self.ladder_points = []
+                self._ladder_seg_t0 = None  # 新录制段重置首末时间(用户2026-09-17)
+                self._ladder_seg_t1 = None
                 print("Ladder recording started...")
         elif vk == VK_F7:
             self.platform_points = []
@@ -18630,6 +18653,10 @@ class MinimapRouteRecorder:
                 # 【统一坐标空间】梯子与平台、旧梯子完全同一空间=小地图画面原始像素坐标：
                 # 直接收集光点画面坐标，不做任何背景滚动/相对位移修正(此前scroll_y修正造出第二坐标空间导致梯子分层,已废弃)
                 self.ladder_points.append(player_pos)
+                _lseg_t = time.time()  # 本段首/末光点时间,算这把梯子从下到上爬升耗时(用户2026-09-17)
+                if getattr(self, '_ladder_seg_t0', None) is None:
+                    self._ladder_seg_t0 = _lseg_t
+                self._ladder_seg_t1 = _lseg_t
 
             # 掉台归位独占线(用户2026-09-09)：辅助线独占期间主线(_random_step/_combat_tick)一律暂停,
             # 辅助线结束(光点回台)才恢复主线——辅助线与主线同一时间只跑一个,不并行抢键
