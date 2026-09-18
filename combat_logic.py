@@ -186,7 +186,7 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
 def pick_from_buckets(px, py, cand, cross, cast_range,
                       group_priority=False, group_radius=0, aoe_dual=False, cur_cross=None):
     """无锁定时从分桶结果选一只最优怪（阶段一从 select_combat_target 的选新段机械抽出，B预选/主线重选共用）。
-    cand 优先（同层清空才取 cross）；群怪优先走最佳窗，单攻范围内按X近、范围外按Y近再X近。返回 _mk dict。"""
+    cand 优先（同层清空才取 cross）；群怪优先走最佳窗，单攻射程内外统一按 Y近优先、Y同档再X近。返回 _mk dict。"""
     # === 聚簇池有怪：群怪优先走"怪群"路线，否则走"Y近+X近"近怪路线(用户2026-09-09定稿,两路线二选一不混) ===
     if cand:
         # 技能范围内能直打=X进停步线即可(同层已由进cand的Y分类保证,用户2026-09-10:范围内只按X/数量,不看Y)
@@ -229,10 +229,11 @@ def pick_from_buckets(px, py, cand, cross, cast_range,
                 return _mk(_st, (_tx, _ty), _dir_to(_tx, px), _d,
                            group=(_bg[1], _tag), tier='in' if _st == 'cast' else 'out')
             # 最佳簇不足3只 → 回退近怪单攻(用户:1~2只还是用单攻)
-        # ===================== 单攻选怪(用户2026-09-10定稿:范围内按X、范围外按Y,排序键唯一不左右为难) =====================
-        # ①技能范围内有能直打的:只按X近选(不看Y)→cast站定打;②全都在范围外:才按Y相近优先、再X近→pursue走过去
+        # ===================== 单攻选怪(用户2026-09-18定稿:射程内外统一Y近优先、Y同档再X近,排序键唯一不左右为难) =====================
+        # ①技能范围内有能直打的:按Y差最近优先、Y同档再X近→cast站定打(不再纯X近,避免Y差更大的同X怪被先锁);
+        # ②全都在范围外:同一排序键Y近→X近→pursue走过去。两段口径完全一致。
         if in_attack_rows:
-            in_attack_rows.sort(key=lambda r: r[0])
+            in_attack_rows.sort(key=lambda r: (abs(r[2] - py), r[0]))
             pick = in_attack_rows[0]
         else:
             cand.sort(key=lambda r: (abs(r[2] - py), r[0]))
