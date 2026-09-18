@@ -534,7 +534,8 @@ TP_COORD_FRESH_MS = 400   # 瞬移生效校验:人物画面坐标在400ms内刷�
 LADDER_TPL_MAX = 10            # 每方案最多梯子模板数
 LADDER_TPL_DEFAULT_SIM = 0.70  # 梯子模板匹配默认相似度
 LADDER_TPL_Y_NEAR = 20         # Y近人物侧留白(避开人物本体)
-LADDER_TPL_Y_FAR = 150         # Y远侧搜索距离(上行搜头顶/下行搜脚下)
+LADDER_TPL_Y_FAR = 150         # 下行Y远侧搜索距离(下行搜脚下0~150,近边不留白)
+LADDER_DIR_Y_UP_FAR = 200      # 上行Y远侧搜索距离(用户2026-09-18由150加高到200:梯子从上层一直延伸到人上方,150会漏高处连通梯致"带内无梯"呆住;下行仍150,X半宽仍300)
 LADDER_MARK_SCAN_MS = 250      # 常驻白框:人物周围特征全扫节流(ms),控CPU不每帧匹配
 LADDER_MARK_NMS_X = 28         # 特征白框NMS:两命中中心X差≤此值视为同一把梯(合并同梯多峰)
 LADDER_SCR_NUDGE = 35         # 仅下行方式二用:|X差|>35按住朝梯正常走,5~35三次碎步递减,≤LADDER_SCR_TOL(5)才按↓(上行不用它,上行用LADDER_SCR_FAST_PX)
@@ -585,6 +586,7 @@ ARRIVAL_EMPTY_MAX = 3          # 走台"终点就在身边、根本没真移动�
 # 用户2026-09-09：不做预验证/二次验证(那会和"重锁→还打不到→再验证"形成死区)；打不打得到以"出手后有无血条/伤害数字"为准。
 SLOPE_JUMP_X_MAX = 300     # 跳高打·旧水平距离上限(已弃用:用户2026-09-09改为X差≤面板技能射程atk1_distance才跳,战法一致;常量保留备用)
 SLOPE_AIR_MS = 360         # 一次跳跃腾空时长ms(战士再跳基准:落地后才再跳,防空中连跳)
+SLOPE_HIGH_DOWN_BLOCK_MS = 600  # 跳高打最后一次起跳后多少ms内禁向下跳/向下cross(腾空360+落地缓冲;治腾空实时Y抬高把脚下怪误判成下方乱下跳;只拦向下,向上cross不拦;法师落地才打窗过期自然恢复;用户2026-09-18)
 # 【用户2026-09-10晚·跳高打大幅简化】填值即开、不分群攻/就近,只分战法,起跳时一次性算好本跳攻击/下次跳时刻:
 SLOPE_WAR_HIT_MIN = 80     # 战士(不勾法师·空中可打):起跳后主攻时刻随机下限ms(用户2026-09-11:120~150→80~100,更快出手)
 SLOPE_WAR_HIT_MAX = 100    # 战士:起跳后主攻时刻随机上限ms(80~100随机打一下,不管空档/攻击间隔)
@@ -677,7 +679,7 @@ MON_DETECT_KEEP_MAX = 1200  # 上限1200ms(用户2026-09-05：最多记1.2秒，
 # === 镜头死区检测（三个背景框，帧差对比检测镜头是否在动） ===
 # 三个默认检测点（整个窗口坐标，含标题栏+边框）：左下/左上/右中
 BG_DETECT_DEFAULT_REGIONS = [
-    {"x": 35, "y": 649, "w": 40, "h": 39},    # 左下(原674向上移25→649,2026-09-16)
+    {"x": 35, "y": 589, "w": 40, "h": 39},    # 左下(549向下移40->589,2026-09-18)
     {"x": 1222, "y": 574, "w": 46, "h": 23},  # 右下(BG3正下方,x=1222;原624向上移50→574,2026-09-16)
     {"x": 1222, "y": 309, "w": 43, "h": 28},  # 右上(原右中y409向上移100→309,2026-09-16不变)
 ]
@@ -1434,6 +1436,7 @@ class MinimapRouteRecorder:
         self._combat_suppress_side = None          # ('left'/'right', 到期ms) 某侧地形过不去时短时压制该侧、改锁另一侧(用户2026-09-07)
         self._slope_high_mode = False              # 当前锁定目标是否处于"高坡走-跳-打"模式(用于区分高坡打空vs普通空怪)
         self._slope_high_blocked = False           # 当前锁定目标跳打已打空(无血条无伤害=够不着)→降级:本次让它落cross走梯子/瞬移，换目标清除
+        self._slope_high_last_jump = 0             # 跳高打最后一次起跳时刻ms(余温窗内禁向下跳,治腾空误判;用户2026-09-18)
         # === 打怪分层探测状态（350近距→500同平台一边随机→跨层）===
         self._probe_side = random.choice([-1, 1])   # 当前探测方向 1=右 -1=左（每轮随机，先看哪边随机）
         self._probe_switched = False                 # 本轮是否已换边探测过（两边都空才跨层）
@@ -9910,7 +9913,7 @@ class MinimapRouteRecorder:
     def _match_ladder_screen_x(self, frame, ppos, direction, monster_x):
         """上梯近距在主窗口定向ROI匹配梯子竖条，只返回最佳梯子中心屏幕X(不要Y)。
         X:只朝目标怪那一侧扩方向带半宽LADDER_DIR_X_HALF=300(怪在右只搜右/在左只搜左;无怪方位左右各300兜底,用户2026-09-18由far_range=500收紧到300、太宽梯子多会认错);
-        Y:上行搜人物头顶(-150~-20)、下行搜脚下(+0~+150,近边不留白),防止一上一下两把相邻梯认错;
+        Y:上行搜人物头顶(-200~-20,用户2026-09-18加高)、下行搜脚下(+0~+150,近边不留白),防止一上一下两把相邻梯认错;
         同侧匹配到多把梯子时,选X最贴近目标怪X的那把(用户2026-09-09)。"""
         if frame is None or ppos is None:
             return None
@@ -9928,7 +9931,7 @@ class MinimapRouteRecorder:
         if direction is not None and direction < 0:
             ry1, ry2 = ppy, ppy + LADDER_TPL_Y_FAR   # 下行:脚下0~+150(近边不留白,用户2026-09-18)
         else:
-            ry1, ry2 = ppy - LADDER_TPL_Y_FAR, ppy - LADDER_TPL_Y_NEAR   # 上行:头顶
+            ry1, ry2 = ppy - LADDER_DIR_Y_UP_FAR, ppy - LADDER_TPL_Y_NEAR   # 上行:头顶-200~-20(用户2026-09-18加高,下行仍150)
         x1 = max(0, rx1)
         y1 = max(DETECT_TOP_MARGIN, ry1)
         x2 = min(fw, rx2)
@@ -10204,14 +10207,14 @@ class MinimapRouteRecorder:
     @staticmethod
     def _dir_band_pick_ladder(half, psx, psy, cdir, mon_x):
         """方向带选梯(用户2026-09-18定稿,只看方向不算梯子距离,取代三轮漏斗):
-        Y带 上行(cdir>=0)只收[人Y-y_far,人Y-y_near]=头顶-150~-20;下行(cdir<0)收[人Y,人Y+y_far]=脚下0~+150(近边不留白)。
+        Y带 上行(cdir>=0)只收[人Y-LADDER_DIR_Y_UP_FAR,人Y-y_near]=头顶-200~-20(用户2026-09-18加高);下行(cdir<0)收[人Y,人Y+LADDER_TPL_Y_FAR]=脚下0~+150(近边不留白)。
         X只收|梯X-人X|<=x_half(左右各300);有怪(mon_x非None)只留怪那侧、侧内多把取X最贴怪,怪侧带内空→放宽两侧取X离人最近(防发呆);无怪取X离人最近。
         返回(选中(x,y)或None, 理由str, 带内候选list)。大地图特征梯只稳X、Y只做层间相对高低,不判绝对够得着、不算怪→梯/梯→人距离。"""
-        y_far, y_near, x_half = LADDER_TPL_Y_FAR, LADDER_TPL_Y_NEAR, LADDER_DIR_X_HALF
+        y_near, x_half = LADDER_TPL_Y_NEAR, LADDER_DIR_X_HALF
         if cdir < 0:
-            ylo, yhi = psy, psy + y_far
+            ylo, yhi = psy, psy + LADDER_TPL_Y_FAR              # 下行:脚下0~150(近边不留白)
         else:
-            ylo, yhi = psy - y_far, psy - y_near
+            ylo, yhi = psy - LADDER_DIR_Y_UP_FAR, psy - y_near  # 上行:头顶-200~-20(用户2026-09-18加高到200)
         band = [(x, y) for (x, y) in half if ylo <= y <= yhi and abs(x - psx) <= x_half]
         if not band:
             return None, '带内无梯', band
@@ -14724,6 +14727,8 @@ class MinimapRouteRecorder:
         self._bound_pull = None
         self._bound_guard_side = None
         self._release_combat_move()
+        # 边界拉回结束=人被硬压回打怪区、镜头/相对怪全变:清旧锁定+怪表立刻重扫,不用拉回前旧坐标(否则又朝边缘跑;用户2026-09-18)
+        self._reset_lock_after_arrival('边界拉回')
         return False
 
     def _bound_hit_line(self, mx, my):
@@ -14969,6 +14974,7 @@ class MinimapRouteRecorder:
         self._slope_next_at = 0
         self._slope_high_mode = False
         self._release_combat_move()
+        self._slope_high_last_jump = 0
         _debug_log("[防卡死] 连续移动受阻(%s)，判定目标(%d,%d)打不到→放弃，下帧改锁另一侧最近怪" % (why or "卡住", cx, cy))
 
     def _single_home_platform(self):
@@ -16550,6 +16556,11 @@ class MinimapRouteRecorder:
                 self._rlog_throttle('bound_v_gate', "打怪区域:已到%s边界,不%s跨层" % (
                     "上" if _bound_vdir == 'up' else "下", "向上" if _bound_vdir == 'up' else "向下"), 1000, log='behavior')
                 return
+            # 跳高打腾空余温窗:窗内即使实时Y把脚下怪误判成下方cross也不发起下台(只拦向下;打空上层怪落cross向上不拦;用户2026-09-18)
+            if _bound_vdir == 'down' and (now - getattr(self, '_slope_high_last_jump', 0)) < SLOPE_HIGH_DOWN_BLOCK_MS:
+                self._release_combat_move()
+                self._rlog_throttle('slope_no_down', '跳高打腾空窗内,暂不向下跨层(等落地重判)', 800, log='behavior')
+                return
             # 启动新的跨层行进
             # 【用户2026-09-08删除】删掉"50%先走到同平台远端打一波再跨层"的随机二选一(_try_farm_same_platform)：
             # 锁定上层/坡上怪后必须直接找梯子/路径上去，不能在同平台绕圈、跟着头上的怪水平走
@@ -16741,10 +16752,11 @@ class MinimapRouteRecorder:
             and (_sj_min <= _above2 <= _sj_max) and abs(_ref_x - px) <= skill_range  # 用户2026-09-11:X差必须<技能攻击范围才跳打(原4/5停步线)
         # 下方够不着：怪脚Y-人脚Y 超出下方攻击范围(_atk_y_down,默认30)。用户2026-09-07：下方差100+还站着打=bug,要走下去靠近而不是空打
         _below2 = (t_cy - py_layer) > _atk_y_down   # 用落地基线:人跳起时地面怪不会瞬时变"正下方"误触发下跳(用户2026-09-11)
+        _slope_high_air = (now - getattr(self, '_slope_high_last_jump', 0)) < SLOPE_HIGH_DOWN_BLOCK_MS  # 跳高打腾空余温窗:窗内禁向下跳(不冻结Y只做状态门控,用户2026-09-18)
         if not _below2:
             self._release_combat_key(VK_DOWN)  # 不在下方贴近时松开下方向键,避免残留影响走位
             self._below_down_since = 0         # 离开下方状态:清下跳按住计时,下次重新等50ms
-        if _below2 and not high_slope:
+        if _below2 and not high_slope and not _slope_high_air:
             if self._bound_block_down():
                 # 打怪区域·Y下限(用户2026-09-11改认平台):人在选定下限平台时绝不主动按↓+跳落层,松净↓,只水平朝怪走或站定
                 self._release_combat_key(VK_DOWN)
@@ -16813,6 +16825,7 @@ class MinimapRouteRecorder:
                     self._press_game_key(jump_key, duration=120)
                     self._combat_last_jump = now
                     self._slope_phase = 'wait_attack'
+                    self._slope_high_last_jump = now   # 记跳高打起跳:余温窗600ms内禁向下跳(用户2026-09-18)
                     # 跳后延时(到攻击):战士80~100ms空中打;法师1000±50ms(已落地)才打
                     if _sj_mage:
                         self._slope_next_at = now + SLOPE_MAGE_HIT_MS + random.randint(-SLOPE_MAGE_JITTER, SLOPE_MAGE_JITTER)
