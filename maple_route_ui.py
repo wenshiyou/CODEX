@@ -382,6 +382,7 @@ ROLE_ANCHORS = [
     ("pet3",    "宠物名3",        "第三个宠物名冗余(需先采2)"),
 ]
 ROLE_ANCHOR_KEYS = [_a[0] for _a in ROLE_ANCHORS]
+ROLE_OFF_LEARN_THR = 0.45  # 脸/后脑学"→人名基点"偏移的最低分(用户2026-09-18):同帧人名已过阈锚定真人,脸/后脑有0.45以上可信命中即可量几何差,不必也过定位阈值0.62(实测脸分常0.56~0.62)
 # 跟踪参数默认值(默认写死,角色识别面板可调、自动存盘)
 ROLE_TRACK_DEFAULT = {
     "fps": 24,         # 每秒跟踪次数
@@ -600,12 +601,11 @@ ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人
 ATTACK_Y_DOWN = 30       # 打怪Y范围·向下：怪比人物低最多30px(人物下方-30内可直打；>30够不着→走近)
 AOE_Y_UP = 60            # 群攻Y范围·向上(用户2026-09-07独立于主攻,默认与主攻一致-60)：群攻只数Y在[-上,+下]内的怪,可在Y弹窗改
 AOE_Y_DOWN = 30          # 群攻Y范围·向下(默认+30,用户2026-09-07)：下层差太多打不到的怪不许凑数触发群攻
-# === 跨层选梯/爬梯常量（自由打怪版选梯=三轮筛选漏斗:怪Y近→人Y近→人X近逐级收窄+锁像素块身份;用户2026-09-18)===
+# === 跨层选梯/爬梯常量（自由打怪版选梯=只看方向带、不算梯子距离:上行搜头顶Y-150~-20/下行搜脚下Y+0~+150、X左右各300,怪在哪侧选哪侧+锁像素块身份;用户2026-09-18)===
 # ↓ 下面两个为【小地图巡路模式】预留(用户2026-09-15:后续另做"沿小地图梯子+平台录制绿线规划巡路"的精准模式时使用;当前自由打怪版不引用,勿当死常量删)
 LADDER_REACH_HEIGHT = 15   # [小地图巡路模式预留]下端一个直跳够得着:人物光点比梯子下端y_bottom低不超过15个小地图px=一个直跳能抓到梯
 LADDER_END_MATCH_TOL = 1    # [小地图巡路模式预留]梯子连接端(上行顶端y_top/下行底端y_bottom)与目标层Y重合容差±1小地图px,差>1判为通向别的层、排除
-LADDER_FUNNEL_Y_TIE = 60   # 三轮漏斗Y同档容差(屏幕px,用户2026-09-18):实测同屏多梯相邻Y差最小67(矮跨层)、同层并排梯接同一水平平台理论<30,60卡在两者间空白带;一轮怪Y近/二轮人Y近,另一把比最优Y差多出≤60=同层都留,>60=另一层砍掉;真机若遇同层双梯被误砍再调大
-LADDER_FUNNEL_X_TIE = 10   # 三轮漏斗第三轮"人正站两梯中间"判定(屏幕px):最优两把人X差≤10视为正中、随机一把,否则取人X最近的唯一一把
+LADDER_DIR_X_HALF = 300    # 方向带选梯X左右半宽(屏幕px,用户2026-09-18):只在人左右各300内选梯(原寻怪far_range=500太宽、梯子多会认错);有怪只留怪那侧,怪侧空才放宽两侧
 LADDER_DOT_X_TOL = 2        # 上梯后光点X直配录制梯容差(用户2026-09-15:人抓住梯后光点与梯共用X,|录制梯x-光点x|≤此值=同一把;与录梯覆盖规则"X差<2同一把"一致,真机配不到再议放到3)
 LADDER_TOP_ARRIVE_TOL = 1  # 爬梯到顶验证(用户2026-09-11晚)：光点与梯顶重合或高于梯顶即到,容差只留1px当检测误差；
 # 且用"到达/越过"单向判定(上行 py<=y_top+2),人还在顶端下方(差>2)绝不判到顶——旧版abs≤8会提前8px松手导致没翻上平台就掉下
@@ -3693,7 +3693,7 @@ class MinimapRouteRecorder:
             meta = {"kind": kind,
                     "poly": [[px - x0, py - y0] for px, py in pts],  # 相对裁剪框的顶点
                     "box": [int(x0), int(y0), int(x1), int(y1)],
-                    "off_x": 0, "off_y": 0,  # 不做到脚补偿:锚点中心即人物坐标(单平台只看X)
+                    "off_x": 0, "off_y": 0,  # 脸/后脑锚点质心→人名基点的固定偏移(运行时自动学习并回写固化,name/pet恒0;见_get_player_screen_pos)
                     "w": int(x1 - x0 + 1), "h": int(y1 - y0 + 1)}
             if self._role_rec is None:
                 self._load_role_recognize()
@@ -9909,8 +9909,8 @@ class MinimapRouteRecorder:
 
     def _match_ladder_screen_x(self, frame, ppos, direction, monster_x):
         """上梯近距在主窗口定向ROI匹配梯子竖条，只返回最佳梯子中心屏幕X(不要Y)。
-        X:只朝目标怪那一侧扩寻怪X范围far_range_x(怪在右只搜右/在左只搜左;无怪方位左右各far_range兜底,用户2026-09-15远接近不再限±150);
-        Y:上行搜人物头顶(-150~-20)、下行搜脚下(+20~+150),防止一上一下两把相邻梯认错;
+        X:只朝目标怪那一侧扩方向带半宽LADDER_DIR_X_HALF=300(怪在右只搜右/在左只搜左;无怪方位左右各300兜底,用户2026-09-18由far_range=500收紧到300、太宽梯子多会认错);
+        Y:上行搜人物头顶(-150~-20)、下行搜脚下(+0~+150,近边不留白),防止一上一下两把相邻梯认错;
         同侧匹配到多把梯子时,选X最贴近目标怪X的那把(用户2026-09-09)。"""
         if frame is None or ppos is None:
             return None
@@ -9918,15 +9918,15 @@ class MinimapRouteRecorder:
             return None   # 既没录梯子模板、也没梯子YOLO模型=无可用来源
         fh, fw = frame.shape[:2]
         ppx, ppy = int(ppos[0]), int(ppos[1])
-        _frx = max(50, int(self._get_fight_config().get("far_range_x", COMBAT_FAR_RANGE) or COMBAT_FAR_RANGE))
+        _frx = LADDER_DIR_X_HALF  # 方向带选梯X左右半宽=300(用户2026-09-18,不用寻怪far_range=500,太宽梯子多会认错)
         if monster_x is None:
             rx1, rx2 = ppx - _frx, ppx + _frx
         elif monster_x >= ppx:
-            rx1, rx2 = ppx, ppx + _frx          # 怪在右:只搜右侧(宽度=寻怪X范围,远接近阶段也兜底得到,不再限±150)
+            rx1, rx2 = ppx, ppx + _frx          # 怪在右:只搜右侧(方向带半宽300)
         else:
             rx1, rx2 = ppx - _frx, ppx           # 怪在左:只搜左侧
         if direction is not None and direction < 0:
-            ry1, ry2 = ppy + LADDER_TPL_Y_NEAR, ppy + LADDER_TPL_Y_FAR   # 下行:脚下
+            ry1, ry2 = ppy, ppy + LADDER_TPL_Y_FAR   # 下行:脚下0~+150(近边不留白,用户2026-09-18)
         else:
             ry1, ry2 = ppy - LADDER_TPL_Y_FAR, ppy - LADDER_TPL_Y_NEAR   # 上行:头顶
         x1 = max(0, rx1)
@@ -10202,30 +10202,25 @@ class MinimapRouteRecorder:
         return [(cx, cy, round(s, 3), _tn) for s, cx, cy, _tn in peaks]
 
     @staticmethod
-    def _funnel_pick_ladder(cands, has_mon, tie_y=None, tie_x=None):
-        """选梯三轮筛选漏斗(用户2026-09-18定稿;大地图特征梯只稳X、Y只做层间相对高低比较,在上的梯Y永远比在下的小):
-        cands=[(a怪Y差,b人Y差,c人X差,wx,wy),...](无怪时a=None)。第一轮(仅有怪)怪Y近留同档→第二轮人Y近留同档→
-        第三轮人X近取唯一;最优两把人X差≤tie_x=人正站两梯中间则随机。每轮最小值自身必留、不会筛空。
-        返回(选中元组, 各轮计数dict);空候选返回(None,cnt)。"""
-        if tie_y is None:
-            tie_y = LADDER_FUNNEL_Y_TIE
-        if tie_x is None:
-            tie_x = LADDER_FUNNEL_X_TIE
-        cnt = {"r0": len(cands), "r1": 0, "r2": 0, "ties": 0}
-        if not cands:
-            return None, cnt
-        pool = list(cands)
-        if has_mon:
-            _a0 = min(c[0] for c in pool)
-            pool = [c for c in pool if c[0] <= _a0 + tie_y]
-        cnt["r1"] = len(pool)
-        _b0 = min(c[1] for c in pool)
-        pool = [c for c in pool if c[1] <= _b0 + tie_y]
-        cnt["r2"] = len(pool)
-        _c0 = min(c[2] for c in pool)
-        ties = [c for c in pool if c[2] <= _c0 + tie_x]
-        cnt["ties"] = len(ties)
-        return random.choice(ties), cnt
+    def _dir_band_pick_ladder(half, psx, psy, cdir, mon_x):
+        """方向带选梯(用户2026-09-18定稿,只看方向不算梯子距离,取代三轮漏斗):
+        Y带 上行(cdir>=0)只收[人Y-y_far,人Y-y_near]=头顶-150~-20;下行(cdir<0)收[人Y,人Y+y_far]=脚下0~+150(近边不留白)。
+        X只收|梯X-人X|<=x_half(左右各300);有怪(mon_x非None)只留怪那侧、侧内多把取X最贴怪,怪侧带内空→放宽两侧取X离人最近(防发呆);无怪取X离人最近。
+        返回(选中(x,y)或None, 理由str, 带内候选list)。大地图特征梯只稳X、Y只做层间相对高低,不判绝对够得着、不算怪→梯/梯→人距离。"""
+        y_far, y_near, x_half = LADDER_TPL_Y_FAR, LADDER_TPL_Y_NEAR, LADDER_DIR_X_HALF
+        if cdir < 0:
+            ylo, yhi = psy, psy + y_far
+        else:
+            ylo, yhi = psy - y_far, psy - y_near
+        band = [(x, y) for (x, y) in half if ylo <= y <= yhi and abs(x - psx) <= x_half]
+        if not band:
+            return None, '带内无梯', band
+        if mon_x is not None:
+            side = [p for p in band if (p[0] - psx) * (mon_x - psx) >= 0]  # 怪那侧(梯与怪同在人左/右;怪正上方mon_x≈psx时乘积0、全留)
+            if side:
+                return min(side, key=lambda p: abs(p[0] - mon_x)), '怪侧X贴怪', band
+            return min(band, key=lambda p: abs(p[0] - psx)), '怪侧空兜底X离人近', band
+        return min(band, key=lambda p: abs(p[0] - psx)), '无怪X离人近', band
 
     def _scr_nudge_timing(self, n):
         """碎步第n拍(0基)的(按住时长ms, 松开后停顿ms, 单拍步长px),上行段3/下行方式二段C共用。
@@ -13772,8 +13767,19 @@ class MinimapRouteRecorder:
         人物坐标=锚点中心(不做到脚补偿,单平台只看X、跨平台走引导线)。"""
         tr = getattr(self, '_role_track', None)
         if tr is None:
-            tr = {"last": None, "foot": None, "miss": 0, "last_full": 0.0, "face": None, "score": 0.0}
+            tr = {"last": None, "foot": None, "miss": 0, "last_full": 0.0, "face": None, "score": 0.0, "off_save_t": 0.0}
             self._role_track = tr
+            # 脸/后脑→人名基点的固定偏移:启动先读采集数据里上次自动学习固化的off_x/off_y(重启不丢、不用重学);没有再运行时学
+            try:
+                _am0 = (self._role_rec or {}).get("anchors", {})
+                for _kk in ("face_r", "back"):
+                    _mm = _am0.get(_kk) or {}
+                    _ox, _oy = float(_mm.get("off_x", 0) or 0), float(_mm.get("off_y", 0) or 0)
+                    if abs(_ox) > 0.5 or abs(_oy) > 0.5:
+                        tr["off_" + _kk] = [_ox, _oy]
+                        tr["off_n_" + _kk] = 99
+            except Exception:
+                pass
         if frame is None:
             return tr["foot"]
         # 一个已采锚点都没有→新链无数据(测试期不再回退旧整框链),返回最后点/None
@@ -13826,11 +13832,19 @@ class MinimapRouteRecorder:
         self._role_anchor_polys = polys
         # 最新一帧各锚点分数/位置/朝向存出来,供「角色识别」管理窗直接显示(管理窗不再自己抓帧全图匹配,避免拖动/关窗时重活交错闪退、也省CPU)
         self._role_last_scores = got
-        if time.time() - getattr(self, '_role_diag_t', 0) > 0.5:  # 0.5s一次分数诊断,看谁稳谁飘
+        if time.time() - getattr(self, '_role_diag_t', 0) > 0.5:
             self._role_diag_t = time.time()
-            _debug_log("[角色跟踪] 模式=%s last=%s 分数[%s]" % (
+            def _locstr(_kk):  # 各锚点质心坐标+脸/后脑到人名的固化偏移,供核对"人名在哪脸在哪差多少"(用户2026-09-18)
+                _g = got.get(_kk)
+                if _g is None or _g[1] is None:
+                    return ""
+                _o = tr.get("off_" + _kk)
+                return " %s=(%d,%d)%s" % (_kk, _g[1][0], _g[1][1],
+                                          (" Δ(%+d,%+d)" % (int(round(_o[0])), int(round(_o[1])))) if _o else "")
+            _debug_log("[角色跟踪] 模式=%s last=%s 分数[%s]%s%s%s" % (
                 "全图" if need_full else "局部", last,
-                " ".join("%s=%.2f" % (kk, got[kk][0]) for kk in got) or "无命中"))
+                " ".join("%s=%.2f" % (kk, got[kk][0]) for kk in got) or "无命中",
+                _locstr("name"), _locstr("face_r"), _locstr("back")))
         # 定位仲裁:人名优先;人名丢了用脸/后脑里分高者兜底(谁分高谁更可能是真角色),不让定位框丢
         _nv = got.get("name")
         if _nv is not None and _nv[0] >= thr:
@@ -13844,21 +13858,45 @@ class MinimapRouteRecorder:
         # 人名在时只给脸/后脑学"→人名中心"偏移(EMA);宠物在人左右位置不固定、无法学固定偏移,故宠物不偏移、兜底时直接用其命中点
         _nloc = _nv[1] if (_nv is not None and _nv[0] >= thr) else None
         for _kk in ("face_r", "back"):
-            if _nloc is not None and _kk in got and got[_kk][0] >= thr:
-                _dx, _dy = _nloc[0] - got[_kk][1][0], _nloc[1] - got[_kk][1][1]
+            _g = got.get(_kk)
+            # 人名在(已锚定真人)时,脸/后脑只要有≥学习门限的可信命中(低于定位阈值0.62也可,实测脸分常0.56~0.62)就量"→人名"几何偏移,同帧人名兜底不怕量错
+            if _nloc is not None and _g is not None and _g[0] >= ROLE_OFF_LEARN_THR and _g[1] is not None:
+                _dx, _dy = _nloc[0] - _g[1][0], _nloc[1] - _g[1][1]
                 _o = tr.get("off_" + _kk)
                 if _o is None:
-                    tr["off_" + _kk] = [float(_dx), float(_dy)]
+                    tr["off_" + _kk] = [float(_dx), float(_dy)]; tr["off_n_" + _kk] = 1
                 else:  # EMA平滑,避免单帧抖动让基点飘
                     _o[0] = _o[0] * 0.7 + _dx * 0.3; _o[1] = _o[1] * 0.7 + _dy * 0.3
+                    tr["off_n_" + _kk] = tr.get("off_n_" + _kk, 0) + 1
+        # 偏移学够样本(≥5帧)且与落盘值差>1px→低频(≥3秒一次)固化进采集数据off_x/off_y,重启直接用;绝不每帧写盘拖帧
+        try:
+            if _nloc is not None and now - tr.get("off_save_t", 0) > 3000:
+                self._role_rec = self._role_rec or self._load_role_recognize()
+                _amr = self._role_rec.setdefault("anchors", {})
+                _dirty = False
+                for _kk in ("face_r", "back"):
+                    _o = tr.get("off_" + _kk)
+                    if _o is not None and tr.get("off_n_" + _kk, 0) >= 5:
+                        _mmr = _amr.setdefault(_kk, {})
+                        if abs(float(_mmr.get("off_x", 0) or 0) - _o[0]) > 1.0 or abs(float(_mmr.get("off_y", 0) or 0) - _o[1]) > 1.0:
+                            _mmr["off_x"] = int(round(_o[0])); _mmr["off_y"] = int(round(_o[1])); _dirty = True
+                if _dirty:
+                    self._save_role_recognize(); tr["off_save_t"] = now
+        except Exception as _oe:
+            _debug_log("[角色跟踪] 偏移固化失败: %r" % (_oe,))
         _pick = None
         for _pk, _pv in _cand:
             _ploc = _pv[1]
             if _pk == "name" or str(_pk).startswith("pet"):  # 人名直接用;宠物不偏移(在人左右不固定)、直接用命中点托底,保证定位大框不丢
                 _bx, _by = float(_ploc[0]), float(_ploc[1])
-            else:  # 脸/后脑:实际基点偏移到人名位置;刚启动还没和人名同帧学到偏移时才暂用自身点
+            else:  # 脸/后脑兜底:基点必须落在人名那条线上——有固化/学到的偏移就加(映射回人名位置);连偏移都没学(冷启动)就沿用上一个人名点,绝不裸用脸/后脑自身质心造成基点上下跳
                 _o = tr.get("off_" + _pk)
-                _bx, _by = (_ploc[0] + _o[0], _ploc[1] + _o[1]) if _o else (float(_ploc[0]), float(_ploc[1]))
+                if _o:
+                    _bx, _by = float(_ploc[0]) + _o[0], float(_ploc[1]) + _o[1]
+                elif last is not None:
+                    _bx, _by = float(last[0]), float(last[1])
+                else:
+                    _bx, _by = float(_ploc[0]), float(_ploc[1])
             # 局部窗内离上一基点跳变>maxmove:弱匹配(<0.75)当误匹配丢弃;≥0.75强匹配=合法瞬移直接采信(背景假分到不了0.75)
             if last is not None and not need_full \
                     and np.hypot(_bx - last[0], _by - last[1]) > maxmove and _pv[0] < 0.75:
@@ -17512,7 +17550,7 @@ class MinimapRouteRecorder:
                         self._lad_marks_cache = []
                     # === 选梯(用户2026-09-15定稿:锁像素块身份、不锁坐标;候选累积约两帧抗闪) ===
                     # ①recent累积约两帧白框(同一把邻帧≤归并半径就刷新位置),单帧扫不到邻帧扫到仍在池里;
-                    # ②未锁:在池里按三轮漏斗(怪Y近→人Y近→人X近)建锁(只用一次),当场反查钉录制端;
+                    # ②未锁:在池里按方向带(上行头顶Y-150~-20/下行脚下0~+150、X左右各300怪在哪侧选哪侧)建锁(只用一次),当场反查钉录制端;
                     # ③已锁:不再全局重选,只在池里找离上一帧锁点最近的=同一把,坐标随它动(身份固定、值在动);
                     # ④空帧(寻怪范围两帧池也没):不钉旧点、snap置None(红框这帧不画、直跳不拿旧坐标算差值),锁身份保留;连续LADDER_MERGE_WAIT_MS真没有才清锁回主线。
                     _white_now = [(c[0], c[1]) for c in self._lad_marks_cache]
@@ -17540,26 +17578,20 @@ class MinimapRouteRecorder:
                                 else:
                                     _recent.append((_wx0, _wy0, _now_lm))
                             self._lad_marks_recent = [p for p in _recent if _now_lm - p[2] <= LADDER_PICK_RECENT_MS]
-                            # 候选=两帧累积池里【全部】扫到的梯子(用户2026-09-15定稿:删除"按人上方/下方/左右"的方向窗口过滤);
-                            # 人在底层也能选到上层的梯;选哪把完全交给下面三轮漏斗(怪Y近→人Y近→人X近),不用方向/距离窗口先砍候选。
+                            # 候选=两帧累积池里扫到的梯子;选哪把完全交给下面方向带(上行头顶Y-150~-20/下行脚下0~+150、X左右各300、怪在哪侧选哪侧),
+                            # 只看方向不算梯子距离(用户2026-09-18定稿,取代三轮漏斗/怪梯人距离求和)。
                             _half = [(x, y) for (x, y, t) in self._lad_marks_recent]
                             _rx = _ry = None
-                            _cand_all = []
+                            _db_band = []
                             _stage = ''
                             _lock = getattr(self, '_ladder_lock', None)
                             if _lock is None:
-                                # ②未锁建锁·三轮筛选漏斗(用户2026-09-18定稿):大地图特征梯只稳X、Y只做层间相对高低比较(在上的梯Y永远比在下的小、只用来对比)。
-                                # 每把梯算 a=怪Y差(第一轮,无怪=None) / b=人Y差(第二轮) / c=人X差(第三轮);逐级"留最优同档"收窄:
-                                # 一轮怪Y近(通往怪那层)→二轮人Y近(人最好接近)→三轮人X近(唯一,人正站两梯中才随机)。不判绝对够得着、不做可达硬过滤、不回退全集,扫到的梯都能选出一把、不空转发呆。
-                                _has_mon = (_tmox is not None and _tmoy is not None)
-                                for (_wx, _wy) in _half:
-                                    _b = abs(_wy - _psy)
-                                    _c = abs(_wx - _psx)
-                                    _a = abs(_wy - _tmoy) if _has_mon else None
-                                    _cand_all.append((_a, _b, _c, _wx, _wy))
-                                if _cand_all:
-                                    _mc, _fcnt = self._funnel_pick_ladder(_cand_all, _has_mon)
-                                    _rx, _ry = _mc[3], _mc[4]
+                                # ②未锁建锁·方向带(用户2026-09-18定稿,只看方向不算梯子距离):Y上行头顶-150~-20/下行脚下0~+150、X左右各300、有怪只留怪那侧
+                                _has_mon = (_tmox is not None)
+                                _pick_l, _pick_reason, _db_band = self._dir_band_pick_ladder(
+                                    _half, _psx, _psy, _cdir, _tmox if _has_mon else None)
+                                if _pick_l is not None:
+                                    _rx, _ry = int(_pick_l[0]), int(_pick_l[1])
                                     self._ladder_lock = (_rx, _ry, _now_lm)    # 建锁:同时冻结这把梯此刻像素块(身份),坐标后续随动
                                     self._ladder_snap_x = _rx
                                     self._ladder_lock_t0 = _now_lm             # 建锁时刻(掉锁日志算"已锁多久")
@@ -17567,13 +17599,9 @@ class MinimapRouteRecorder:
                                     _sel = (_rx, _ry, True)
                                     _stage = '建锁'
                                     self._note_freq_event('lock_lad', 3, 1000, "1秒内反复锁定梯子%d次(疑似掉锁/白框不稳)")
-                                    _det = ';'.join('%d,%d怪Y%s/人Y%d/人X%d' % (
-                                        cc[3], cc[4], (str(cc[0]) if cc[0] is not None else '-'), cc[1], cc[2])
-                                        for cc in _cand_all) or '无'
-                                    _debug_log("[选梯·建锁] 三轮漏斗 向%s 人=(%d,%d) 怪=(%s,%s) 候选%d→一轮怪Y近留%d 二轮人Y近留%d 终选并列%d 选中(%d,%d) 怪Y差%s/人Y差%d/人X差%d | 全部:%s" % (
-                                        '上' if _cdir > 0 else '下', _psx, _psy, _tmox, _tmoy,
-                                        _fcnt["r0"], _fcnt["r1"], _fcnt["r2"], _fcnt["ties"],
-                                        _rx, _ry, (_mc[0] if _mc[0] is not None else '-'), _mc[1], _mc[2], _det))
+                                    _det = ';'.join('%d,%d' % (wx, wy) for wx, wy in _db_band) or '无'
+                                    _debug_log("[选梯·建锁] 方向带向%s 人=(%d,%d) 怪X=%s 带内%d把[%s] 选中(%d,%d) | 带内:%s" % (
+                                        '上' if _cdir > 0 else '下', _psx, _psy, _tmox, len(_db_band), _pick_reason, _rx, _ry, _det))
                                 else:
                                     _stage = '未锁无候选'
                             else:
@@ -17631,8 +17659,7 @@ class MinimapRouteRecorder:
                             if _now_lm - getattr(self, '_snap_dbg_t', 0) >= 300:
                                 self._snap_dbg_t = _now_lm
                                 if _lock is None:
-                                    _allx = ';'.join('%d,%d怪Y%s/人Y%d/人X%d' % (wx, wy, (str(a) if a is not None else '-'), b, c)
-                                                     for a, b, c, wx, wy in _cand_all) or '无'
+                                    _allx = ('带内%d把:%s' % (len(_db_band), ';'.join('%d,%d' % (wx, wy) for wx, wy in _db_band))) if _db_band else '带内无梯'
                                 else:
                                     # C 跟踪态补"锁点帧漂移"(相对上一帧移动多少,镜头快滚/串梯一眼可见)和"人梯X差"
                                     _drift = (abs(_rx - _lock[0]) + abs(_ry - _lock[1])) if _rx is not None else -1
