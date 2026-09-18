@@ -1,113 +1,37 @@
 # -*- coding: utf-8 -*-
-"""
-打怪决策核心（纯逻辑，可脱离游戏用合成数据单元测试）。
-只负责"选哪只 / 往哪走 / 什么状态"，不碰底层检测/移动/存活。
-底层积木（检测/移动/跨层/平台判定）由调用方注入，本模块保持纯净、可测。
+"""阶段一脚本A:重构 combat_logic.py
+1) 抽 build_buckets(分桶) / pick_from_buckets(无锁选新) 纯函数,B线程预选与主线选怪共用同一实现;
+2) select_combat_target 改为 build_buckets→维持段→pick_from_buckets;脱检 in/out 按规则③落空重选(cross粘滞保留);
+3) 新增 pick_next() 供B线程算预备怪(标准带分桶+排除current);
+4) lock_status 真怪/空怪统一"出过手+出手后新帧+无血无伤=一帧drop"(规则②);
+5) combat_step 加 fallback_next:current死/无锁同帧晋升(promoted),回传 drop_pos=旧怪坐标(善后用,防拉黑新怪)。
+机械抽取部分(build_buckets/pick_from_buckets)与原 select 逐行等价,由离线对照单测验证。"""
+import io, os, sys, py_compile
 
-设计要点：
-- 技能射程 skill_range = 走近/站定/施放的唯一主判据（法师按 COMBAT_NEAR_RANGE=350）。
-- 一次只测一边（probe_side，1=右 -1=左）：某边有怪就去打，不是原地不停测。
-- 同一层内：技能射程内(tier0)优先，其次500同平台(tier1)，每档内距离最近优先。
-- 本层无怪才去跨层 / 待机。
-- 已锁定目标【仍在本帧检测列表】就维持锁定（至少稳定 MIN_LOCK_HOLD_MS，不中途换、不被群攻抢）；
-  锁定目标本帧脱检(列表里没有)绝不对旧坐标空打，立刻从列表重选真实存在的最近怪(用户2026-09-07)。
-"""
+P = os.path.join(os.path.dirname(os.path.abspath(__file__)), "combat_logic.py")
+raw = open(P, "rb").read()
+had_bom = raw.startswith(b"\xef\xbb\xbf")
+src = raw.decode("utf-8-sig")
+src = src.replace("\r\n", "\n")
 
-# 锁定最短维持时长(ms)：锁定一只怪后至少稳定打这么久，不被其他怪抢目标(用户2026-09-07：锁定最少1秒一次)
-# 【2026-09-10停用·保留常量】用户定稿"锁了就钉死、只被技能范围内近怪替换",不再有"满1秒才允许换簇"的动态换簇,此常量当前无引用。
-MIN_LOCK_HOLD_MS = 1000
+def rep1(old, new, tag):
+    global src
+    c = src.count(old)
+    assert c == 1, "[%s] 期望唯一命中,实际 %d 处" % (tag, c)
+    src = src.replace(old, new, 1)
+    print("OK 替换:", tag)
 
-# === 群怪换簇阈值(用户2026-09-09旧方案,2026-09-10停用·保留常量) ===
-# 旧:锁簇满1秒后另一簇"更多≥3只且更近"就动态换过去。新定稿(用户2026-09-10):首次选定第一群后钉死,不管另一侧变得更多/更近
-# 都不换,先打完第一群(该簇清空/drop)再重选;走向范围外怪途中仅被"技能范围内能直打近怪"替换。故下列阈值当前无引用。
-GROUP_SWITCH_NEAR = 200     # (停用)当前簇与另一簇"到人物最近距离差"≤200 才允许换簇
-GROUP_SWITCH_FAR = 300      # (停用)距离差≥300 绝不换
-GROUP_SWITCH_MIN_MORE = 3   # (停用)另一簇比当前簇多≥3只才算"更多"
+# ============ 1) 整段替换 select_combat_target(110-369) → build_buckets + pick_from_buckets + select + pick_next ============
+start = src.index("def select_combat_target(")
+end = src.index("def decide_alive")
+decision2_banner = (
+    "# ==========================================================================\n"
+    "# 决策2：怪物存活判定（规则4：血条 或 伤害数字，其一存在=没死）\n"
+    "# 关键修正：只对\"从未确认活着\"的静止目标用1秒X判据；已被命中的真怪即使不动也不丢。\n"
+    "# ==========================================================================\n"
+)
 
-# 分类滞回带宽(px,用户2026-09-10治cross/pursue逐帧横跳):已锁定目标/在途跨层目标/近身怪(进停步线)分桶时,
-# 攻击Y带上、下各放宽这么多形成"维持带",吸收怪框脚Y与人物跳中基点在阈值两侧的边界抖动;新的远处怪仍用原窄带。
-# 必须远小于层间Y差(LAYER_Y_GAP=150):真跨层怪Y差≈150,不会被这点放宽误纳同层。
-LOCK_HOLD_Y_BAND = 25
-
-# 一个整层的屏幕Y差(用户2026-09-15):怪和人Y差达到这个值=铁定在上下另一层,哪怕绿线same_platform判成同平台也不许破格当同层
-# (治"头顶整层怪被同录制平台破格→误cast原地空打、目标在左右横跳的抖动");缓坡/透视Y差小于此值仍可破格按同层走近打。
-LAYER_Y_GAP = 150
-
-# 跨层X滞回带宽(px,用户2026-09-11定稿"要不要上梯子必须走到X范围内再判,范围外先水平走过去"):
-# 新怪:X差>技能射程一律先按同层走近(pursue),只有X进技能射程仍Y超带才落cross找梯子/下台;
-# 已锁定目标用 skill_range+本滞回 作为"维持cross"宽线,吸收射程边界逐帧抖动,不在pursue/cross间横跳。
-CROSS_X_HYST = 30
-
-# 【用户2026-09-17定稿·跨层(要梯子/下跳)唯一条件;2026-09-18修正】cross高度线不写死,一律按面板自定义的
-# "这套打法实际够得着的高度"判定,与主线执行层(high_slope跳高段/_below2下台段)同一口径:
-# 上方=跳高打上限slope_jump_y_max(没开跳高/跳高打空降级=主攻上带attack_y_up),下方=attack_y_down;群攻再按aoe_y放宽。
-# 超过该可达带=原地/跳高都够不到=cross走梯子/下跳;X差>=CROSS_X_MAX再高也先水平走近,靠近后仍超可达带才跨层。
-CROSS_X_MAX = 300    # 跨层最大X差:X差>=300先pursue水平走近,靠近后仍超面板可达带才跨层(用户:X差<300)
-
-
-def _mk(state, target, direction, dist, cross_candidates=None, group=None, tier=None):
-    return {"state": state, "target": target, "direction": direction, "dist": dist,
-            "cross_candidates": cross_candidates or [], "group": group, "tier": tier}
-
-
-def _dir_to(cx, px):
-    """目标相对人物的水平方向：右/左/None(正对)"""
-    if cx > px + 3:
-        return "right"
-    if cx < px - 3:
-        return "left"
-    return None
-
-
-def _in_band(cy, py, y_up, y_down):
-    """怪脚Y是否落在相对人物的[上容差,下容差]带内(向上为负)；y_up=None=不限制"""
-    if y_up is None:
-        return True
-    return -y_up <= (cy - py) <= y_down
-
-
-def best_group_window(px, py, rows, radius, dual):
-    """群怪优先·在池内怪 rows=[(x_gap,cx,cy)] 中找"X跨度≤2*radius 能罩最多怪"的最佳窗。
-
-    群攻框以人物为中心、左右各 radius(双向近身技能两侧同时出伤害)，故一簇的X跨度≤2R才存在站位一次罩住。
-    选窗优先级：罩怪数多 → 窗内离人物最近距离小(省路) → Y更贴合 → X更靠左(确定性)。
-      dual=True(双向技能): 走位点=窗X中点(人物站怪群正中间,两侧都罩进左右各R)，ty=窗内Y最贴的怪；
-      dual=False(单向技能): 走位点=窗内离人物最近的那只怪(贴一侧打)。
-    返回 (target=(tx,ty), size, near_d, side) ；rows空返回None。O(N²)，N=同池怪(通常<30)=微秒级。
-    """
-    if not rows or not radius or radius <= 0:
-        return None
-    pts = sorted(rows, key=lambda r: r[1])           # 按cx升序
-    n = len(pts)
-    best = None
-    for i in range(n):
-        j = i
-        while j < n and pts[j][1] - pts[i][1] <= 2 * radius:
-            j += 1
-        win = pts[i:j]
-        size = len(win)
-        near = min(abs(w[1] - px) for w in win)      # 窗内离人物最近的X距离
-        yfit = min(abs(w[2] - py) for w in win)      # 窗内最贴的Y差
-        left_x = min(w[1] for w in win)
-        key = (-size, near, yfit, left_x)
-        if best is None or key < best[0]:
-            best = (key, win, size, near)
-    _, win, size, near = best
-    if dual:
-        # 双向：不强制几何正中心,直接选窗内【最靠近群X中心的真实怪】当锁定点(用户2026-09-09:选个在群中心的怪即可)。
-        # 窗X跨度≤2R,中心怪到窗两端各≈半宽≤R,人物走到它处即站怪群中间、左右各R罩住整簇;且锁定点是真怪,血条/伤害/空怪判定照常。
-        _mid = (min(w[1] for w in win) + max(w[1] for w in win)) // 2
-        r = min(win, key=lambda w: (abs(w[1] - _mid), abs(w[2] - py), w[0]))
-        target = (r[1], r[2])
-    else:
-        r = min(win, key=lambda w: (w[0], abs(w[2] - py)))            # 窗内离人物最近的怪
-        target = (r[1], r[2])
-    mean_x = sum(w[1] for w in win) // len(win)
-    side = 'right' if mean_x > px + 3 else ('left' if mean_x < px - 3 else None)
-    return target, size, near, side
-
-
-def build_buckets(px, py, monsters, selected_platforms, skill_range,
+new_block = '''def build_buckets(px, py, monsters, selected_platforms, skill_range,
                   get_monster_platform, attack_y_up, attack_y_down,
                   group_priority=False, aoe_y_up=None, aoe_y_down=None,
                   allow_cross=True, metric=None, same_platform_fn=None,
@@ -362,43 +286,30 @@ def pick_next(px, py, monsters, selected_platforms, skill_range, get_monster_pla
                              group_priority, group_radius, aoe_dual, cur_cross)
 
 
-# ==========================================================================
-# 决策2：怪物存活判定（规则4：血条 或 伤害数字，其一存在=没死）
-# 关键修正：只对"从未确认活着"的静止目标用1秒X判据；已被命中的真怪即使不动也不丢。
-# ==========================================================================
+''' + decision2_banner + "\n"
+src = src[:start] + new_block + src[end:]
+print("OK 整段替换: select_combat_target → build_buckets/pick_from_buckets/select/pick_next")
 
-def decide_alive(has_hp, has_dmg):
-    """当前帧怪是否活着：血条 or 伤害数字，其一=True"""
-    return bool(has_hp or has_dmg)
-
-
-def lock_status(has_hp, has_dmg, hp_confirmed, gone_frames, attacked=False, can_strike=True, freeze_lock=False):
-    """根据存活证据决定锁定状态。
-
-    返回 dict:
-      alive: bool         当前帧是否认为怪活着（血条 or 伤害数字 其一）
-      drop:  bool         是否应立即放弃锁定（换目标）
-      hp_confirmed: bool  是否已确认过血条（命中过）
-      gone_frames: int    连续"无血条"帧数
-    attacked=True 表示 bot 已经对该目标出过手(且已过反馈窗口)；打了一下仍无血条无伤害 = 空怪/假怪 → 直接放弃。
-
-    【2026-09-07 删除"锁满2.5秒无反馈就丢"的超时兜底】：进了可打范围直接打、由"出手后无反馈"判空怪，
-    真怪打死由"血条连续2帧消失"判；射程外到不到得了归执行层防卡(不动→跳→放弃压侧)。任何按时间丢目标的
-    逻辑都会让远怪"走到一半到点被丢→锁另一侧→来回横跳不打"，故不再保留任何锁定时长丢弃。
-    """
-    alive = decide_alive(has_hp, has_dmg)
-    # 目标当前打不到(跨层上/下层怪或射程外,can_strike=False)时无法靠血条验证死活,分两种(用户2026-09-10两类锁怪):
-    #  ①起跳在途 freeze_lock=True:无条件死锁,哪怕空怪/背景也保到登顶或失败才解锁(用户:起跳后绝不换锁);
-    #  ②平地未起跳:范围外真怪血条本就时有时无,不因"暂时没看到血条"判死(不涨gone,避免走到一半丢锁→横跳);
-    #    但若【已经出手打过 attacked】仍无血条无伤害=确证空怪/背景/尸体,平地照样drop清掉
-    #    (治:没起跳时死框/上层误检被永久保在锁定/cross里→钉空坐标碎步、拿死框选不到梯呆站)。
-    if not can_strike:
-        if has_hp and not hp_confirmed:
-            hp_confirmed = True
-        if (not freeze_lock) and attacked and (not hp_confirmed) and not has_hp and not has_dmg:
-            return {"alive": False, "drop": True, "hp_confirmed": hp_confirmed, "gone_frames": 0}
-        return {"alive": alive, "drop": False, "hp_confirmed": hp_confirmed, "gone_frames": 0}
-    # 【规则②·用户2026-09-18定稿，真怪/空怪统一"一帧就换"】只要已经出手(attacked已在调用方含"出手后新帧+
+# ============ 2) lock_status：can_strike=True 真怪/空怪统一一帧 drop（规则②）============
+old_ls = '''    drop = False
+    if hp_confirmed and not has_hp:
+        # 确认过血条+现在血条没了=怪死了/离开；伤害数字会残留0.5~1秒不算活着凭据
+        # → 连续3帧没血条才弃锁定(用户2026-09-11:2→3,怪多/特效/掉帧时血条偶发漏检一两帧,连续2帧会把真怪误判死→清锁重选旁边怪=一圈怪间左右抖)
+        gone_frames = gone_frames + 1
+        if gone_frames >= 3:
+            drop = True
+    else:
+        gone_frames = 0
+    # 空怪丢弃(用户2026-09-11加 not hp_confirmed 守卫):只有【从没确认到血条】的目标,出手满反馈窗口仍"无血条且无伤害"
+    # 才=空怪/背景/尸体→弃;曾见过血条(hp_confirmed=真怪)不走这条单帧丢弃,统一交给上面"血条连续3帧消失"判死,
+    # 根治"真怪血条/伤害这一帧恰好漏检→单帧当空怪清掉→锁旁边另一只→又漏检→一圈怪轮流锁、方向左右横跳"。
+    if attacked and (not hp_confirmed) and not has_hp and not has_dmg:
+        drop = True
+    # 首次检测到血条 = 攻击命中确认
+    if has_hp and not hp_confirmed:
+        hp_confirmed = True
+    return {"alive": alive, "drop": drop, "hp_confirmed": hp_confirmed, "gone_frames": gone_frames}'''
+new_ls = '''    # 【规则②·用户2026-09-18定稿，真怪/空怪统一"一帧就换"】只要已经出手(attacked已在调用方含"出手后新帧+
     # POST_STRIKE反馈窗"双门,用的不是出手前旧帧)且这一帧【血条、伤害数字都没有】=怪打死了/空怪/背景,立刻drop,
     # 不再做"连续3帧没血条"计数(用户:没有血条也没有数字,一帧就换,要不会一直空打)。
     # 没出手(attacked=False:刚锁/还在走近/出手前摇)绝不丢——既不会误杀真怪,也不会钉着空框(走近到能出手自然会判)。
@@ -406,69 +317,27 @@ def lock_status(has_hp, has_dmg, hp_confirmed, gone_frames, attacked=False, can_
     # 首次检测到血条 = 攻击命中确认
     if has_hp and not hp_confirmed:
         hp_confirmed = True
-    return {"alive": alive, "drop": drop, "hp_confirmed": hp_confirmed, "gone_frames": 0}
+    return {"alive": alive, "drop": drop, "hp_confirmed": hp_confirmed, "gone_frames": 0}'''
+rep1(old_ls, new_ls, "lock_status-can_strike True 一帧drop")
 
+# ============ 3) combat_step 形参加 fallback_next ============
+old_sig = '''                same_platform_fn=None, metric=None):
+    """组合 select_combat_target + lock_status + decide_attack'''
+new_sig = '''                same_platform_fn=None, metric=None, fallback_next=None):
+    """组合 select_combat_target + lock_status + decide_attack'''
+rep1(old_sig, new_sig, "combat_step 形参 fallback_next")
 
-# ==========================================================================
-# 决策3：这次放什么技能（主攻锁定目标优先；群攻=补充溅射，不抢主攻）
-# ==========================================================================
-
-def decide_attack(t_dist, skill_range, aoe_range, aoe_count, main_cd_ok, aoe_cd_ok):
-    """决定本次技能动作。
-
-    返回: 'main' 主攻 | 'aoe' 群攻 | 'none' 不施放
-    规则：主攻只对"锁定目标在技能射程内且冷却OK"施放，绝不因群攻可放而放弃主攻；
-          群攻仅当"范围内≥3只且冷却OK"时作为补充溅射。
-    """
-    if main_cd_ok and t_dist <= skill_range:
-        return 'main'          # 主攻锁定目标优先，不被群攻抢占
-    if aoe_cd_ok and aoe_count >= 3:
-        return 'aoe'           # 群攻补充溅射（主攻冷却/目标拉远时才替补）
-    return 'none'
-
-
-# ==========================================================================
-# 决策4：完整战斗tick编排（组合上面三块，输出这一刻该做什么）
-# ==========================================================================
-
-def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_range, far_range,
-                lock, hp_bars, has_dmg, main_cd_ok, aoe_cd_ok,
-                probe_side, probe_switched, is_on_platform, get_monster_platform,
-                lock_time, hp_confirmed, gone_frames, cur_cross=None,
-                attacked=False, attack_y_up=None, attack_y_down=None, allow_cross=True,
-                freeze_lock=False, group_priority=False, group_radius=0,
-                aoe_y_up=None, aoe_y_down=None, aoe_dual=False, can_strike=True, lock_tier=None,
-                same_platform_fn=None, metric=None, fallback_next=None):
-    """组合 select_combat_target + lock_status + decide_attack，得到本tick完整的战斗决策。
-
-    参数: 见各部分；now/lock_time 单位ms。
-    返回 dict:
-      state: 'idle'|'switch'|'pursue'|'cast'|'cross'
-      target: (cx,cy)|None
-      direction: 'left'|'right'|None
-      dist: int|None
-      alive: bool          当前锁定目标是否存活
-      drop: bool           是否应放弃当前锁定（怪已死/假怪）
-      hp_confirmed: bool   是否已确认命中(见过血条)
-      gone_frames: int     连续无反馈帧数
-      skill: 'main'|'aoe'|'none'   本次要施放的技能
-    """
-    lcx, lcy = (lock if lock else (None, None))
-    # 存活证据：目标附近是否有血条（收紧贴近度，避免附近怪的血条被算成目标的，导致空怪不drop）
-    has_hp = False
-    if lock:
-        for (bx, by, bw, bh) in hp_bars:
-            if abs((bx + bw / 2) - lcx) < 35 and abs((by + bh / 2) - lcy) < 45:
-                has_hp = True
-                break
-    # 存活/空怪判定（仅已锁定）：血条连续2帧消失=打死；出手后无血条无伤害=空怪。不再有任何"锁定时长到点丢弃"。
-    ls = {"alive": bool(lock), "drop": False, "hp_confirmed": hp_confirmed,
-          "gone_frames": gone_frames}
-    if lock:
-        ls = lock_status(has_hp, has_dmg, hp_confirmed, gone_frames, attacked, can_strike, freeze_lock)
-    # 停步出手线=技能射程4/5(与select_combat_target内一致):主攻走到这条线内才施放,(4/5,满射程]继续走近不站定空打
-    cast_range = max(1, int(skill_range * 4 // 5))
-    # 【阶段一·同帧晋升】旧current被判死(_dropped)或根本没锁 → 同帧用B线程预备怪 fallback_next 顶替(promoted),
+# ============ 4) combat_step 内 eff_lock → 同帧晋升 next ============
+old_eff = '''    # 若判定放弃锁定（真怪死了/假怪）→ 本轮重新选目标
+    eff_lock = lock if not ls["drop"] else None
+    d = select_combat_target(px, py, monsters, selected_platforms, skill_range, far_range,
+                            (eff_lock[0] if eff_lock else None),
+                            (eff_lock[1] if eff_lock else None),
+                            ls["alive"], is_on_platform, get_monster_platform,
+                            probe_side, probe_switched, cur_cross, attack_y_up, attack_y_down,
+                            allow_cross, now, lock_time, freeze_lock, lock_tier, group_priority, group_radius,
+                            aoe_y_up, aoe_y_down, aoe_dual, same_platform_fn=same_platform_fn, metric=metric)'''
+new_eff = '''    # 【阶段一·同帧晋升】旧current被判死(_dropped)或根本没锁 → 同帧用B线程预备怪 fallback_next 顶替(promoted),
     # current一死0等待立刻接手,不等下一检测帧、不靠重置节流(治"打完一波发呆几秒")。
     # drop善后(空怪拉黑/跳高降级)由调用方拿 drop_pos=【旧怪坐标】处理——绝不能把刚顶替上来的next当空怪拉黑。
     _dropped = bool(lock and ls["drop"])
@@ -485,25 +354,26 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                             ls["alive"], is_on_platform, get_monster_platform,
                             probe_side, probe_switched, cur_cross, attack_y_up, attack_y_down,
                             allow_cross, now, lock_time, freeze_lock, lock_tier, group_priority, group_radius,
-                            aoe_y_up, aoe_y_down, aoe_dual, same_platform_fn=same_platform_fn, metric=metric)
-    # 技能施放决策
-    skill = 'none'
-    if d['target'] is not None and d['dist'] is not None:
-        aoe_count = 0
-        for (x1, y1, x2, y2, _s) in monsters:
-            mcx = (x1 + x2) // 2
-            mcy = y2
-            if abs(mcx - px) <= aoe_range and abs(mcy - py) <= aoe_range:
-                aoe_count += 1
-        skill = decide_attack(d['dist'], cast_range, aoe_range, aoe_count,
-                              main_cd_ok, aoe_cd_ok)
-    d['alive'] = ls['alive']
+                            aoe_y_up, aoe_y_down, aoe_dual, same_platform_fn=same_platform_fn, metric=metric)'''
+rep1(old_eff, new_eff, "combat_step 同帧晋升 fallback_next")
+
+# ============ 5) combat_step 回存 drop/drop_pos/promoted ============
+old_save = '''    d['alive'] = ls['alive']
+    d['drop'] = ls['drop']
+    d['hp_confirmed'] = ls['hp_confirmed']'''
+new_save = '''    d['alive'] = ls['alive']
     d['drop'] = _dropped          # 旧current本帧是否被判死(善后判据)
     d['drop_pos'] = _drop_pos     # 被判死的旧current坐标(空怪拉黑/跳高降级必须用它,不能用新顶替的target)
     d['promoted'] = _promoted     # 本帧是否已用预备怪next同帧顶替(调用方据此重置新目标生死字段)
-    d['hp_confirmed'] = ls['hp_confirmed']
-    d['gone_frames'] = ls['gone_frames']
-    d['skill'] = skill
-    d['cross_candidates'] = d.get('cross_candidates', [])
-    d['tier'] = d.get('tier')   # in=技能范围内/out=同层范围外/cross=跨层,调用方回传作下一帧维持依据
-    return d
+    d['hp_confirmed'] = ls['hp_confirmed']'''
+rep1(old_save, new_save, "combat_step 回存 drop_pos/promoted")
+
+# ============ 写回（保持原 BOM 状态，纯 LF）============
+out = src.encode("utf-8")
+if had_bom:
+    out = b"\xef\xbb\xbf" + out
+assert b"\r\n" not in out, "出现 CRLF"
+with open(P, "wb") as f:
+    f.write(out)
+py_compile.compile(P, doraise=True)
+print("py_compile OK; BOM=%s; 字节数=%d" % (had_bom, len(out)))
