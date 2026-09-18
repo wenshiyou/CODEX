@@ -15997,10 +15997,6 @@ class MinimapRouteRecorder:
         if not self._running or self.hwnd is None:
             return
         now = time.time() * 1000
-        # 人物实时画面坐标打到"打怪"日志(用户2026-09-18):500ms一条,置于所有状态分支return前,打怪/走位/发呆都看得到;只读坐标不碰任何逻辑
-        _ppos = self._player_screen_pos
-        if _ppos is not None:
-            self._rlog_throttle('char_pos', "人物坐标=(%d,%d)" % (int(_ppos[0]), int(_ppos[1])), 500, log='combat')
         fight_cfg = self._get_fight_config()
         pot_cfg = self._get_potion_config()
         # === 拟人周期小休（用户确认保留）：5~8分钟随机休息10~15秒（挂机像人偶尔离座）；爬梯/跨层中顺延1~3分钟 ===
@@ -17106,6 +17102,9 @@ class MinimapRouteRecorder:
                         # 人物/怪/YOLO/血条 都由后台检测线程同一帧算好了，主线程只读结果+过滤假怪（主线程不再做重活）
                         self._player_screen_pos = self._raw_char_pos
                         self._player_screen_t = self._raw_char_t   # 透传坐标时间戳,瞬移校验据此判陈旧、坐标陈旧观测据此报警
+                        # 人物坐标常开打印(用户2026-09-18):坐标由检测线程常开生产、不依赖是否点运行,故在主循环透传处节流打到"打怪"日志,待机/运行都能看
+                        if self._raw_char_pos is not None:
+                            self._rlog_throttle('char_pos', "人物坐标=(%d,%d)" % (int(self._raw_char_pos[0]), int(self._raw_char_pos[1])), 500, log='combat')
                         self._monster_hp_bars = self._raw_hp_bars
                         self._raw_cached = self._raw_cached_feature_monsters
                         # 2026-09-07 用户定稿：不再做"静止怪"静态过滤(冒险岛大量怪本就站桩,会误剔近身真怪→有怪不锁/空打)。
