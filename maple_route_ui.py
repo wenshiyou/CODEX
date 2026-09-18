@@ -600,11 +600,12 @@ ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人
 ATTACK_Y_DOWN = 30       # 打怪Y范围·向下：怪比人物低最多30px(人物下方-30内可直打；>30够不着→走近)
 AOE_Y_UP = 60            # 群攻Y范围·向上(用户2026-09-07独立于主攻,默认与主攻一致-60)：群攻只数Y在[-上,+下]内的怪,可在Y弹窗改
 AOE_Y_DOWN = 30          # 群攻Y范围·向下(默认+30,用户2026-09-07)：下层差太多打不到的怪不许凑数触发群攻
-# === 跨层选梯/爬梯常量（当前自由打怪版选梯=怪→梯40%+人→梯60%归一化加权(就近优先)+锁身份)===
+# === 跨层选梯/爬梯常量（自由打怪版选梯=三轮筛选漏斗:怪Y近→人Y近→人X近逐级收窄+锁像素块身份;用户2026-09-18)===
 # ↓ 下面两个为【小地图巡路模式】预留(用户2026-09-15:后续另做"沿小地图梯子+平台录制绿线规划巡路"的精准模式时使用;当前自由打怪版不引用,勿当死常量删)
 LADDER_REACH_HEIGHT = 15   # [小地图巡路模式预留]下端一个直跳够得着:人物光点比梯子下端y_bottom低不超过15个小地图px=一个直跳能抓到梯
 LADDER_END_MATCH_TOL = 1    # [小地图巡路模式预留]梯子连接端(上行顶端y_top/下行底端y_bottom)与目标层Y重合容差±1小地图px,差>1判为通向别的层、排除
-LADDER_PICK_REACH_DY = 120  # 甲·向上选梯可达过滤(用户0915):仅"向上+有目标怪"时,梯中心Y离人Y超此屏幕px=当下够不着的上层远梯先剔除再比总距离;剔光回退全集;向下/无怪不过滤
+LADDER_FUNNEL_Y_TIE = 60   # 三轮漏斗Y同档容差(屏幕px,用户2026-09-18):实测同屏多梯相邻Y差最小67(矮跨层)、同层并排梯接同一水平平台理论<30,60卡在两者间空白带;一轮怪Y近/二轮人Y近,另一把比最优Y差多出≤60=同层都留,>60=另一层砍掉;真机若遇同层双梯被误砍再调大
+LADDER_FUNNEL_X_TIE = 10   # 三轮漏斗第三轮"人正站两梯中间"判定(屏幕px):最优两把人X差≤10视为正中、随机一把,否则取人X最近的唯一一把
 LADDER_DOT_X_TOL = 2        # 上梯后光点X直配录制梯容差(用户2026-09-15:人抓住梯后光点与梯共用X,|录制梯x-光点x|≤此值=同一把;与录梯覆盖规则"X差<2同一把"一致,真机配不到再议放到3)
 LADDER_TOP_ARRIVE_TOL = 1  # 爬梯到顶验证(用户2026-09-11晚)：光点与梯顶重合或高于梯顶即到,容差只留1px当检测误差；
 # 且用"到达/越过"单向判定(上行 py<=y_top+2),人还在顶端下方(差>2)绝不判到顶——旧版abs≤8会提前8px松手导致没翻上平台就掉下
@@ -10200,6 +10201,32 @@ class MinimapRouteRecorder:
         peaks.sort(key=lambda p: p[1])
         return [(cx, cy, round(s, 3), _tn) for s, cx, cy, _tn in peaks]
 
+    @staticmethod
+    def _funnel_pick_ladder(cands, has_mon, tie_y=None, tie_x=None):
+        """选梯三轮筛选漏斗(用户2026-09-18定稿;大地图特征梯只稳X、Y只做层间相对高低比较,在上的梯Y永远比在下的小):
+        cands=[(a怪Y差,b人Y差,c人X差,wx,wy),...](无怪时a=None)。第一轮(仅有怪)怪Y近留同档→第二轮人Y近留同档→
+        第三轮人X近取唯一;最优两把人X差≤tie_x=人正站两梯中间则随机。每轮最小值自身必留、不会筛空。
+        返回(选中元组, 各轮计数dict);空候选返回(None,cnt)。"""
+        if tie_y is None:
+            tie_y = LADDER_FUNNEL_Y_TIE
+        if tie_x is None:
+            tie_x = LADDER_FUNNEL_X_TIE
+        cnt = {"r0": len(cands), "r1": 0, "r2": 0, "ties": 0}
+        if not cands:
+            return None, cnt
+        pool = list(cands)
+        if has_mon:
+            _a0 = min(c[0] for c in pool)
+            pool = [c for c in pool if c[0] <= _a0 + tie_y]
+        cnt["r1"] = len(pool)
+        _b0 = min(c[1] for c in pool)
+        pool = [c for c in pool if c[1] <= _b0 + tie_y]
+        cnt["r2"] = len(pool)
+        _c0 = min(c[2] for c in pool)
+        ties = [c for c in pool if c[2] <= _c0 + tie_x]
+        cnt["ties"] = len(ties)
+        return random.choice(ties), cnt
+
     def _scr_nudge_timing(self, n):
         """碎步第n拍(0基)的(按住时长ms, 松开后停顿ms, 单拍步长px),上行段3/下行方式二段C共用。
         用户2026-09-11晚定稿:按住时长按拍递减100/60/40ms、各±5随机(原170-200太长对不准);拍间仍停100-110。"""
@@ -17485,7 +17512,7 @@ class MinimapRouteRecorder:
                         self._lad_marks_cache = []
                     # === 选梯(用户2026-09-15定稿:锁像素块身份、不锁坐标;候选累积约两帧抗闪) ===
                     # ①recent累积约两帧白框(同一把邻帧≤归并半径就刷新位置),单帧扫不到邻帧扫到仍在池里;
-                    # ②未锁:在池里按"怪→梯+梯→人总距离最短"建锁(只用一次),当场反查钉录制端;
+                    # ②未锁:在池里按三轮漏斗(怪Y近→人Y近→人X近)建锁(只用一次),当场反查钉录制端;
                     # ③已锁:不再全局重选,只在池里找离上一帧锁点最近的=同一把,坐标随它动(身份固定、值在动);
                     # ④空帧(寻怪范围两帧池也没):不钉旧点、snap置None(红框这帧不画、直跳不拿旧坐标算差值),锁身份保留;连续LADDER_MERGE_WAIT_MS真没有才清锁回主线。
                     _white_now = [(c[0], c[1]) for c in self._lad_marks_cache]
@@ -17514,45 +17541,24 @@ class MinimapRouteRecorder:
                                     _recent.append((_wx0, _wy0, _now_lm))
                             self._lad_marks_recent = [p for p in _recent if _now_lm - p[2] <= LADDER_PICK_RECENT_MS]
                             # 候选=两帧累积池里【全部】扫到的梯子(用户2026-09-15定稿:删除"按人上方/下方/左右"的方向窗口过滤);
-                            # 人在底层也能选到上层的梯;选哪把完全交给下面"怪→梯+梯→人两段总距离最短",不再用方向/距离窗口先砍候选。
+                            # 人在底层也能选到上层的梯;选哪把完全交给下面三轮漏斗(怪Y近→人Y近→人X近),不用方向/距离窗口先砍候选。
                             _half = [(x, y) for (x, y, t) in self._lad_marks_recent]
                             _rx = _ry = None
                             _cand_all = []
                             _stage = ''
                             _lock = getattr(self, '_ladder_lock', None)
                             if _lock is None:
-                                # ②未锁建锁:怪→梯40%+人→梯60%归一化加权、总分最小者胜(就近优先,用户2026-09-18);无冻结怪(选台/walk/向下)缺第一段→退化为只比梯→人最近
+                                # ②未锁建锁·三轮筛选漏斗(用户2026-09-18定稿):大地图特征梯只稳X、Y只做层间相对高低比较(在上的梯Y永远比在下的小、只用来对比)。
+                                # 每把梯算 a=怪Y差(第一轮,无怪=None) / b=人Y差(第二轮) / c=人X差(第三轮);逐级"留最优同档"收窄:
+                                # 一轮怪Y近(通往怪那层)→二轮人Y近(人最好接近)→三轮人X近(唯一,人正站两梯中才随机)。不判绝对够得着、不做可达硬过滤、不回退全集,扫到的梯都能选出一把、不空转发呆。
+                                _has_mon = (_tmox is not None and _tmoy is not None)
                                 for (_wx, _wy) in _half:
-                                    _d_lp = abs(_wx - _psx) + abs(_wy - _psy)                # 梯→人
-                                    if _tmox is not None and _tmoy is not None:
-                                        _d_ml = abs(_wx - _tmox) + abs(_wy - _tmoy)          # 怪→梯
-                                        _tot = _d_ml + _d_lp
-                                    else:
-                                        _d_ml = -1; _tot = _d_lp
-                                    _cand_all.append((_tot, _d_ml, _d_lp, _wx, _wy))
-                                # 甲·可达过滤(用户0915):仅"向上+有冻结怪"时,先剔梯中心Y离人Y>LADDER_PICK_REACH_DY=当下够不着的上层远梯;
-                                # 向下/无怪不过滤(向下本就要下跳、无怪纯就近选);万一剔光一把不剩→回退全集比最短,绝不因过滤导致没梯可选而发呆
-                                _pick_list = _cand_all
-                                _reach_drop = 0; _reach_fallback = False
-                                if _cdir > 0 and _tmox is not None and _tmoy is not None and _cand_all:
-                                    _reach = [c for c in _cand_all if abs(c[4] - _psy) <= LADDER_PICK_REACH_DY]
-                                    if _reach:
-                                        _reach_drop = len(_cand_all) - len(_reach)
-                                        _pick_list = _reach
-                                    else:
-                                        _reach_fallback = True   # 当下全是够不着的远梯:回退全集,日志标明
-                                if _pick_list:
-                                    # 用户2026-09-18定稿:两段距离各自归一化到0~1再加权——怪→梯(c1)40%(这把梯通不通往怪/正确性),
-                                    # 人→梯(c2)60%(人好不好立刻抓住/就近不发呆);选加权总分最小。必须各自除本批最大值归一化,
-                                    # 否则总距离=两段之和数值天然大、60/40会被量纲吃掉。无怪(c1=-1)退化为只比人→梯就近。不做方向硬过滤(用户:方向没用)。
-                                    _max_lp = max(c[2] for c in _pick_list) or 1
-                                    _ml_vals = [c[1] for c in _pick_list if c[1] >= 0]
-                                    if _ml_vals:
-                                        _max_ml = max(_ml_vals) or 1
-                                        _mc = min(_pick_list, key=lambda c, _ml=_max_ml, _lp=_max_lp:
-                                                  (0.40 * (c[1] / _ml) + 0.60 * (c[2] / _lp)) if c[1] >= 0 else 1.0)
-                                    else:
-                                        _mc = min(_pick_list, key=lambda c, _lp=_max_lp: c[2] / _lp)
+                                    _b = abs(_wy - _psy)
+                                    _c = abs(_wx - _psx)
+                                    _a = abs(_wy - _tmoy) if _has_mon else None
+                                    _cand_all.append((_a, _b, _c, _wx, _wy))
+                                if _cand_all:
+                                    _mc, _fcnt = self._funnel_pick_ladder(_cand_all, _has_mon)
                                     _rx, _ry = _mc[3], _mc[4]
                                     self._ladder_lock = (_rx, _ry, _now_lm)    # 建锁:同时冻结这把梯此刻像素块(身份),坐标后续随动
                                     self._ladder_snap_x = _rx
@@ -17561,13 +17567,13 @@ class MinimapRouteRecorder:
                                     _sel = (_rx, _ry, True)
                                     _stage = '建锁'
                                     self._note_freq_event('lock_lad', 3, 1000, "1秒内反复锁定梯子%d次(疑似掉锁/白框不稳)")
-                                    # C1 建锁成功详细日志(建锁只发生一次、不节流):候选数/甲剔几把/是否回退/选中两段距离/全部候选明细
-                                    _det = ';'.join('%d,%d怪梯%d梯人%d总%d' % (c[3], c[4], (c[1] if c[1] >= 0 else 0), c[2], c[0])
-                                                    for c in _cand_all) or '无'
-                                    _debug_log("[选梯·建锁] 向%s 人=(%d,%d) 怪=(%s,%s) 候选%d把(甲剔%d把%s)→选中(%d,%d) 怪梯%d 梯人%d 总%d | 全部:%s" % (
+                                    _det = ';'.join('%d,%d怪Y%s/人Y%d/人X%d' % (
+                                        cc[3], cc[4], (str(cc[0]) if cc[0] is not None else '-'), cc[1], cc[2])
+                                        for cc in _cand_all) or '无'
+                                    _debug_log("[选梯·建锁] 三轮漏斗 向%s 人=(%d,%d) 怪=(%s,%s) 候选%d→一轮怪Y近留%d 二轮人Y近留%d 终选并列%d 选中(%d,%d) 怪Y差%s/人Y差%d/人X差%d | 全部:%s" % (
                                         '上' if _cdir > 0 else '下', _psx, _psy, _tmox, _tmoy,
-                                        len(_cand_all), _reach_drop, ('后回退全集' if _reach_fallback else ''),
-                                        _rx, _ry, (_mc[1] if _mc[1] >= 0 else 0), _mc[2], _mc[0], _det))
+                                        _fcnt["r0"], _fcnt["r1"], _fcnt["r2"], _fcnt["ties"],
+                                        _rx, _ry, (_mc[0] if _mc[0] is not None else '-'), _mc[1], _mc[2], _det))
                                 else:
                                     _stage = '未锁无候选'
                             else:
@@ -17625,8 +17631,8 @@ class MinimapRouteRecorder:
                             if _now_lm - getattr(self, '_snap_dbg_t', 0) >= 300:
                                 self._snap_dbg_t = _now_lm
                                 if _lock is None:
-                                    _allx = ';'.join('%d,%d怪梯%d/梯人%d/总%d' % (wx, wy, (ml if ml >= 0 else 0), lp, tt)
-                                                     for tt, ml, lp, wx, wy in _cand_all) or '无'
+                                    _allx = ';'.join('%d,%d怪Y%s/人Y%d/人X%d' % (wx, wy, (str(a) if a is not None else '-'), b, c)
+                                                     for a, b, c, wx, wy in _cand_all) or '无'
                                 else:
                                     # C 跟踪态补"锁点帧漂移"(相对上一帧移动多少,镜头快滚/串梯一眼可见)和"人梯X差"
                                     _drift = (abs(_rx - _lock[0]) + abs(_ry - _lock[1])) if _rx is not None else -1
