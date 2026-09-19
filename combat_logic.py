@@ -158,7 +158,7 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
         _is_hold = (target_cx is not None and abs(cx - target_cx) <= 40 and abs(cy - target_cy) <= 50)
         if _is_hold and _pool_y_up is not None:
             _b_up = _pool_y_up + LOCK_HOLD_Y_BAND
-            _b_down = (_pool_y_down + LOCK_HOLD_Y_BAND) if _pool_y_down is not None else _pool_y_down
+            _b_down = _pool_y_down   # 下方不加维持带(用户2026-09-19):锁定目标dy>面板下方Y带立即判cross下行,消除"维持带30~55内pursue卡住/旁路直接落层"缝隙;维持带只留上方防跳高边界横跳
         else:
             _b_up, _b_down = _pool_y_up, _pool_y_down
         y_ok = _in_band(cy, py, _b_up, _b_down)

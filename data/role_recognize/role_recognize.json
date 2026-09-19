@@ -7,7 +7,6 @@
     "maxmove": 250,
     "faststep": 2,
     "research": 1500,
-    "hold": 90,
     "lock_follow_lx": 119,
     "lock_follow_rx": 87,
     "lock_follow_y": 65,
@@ -81,8 +80,8 @@
             673,
             527
           ],
-          "off_x": -121,
-          "off_y": 44,
+          "off_x": -9,
+          "off_y": 60,
           "w": 35,
           "h": 23
         },
@@ -175,8 +174,8 @@
             648,
             512
           ],
-          "off_x": -4,
-          "off_y": 58,
+          "off_x": 115,
+          "off_y": 65,
           "w": 38,
           "h": 52
         }
