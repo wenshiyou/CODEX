@@ -548,6 +548,8 @@ LADDER_RUNJUMP_LO = 70         # 跑跳带下限
 LADDER_SCR_STICK_MS = 150        # 屏幕精对齐粘滞:模板偶发丢帧时沿用上一次稳定梯X的最长时间,防状态掉回小地图走到X差0原地直跳
 LADDER_PICK_RECENT_MS = 180      # 选梯候选累积窗(用户2026-09-15):约两帧内出现过的白框都算候选,治"梯子在闪/单帧扫不到";帧率4.6~12波动,用短时间窗等价"两帧"
 LADDER_RECENT_MERGE_PX = 45      # 累积窗内同一把梯归并半径:邻帧位置X/Y都≤45px视为同一把、刷新到最新位置,避免一把梯在候选池里重复多条
+LADDER_MERGE_DX = 60        # 同帧邻近梯子二维合并(用户2026-09-19):两命中中心|X差|<=60且|Y差|<=50视为同一把,只留质量分最高者
+LADDER_MERGE_DY = 50        # 同上Y阈值;治同把梯出两块/双框重叠被当成两把梯
 LADDER_LOCK_MAX_STEP_X = 120     # 锁身份后认定"同一把梯"的相邻帧最大X位移:镜头滚动同把梯一帧仅移动几十px,超过即另一把、绝不跟(治双梯在范围内时锁被另一把抢走)
 LADDER_LOCK_MAX_STEP_Y = 80      # 同上,相邻帧最大Y位移
 LADDER_MERGE_WAIT_MS = 1500      # 红框(倍率)白框(特征)吸附合并等待上限(用户2026-09-10:必须合并才起跳):进屏幕对位后超过这么久仍没合并=白框没扫到/模板问题,放弃回主线,既不没合并硬跳、也不死等
@@ -634,11 +636,11 @@ LADDER_DEBUG_DIFF_PX = 200        # 诊断(用户2026-09-15):人梯屏幕|X差|�
 LADDER_DEBUG_DIFF_MS = 1000       # 诊断:"人X-梯X"打印节流1秒1条
 LADDER_REALIGN_NO_TPL_MS = 1200   # 校准直跳里连续多久拿不到梯子屏幕X(无模板/匹配不到)=回主线,不死等
 # === 后脑勺抓梯/到顶/卡住监管(用户2026-09-18定稿:人在梯子上(上爬/下爬)才看得到后脑勺,自由落体/下平台/地面看不到;
-#   抓住=起跳后连续2帧看到后脑;到顶=climbing中连续250ms看不到后脑(已翻出台子,再补按↑LADDER_TOP_HOLD_MS翻稳),
+#   抓住=起跳后连续2帧看到后脑;到顶=climbing中连续500ms看不到后脑(已翻出台子,再补按↑LADDER_TOP_HOLD_MS翻稳),
 #   小地图光点重合梯端+录梯时长超时仅作兜底;卡住=后脑在梯但小地图光点Y连续2s不动→监管线程只置令、主线climbing非阻塞横跳解卡)。仅上梯direction>0生效 ===
 BACK_ON_LADDER_THR = 0.55       # 后脑勺"在梯子上"分数阈(定位thr约0.62,在梯判定单独0.55;真机看[爬梯·后脑]日志分数再微调)
 BACK_GRAB_FRAMES = 2            # 起跳后连续几帧看到后脑=抓住梯子(抗单帧误检)
-BACK_TOP_LOST_MS = 250          # climbing中连续多久看不到后脑=翻出平台到顶
+BACK_TOP_LOST_MS = 500          # climbing中连续多久看不到后脑=翻出平台到顶
 LADDER_STUCK_MS = 2000          # 卡住:后脑在梯且光点Y连续多久不动(小地图系)
 LADDER_STUCK_DOT_DY = 2.0       # 光点Y(小地图px)变化小于此=没动(卡住静止/解卡后恢复移动判据共用)
 LADDER_STUCK_SIDE_MS = 120      # 解卡:固定按右方向键时长
@@ -6009,17 +6011,18 @@ class MinimapRouteRecorder:
                 _end_y = self._climb_ladder_y_top if _up else self._climb_ladder_y_bottom
             _arrived = False
             _arrive_why = ""
-            _map_ok = False
-            if _end_y:
-                _map_ok = (py <= _end_y + LADDER_TOP_ARRIVE_TOL) if _up else (py >= _end_y - LADDER_TOP_ARRIVE_TOL)
+            # 【用户2026-09-19】上行到顶只认后脑:连续BACK_TOP_LOST_MS看不到后脑=翻台到顶;
+            # 物理删除上行"光点Y重合梯顶"判据(坏/短录制梯顶会让人刚抓住、还在梯底就误判到顶松手=爬一半掉下来)。
+            # 下行不接后脑,仍只认光点Y重合梯底;总超时(录制duration+2s)保命不变。
             _top_by_back = bool(_up and self._ladder_back_top)
-            if _top_by_back or _map_ok:
+            _map_ok_down = bool((not _up) and bool(_end_y) and py >= _end_y - LADDER_TOP_ARRIVE_TOL)
+            if _top_by_back or _map_ok_down:
                 # 触发到顶那一刻不立刻松,继续按住↑多走LADDER_TOP_HOLD_MS确保整个人翻上台/踩稳(本段每帧补按方向键,hold期天然保持)
                 if not self._climb_top_hold:
                     self._climb_top_hold = True
                     self._climb_top_hold_t = now_ms
                     self._climb_top_hold_why = ("后脑连续%dms看不到=翻台到顶,补按%dms" % (BACK_TOP_LOST_MS, LADDER_TOP_HOLD_MS)) if _top_by_back \
-                        else ("光点重合梯端后多按%dms翻稳" % LADDER_TOP_HOLD_MS)
+                        else ("光点重合梯底后多按%dms翻稳" % LADDER_TOP_HOLD_MS)
                 elif now_ms - self._climb_top_hold_t >= LADDER_TOP_HOLD_MS:
                     _arrived = True
                     _arrive_why = self._climb_top_hold_why
@@ -10369,7 +10372,8 @@ class MinimapRouteRecorder:
         if self._ladder_use_yolo():
             # YOLO通道:同范围推理全部'梯子',直接返回[(cx,cy,score)]按X排序,不走模板dilate/NMS
             _yc = self._detect_ladder_yolo(frame, (x1, y1, x2, y2))
-            return sorted([(int(cx), int(cy), round(s, 3), None) for cx, cy, s in _yc], key=lambda c: c[0])  # YOLO无模板序号,编号留空由绘制按位置兜底
+            _raw_y = [(int(cx), int(cy), round(s, 3), None) for cx, cy, s in _yc]  # YOLO无模板序号,编号留空由绘制按位置兜底
+            return self._merge_nearby_ladders(_raw_y)
         _sim = float(getattr(self, '_ladder_tpl_sim', LADDER_TPL_DEFAULT_SIM) or LADDER_TPL_DEFAULT_SIM)
         peaks = []
         _ker = np.ones((5, 5), dtype=np.uint8)
@@ -10387,7 +10391,30 @@ class MinimapRouteRecorder:
                 if all(abs(cx - qx) > LADDER_MARK_NMS_X for _, qx, qy, _t in peaks):
                     peaks.append((s, int(cx), int(cy), _ti + 1))   # 带模板列表序号,画面编号与弹窗一致
         peaks.sort(key=lambda p: p[1])
-        return [(cx, cy, round(s, 3), _tn) for s, cx, cy, _tn in peaks]
+        _raw_t = [(cx, cy, round(s, 3), _tn) for s, cx, cy, _tn in peaks]
+        return self._merge_nearby_ladders(_raw_t)
+
+    def _merge_nearby_ladders(self, cands):
+        """同帧邻近梯子二维合并(用户2026-09-19):两命中中心|X差|<=LADDER_MERGE_DX且|Y差|<=LADDER_MERGE_DY视为同一把,
+        按质量分降序贪心只留分最高者(同把梯多峰/双框重叠合一),返回按X排序的[(cx,cy,score,tn),...];结构不变、下游无感。"""
+        def _qv(c):
+            try:
+                return float(c[2]) if c[2] is not None else -1.0
+            except (TypeError, ValueError, IndexError):
+                return -1.0
+        items = sorted(cands, key=_qv, reverse=True)
+        kept = []
+        for c in items:
+            cx, cy = int(c[0]), int(c[1])
+            is_dup = False
+            for k in kept:
+                if abs(cx - int(k[0])) <= LADDER_MERGE_DX and abs(cy - int(k[1])) <= LADDER_MERGE_DY:
+                    is_dup = True
+                    break
+            if not is_dup:
+                kept.append(c)
+        kept.sort(key=lambda c: c[0])
+        return kept
 
     @staticmethod
     def _dir_band_pick_ladder(half, psx, psy, cdir, mon_x):
