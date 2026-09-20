@@ -334,7 +334,7 @@ def lock_status(has_hp, has_dmg, hp_confirmed, gone_frames, attacked=False, can_
     # 不因暂时没看到血条判死(gone恒0,避免走到一半丢锁→横跳);但若【已出手 attacked】仍无血条无伤害=
     # 确证空怪/背景/尸体照样drop。(freeze_lock 为跨层起跳预留形参,同层恒False,本函数不据此无条件保锁)
     if not can_strike:
-        if has_hp and not hp_confirmed:
+        if (has_hp or has_dmg) and not hp_confirmed:
             hp_confirmed = True
         if attacked and (not hp_confirmed) and not has_hp and not has_dmg:
             return {"alive": False, "drop": True, "hp_confirmed": hp_confirmed, "gone_frames": 0}
@@ -344,8 +344,8 @@ def lock_status(has_hp, has_dmg, hp_confirmed, gone_frames, attacked=False, can_
     # 不再做"连续3帧没血条"计数(用户:没有血条也没有数字,一帧就换,要不会一直空打)。
     # 没出手(attacked=False:刚锁/还在走近/出手前摇)绝不丢——既不会误杀真怪,也不会钉着空框(走近到能出手自然会判)。
     drop = bool(attacked and not has_hp and not has_dmg)
-    # 首次检测到血条 = 攻击命中确认
-    if has_hp and not hp_confirmed:
+    # 首次见到血条或伤害数字 = 攻击命中确认(用户2026-09-21:二者出一即真怪)
+    if (has_hp or has_dmg) and not hp_confirmed:
         hp_confirmed = True
     return {"alive": alive, "drop": drop, "hp_confirmed": hp_confirmed, "gone_frames": 0}
 

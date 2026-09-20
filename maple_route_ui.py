@@ -16912,28 +16912,29 @@ class MinimapRouteRecorder:
         _bl = self._b_lock
         _fb = getattr(self, '_combat_exec_feedback', None)
         _attacked = False
-        _detect_open = False   # 出手100ms后开始看伤害数字(判死仍走500ms截止)
-        _judge_pos = _bl       # 判活/保锁目标:默认当帧锁;出手反馈窗内=出手那只怪
-        if _fb and _fb.get('pos') and _fb.get('first'):
+        _detect_open = False   # 攻击后0~500ms检测窗是否在窗内(探针日志用)
+        _judge_pos = _bl       # 判活/保锁目标:默认当帧锁;攻击反馈窗内=最近一击那只怪
+        _has_dmg = False
+        # 判活(用户2026-09-21定稿):计时器与攻击同步,每按一次攻击用feedback.t重新计时;攻击后0~STRIKE_DEADLINE_MS(500ms)
+        # 为检测窗,窗内血条(combat_step A∪B)或伤害数字任一=怪活着续锁续打;满500ms两者皆无=空怪/打死→drop换怪;不攻击(_fb无)不检测。
+        if _fb and _fb.get('pos') and _fb.get('t'):
             _fpos = _fb['pos']
-            _first = _fb.get('first', 0) or 0
-            _el = now_ms - _first
-            if _first and now_ms >= _first and _el > POST_STRIKE_CHECK_MS:
+            _last_t = _fb.get('t', 0) or 0
+            _el = now_ms - _last_t
+            if _last_t and now_ms >= _last_t and 0 <= _el < STRIKE_DEADLINE_MS:
                 _detect_open = True
-                _judge_pos = _fpos   # 窗内判活/保锁钉死出手怪,不要求±40/±50对齐
-            if _first and now_ms >= _first and _el > STRIKE_DEADLINE_MS:
-                _attacked = True
-                _judge_pos = _fpos   # 满窗判死这一帧仍针对出手怪
+                _judge_pos = _fpos   # 0~500窗内判活/保锁钉死最近一击那只怪,不要求对齐/射程
+                try:
+                    _has_dmg = self._detect_damage_number(_fpos[0], _fpos[1], frame=frame, monsters=merged)
+                except Exception as _e:
+                    _debug_log("[B决策] 伤害数字检测异常: %s" % _e)
+                    _has_dmg = False
+            if _last_t and now_ms >= _last_t and _el >= STRIKE_DEADLINE_MS:
+                _attacked = True    # 最近一击满500ms这一帧仍针对出手怪,血条/伤害皆无则lock_status判死drop
+                _judge_pos = _fpos
         # can_strike=判活目标在停步线+主攻Y带;只影响"曾见血后走近/跳打中"的保锁,满窗无血无伤两分支都drop
         _in_skill = bool(_judge_pos) and abs(_judge_pos[0] - px) <= _stop and -_yup <= (_judge_pos[1] - py) <= _ydn
-        _has_dmg = False
-        # 伤害数字:窗内100~650ms对出手怪头顶检测(旧"_in_skill且对齐"两道门已删,移动/跳打/高处帧一样判活)
-        if _detect_open and _judge_pos is not None and _fb and _fb.get('first') and (now_ms - (_fb.get('first') or 0)) < 650:
-            try:
-                _has_dmg = self._detect_damage_number(_judge_pos[0], _judge_pos[1], frame=frame, monsters=merged)
-            except Exception as _e:
-                _debug_log("[B决策] 伤害数字检测异常: %s" % _e)
-                _has_dmg = False
+        # 伤害数字已在上方攻击后0~500窗内对最近一击怪头顶检测(_has_dmg);此处不再另开检测(旧100~650/对齐/射程门全去)
         # ===== 判活检测端探针(2026-09-20,只观测不改决策):先证画面里能不能检出伤害数字/血条,再证门控对接 =====
         try:
             P = self._dbg_probe
@@ -16950,9 +16951,9 @@ class MinimapRouteRecorder:
                 elif not _in_skill:
                     P['notskill'] += 1
             # 无条件探针:出手后100~650ms,绕开_in_skill/_detect_open,直接对出手目标头顶跑颜色检测
-            if _fposP and _fb.get('first'):
-                _elP = now_ms - (_fb.get('first') or 0)
-                if POST_STRIKE_CHECK_MS < _elP < 650:
+            if _fposP and _fb.get('t'):
+                _elP = now_ms - (_fb.get('t') or 0)
+                if 0 <= _elP < STRIKE_DEADLINE_MS:
                     P['win'] += 1
                     _pdb = {}
                     try:
