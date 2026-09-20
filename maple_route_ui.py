@@ -385,6 +385,7 @@ ROLE_ANCHOR_KEYS = [_a[0] for _a in ROLE_ANCHORS]
 ROLE_OFF_LEARN_THR = 0.45  # 脸/后脑学"→人名基点"偏移的最低分(用户2026-09-18):同帧人名已过阈锚定真人,脸/后脑有0.45以上可信命中即可量几何差,不必也过定位阈值0.62(实测脸分常0.56~0.62)
 AUX_ANCHOR_MAX_MOVE = 80   # 脸/后脑/宠物这些【兜底锚点】映射点相对上一可信基点的最大合法跳变px(用户2026-09-20):兜底锚点误匹配多,不能像人名那样允许maxmove=250的瞬移,>80且弱匹配(<0.75)即当误匹配丢弃,全图重搜帧也生效
 ANCHOR_OFF_LEARN_MAXDEV = 70  # 脸/后脑学"→人名"偏移时,新量几何差与已学/固化偏移允许的最大偏离px(用户2026-09-20):超过=锚点本帧误匹配在人名外、丢弃不学,锁死固化几何(实测误匹配偏离可达134px,正常帧间抖动<30)
+ROLE_BIGJUMP_PX = 120       # 人物基点一帧最大合法跳变px(用户2026-09-20根治坐标帧间拽飞→B误判cross锁空梯):任何定位源(人名/脸/后脑/宠物)、任何帧(局部/全图)、无论分数多高,相对上一稳定基点位移>120一律不采信该模板候选、丢弃转黑框ROI重搜;正常跑步一帧远<120,真瞬移(>=250)由_research_anchor_around_dot借黑框光点第二源在新位置重捕
 # 跟踪参数默认值(默认写死,角色识别面板可调、自动存盘)
 ROLE_TRACK_DEFAULT = {
     "fps": 24,         # 每秒跟踪次数
@@ -14458,11 +14459,10 @@ class MinimapRouteRecorder:
         _nloc = _nv[1] if (_nv is not None and _nv[0] >= thr) else None
         # 偏移学习姿势门控(用户2026-09-20,根治off_back被平地误匹配从固化240污染成~14、到顶坐标飞到1184):
         # 后脑back只在人物真在梯子上爬(_climb_state==climbing,后脑姿势真实)才学"→人名"偏移;平地/到顶/特效帧后脑在别处误匹配绝不学。
-        # 脸face_r只在非爬梯硬态(climb_state==none,平地打怪脸几何稳定)学;爬梯/下跳姿势脸会变形不学。
+        # 脸face_r【固化不自学·只读盘上(10,61)·不写盘】(用户2026-09-20:脸误匹配污染off+天外误匹配拽飞坐标→锁空梯)。
         _climb_st_learn = getattr(self, '_climb_state', 'none')
-        _learn_anchor_on = {"face_r": (_climb_st_learn == "none"),
-                            "back": (_climb_st_learn == "climbing")}
-        for _kk in ("face_r", "back"):
+        _learn_anchor_on = {"back": (_climb_st_learn == "climbing")}  # face_r固化不自学、只读盘(2026-09-20)
+        for _kk in ("back",):  # 只后脑在climbing学;脸固化不学(2026-09-20)
             _g = got.get(_kk)
             # 人名在(已锚定真人)+姿势门控通过时,锚点有≥学习门限可信命中才量"→人名"几何偏移
             if (_nloc is not None and _g is not None and _g[0] >= ROLE_OFF_LEARN_THR and _g[1] is not None
@@ -14484,7 +14484,7 @@ class MinimapRouteRecorder:
                 self._role_rec = self._role_rec or self._load_role_recognize()
                 _amr = self._role_rec.setdefault("anchors", {})
                 _dirty = False
-                for _kk in ("face_r", "back"):
+                for _kk in ("back",):  # face_r固化、运行时永不写盘(2026-09-20)
                     _o = tr.get("off_" + _kk)
                     if _o is not None and tr.get("off_n_" + _kk, 0) >= 5:
                         _mmr = _amr.setdefault(_kk, {})
@@ -14507,8 +14507,12 @@ class MinimapRouteRecorder:
                     _bx, _by = float(last[0]), float(last[1])
                 else:
                     _bx, _by = float(_ploc[0]), float(_ploc[1])
-            # 跳变门(用户2026-09-20收紧治兜底锚点拽飞):人名name保留原规则(局部窗跳变>maxmove且弱匹配<0.75才丢,全图重搜/强匹配=合法瞬移放行);
-            # 脸/后脑/宠物兜底锚点误匹配多,用独立小阈值AUX_ANCHOR_MAX_MOVE(80px)且【不分局部/全图帧都查】(全图重搜也不许兜底锚点一帧瞬移>80),仅≥0.75强匹配放行。
+            # 大跳变硬闸(用户2026-09-20根治坐标帧间拽飞→B误判cross锁空梯;实测误匹配把人783,515一帧拽到505,302=284px):
+            # 任何定位源、任何帧(局部/全图)、无论分数多高(含≥0.75强匹配),相对上一稳定基点一帧位移>ROLE_BIGJUMP_PX一律不采信、continue转黑框ROI重搜;
+            # 正常跑步一帧远<120;真瞬移(≥250)由_research_anchor_around_dot以黑框光点(独立第二源)在新位置ROI内重捕,硬拦不影响真瞬移。
+            if last is not None and np.hypot(_bx - last[0], _by - last[1]) > ROLE_BIGJUMP_PX:
+                continue
+            # 大跳变以内:保留原弱匹配小跳变过滤(人名局部窗>maxmove且弱匹配<0.75丢;兜底锚点>80且弱匹配<0.75丢)
             if last is not None and _pv[0] < 0.75:
                 _move_lim = maxmove if _pk == "name" else AUX_ANCHOR_MAX_MOVE
                 if np.hypot(_bx - last[0], _by - last[1]) > _move_lim and (_pk != "name" or not need_full):
