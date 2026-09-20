@@ -16868,27 +16868,31 @@ class MinimapRouteRecorder:
         _gp = bool(fc.get("group_priority"))
         _dual = bool(fc.get("aoe_dual"))
         _cand = list(merged)   # 纯最近(2026-09-20):不黑名单/不压制删怪,当帧检出全留,真假靠出手后无血无伤判死
-        # 主线出手反馈→必须与当前b_lock是同一只(±40X/±50Y)才算数,防换目标后旧出手污染新怪
+        # 出手反馈判活(用户2026-09-20定稿):只看"出手后100~500ms窗+检测范围",【不再要求与当帧锁对齐、不再要求当帧站定射程内】。
+        # 判活窗内把判活/保锁目标钉成"出手那只怪 feedback.pos"(打了没出结果前不被别的怪抢走);窗内见伤害数字或血条A/B=活着续锁,
+        # 满500ms仍无血无伤=空怪/打死→drop。对齐仅留作日志参考(有对齐更好),不做门控(探针实测旧两门挡掉约1/3真实飘字)。
         _bl = self._b_lock
         _fb = getattr(self, '_combat_exec_feedback', None)
         _attacked = False
-        _detect_open = False   # 用户2026-09-20:100ms开始看伤害数字(判死仍走500ms截止)
-        if _bl is not None and _fb and _fb.get('pos'):
+        _detect_open = False   # 出手100ms后开始看伤害数字(判死仍走500ms截止)
+        _judge_pos = _bl       # 判活/保锁目标:默认当帧锁;出手反馈窗内=出手那只怪
+        if _fb and _fb.get('pos') and _fb.get('first'):
             _fpos = _fb['pos']
-            if abs(_fpos[0] - _bl[0]) <= 40 and abs(_fpos[1] - _bl[1]) <= 50:
-                _first = _fb.get('first', 0) or 0
-                _el = now_ms - _first
-                # 用户2026-09-20:100ms起开始看血条/伤害(检测门);满500ms仍无血无伤才判死(判死门)
-                if _first and now_ms >= _first and _el > POST_STRIKE_CHECK_MS:
-                    _detect_open = True
-                if _first and now_ms >= _first and _el > STRIKE_DEADLINE_MS:
-                    _attacked = True
-        # can_strike=锁在停步线+主攻Y带(真打得到);只有成立时才用"无血无伤"判死
-        _in_skill = bool(_bl) and abs(_bl[0] - px) <= _stop and -_yup <= (_bl[1] - py) <= _ydn
+            _first = _fb.get('first', 0) or 0
+            _el = now_ms - _first
+            if _first and now_ms >= _first and _el > POST_STRIKE_CHECK_MS:
+                _detect_open = True
+                _judge_pos = _fpos   # 窗内判活/保锁钉死出手怪,不要求±40/±50对齐
+            if _first and now_ms >= _first and _el > STRIKE_DEADLINE_MS:
+                _attacked = True
+                _judge_pos = _fpos   # 满窗判死这一帧仍针对出手怪
+        # can_strike=判活目标在停步线+主攻Y带;只影响"曾见血后走近/跳打中"的保锁,满窗无血无伤两分支都drop
+        _in_skill = bool(_judge_pos) and abs(_judge_pos[0] - px) <= _stop and -_yup <= (_judge_pos[1] - py) <= _ydn
         _has_dmg = False
-        if _in_skill and _detect_open:
+        # 伤害数字:窗内100~650ms对出手怪头顶检测(旧"_in_skill且对齐"两道门已删,移动/跳打/高处帧一样判活)
+        if _detect_open and _judge_pos is not None and _fb and _fb.get('first') and (now_ms - (_fb.get('first') or 0)) < 650:
             try:
-                _has_dmg = self._detect_damage_number(_bl[0], _bl[1], frame=frame, monsters=merged)
+                _has_dmg = self._detect_damage_number(_judge_pos[0], _judge_pos[1], frame=frame, monsters=merged)
             except Exception as _e:
                 _debug_log("[B决策] 伤害数字检测异常: %s" % _e)
                 _has_dmg = False
@@ -16946,7 +16950,7 @@ class MinimapRouteRecorder:
             _debug_log("[判活探针] 异常: %s" % _pe)
         _dl = combat_logic.combat_step(
             now_ms, px, py, _cand, self._selected_platforms, _skr, _aoe, _far_x,
-            _bl, bars, _has_dmg, True, True,
+            _judge_pos, bars, _has_dmg, True, True,   # 判活窗内lock=出手怪(钉保锁),窗外_judge_pos=_bl等价原逻辑
             self._b_probe_side, self._b_probe_switched,
             self._is_monster_on_platform, self._get_monster_platform,
             self._b_lock_time, self._b_hp_confirmed, self._b_gone, None,  # cur_cross同层传None:脱检不续cross(此前错传当前锁_bl致续命条件恒真→漏帧误cross呆住);未来跨层才传真cross目标
@@ -17722,7 +17726,7 @@ class MinimapRouteRecorder:
                 # 群攻出手前短点朝锁定怪方向40ms(治朝向漂移反打);双向近身群攻也不影响两侧出伤
                 _afvk = VK_RIGHT if t_cx >= px else VK_LEFT
                 self._send_win_key(_afvk, keyup=False)
-                self._combat_timed_keys.append((_afvk, now + 40))
+                self._combat_timed_keys.append((_afvk, now + 50))  # 用户2026-09-20:40ms经常不转向,改50ms
                 self._press_game_key(aoe_key)
                 # 仍登记出手时刻(站桩输出判定GLOBAL_SKILL_HB_MS用),只是不再拿它当群攻CD门控(用户2026-09-18群攻无CD)
                 self._attack_last["aoe"] = now
@@ -17762,7 +17766,7 @@ class MinimapRouteRecorder:
                 # 走_combat_timed_keys到期自动松,不进_combat_held_keys、不设move_dir→不会被下面"移动中不发技能"拦
                 _fvk = VK_RIGHT if t_cx >= px else VK_LEFT
                 self._send_win_key(_fvk, keyup=False)
-                self._combat_timed_keys.append((_fvk, now + 40))
+                self._combat_timed_keys.append((_fvk, now + 50))  # 用户2026-09-20:40ms经常不转向,改50ms(与攻击同帧不位移)
                 self._press_game_key(atk_key)  # keybd_event tap(keydown+keyup)，能松开(用户：用特定模式)
                 self._attack_last["atk1"] = now
                 self._combat_target_attacked = True  # 已对锁定目标出手：空怪判定用
