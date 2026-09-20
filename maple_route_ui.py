@@ -16782,6 +16782,20 @@ class MinimapRouteRecorder:
                         _merged = self._detect_last_monsters
                     _merged = self._temporal_smooth_detections(_merged)  # 单帧漏检不清目标
                     _merged = [b for b in _merged if _band_y1 <= (b[1] + b[3]) // 2 <= _band_y2]  # 识别带兜底剔UI误检
+                    # 【锁怪治本·用户2026-09-20】最终怪表(已含2秒宽限/时序平滑续命)按当前帧人物点+面板寻怪范围硬几何裁：
+                    # 续命只防漏检，不得把人已走离的屏外/超范围陈旧框、背景误检继续喂锁怪(实测锁X差729>寻怪500旧框致满屏瞬移追空)。
+                    # 人物点当帧丢失(_ch is None)不裁防闪丢清空；X超far_range_x或Y超far_range上下沿一律剔除；metric/红框/决策统一用裁后表。
+                    if _ch is not None and _far_x > 0:
+                        _fx0, _fy0 = _ch[0], _ch[1]
+                        _fy_lo = _fy0 - _far_y_up if _far_y_up > 0 else _band_y1
+                        _fy_hi = _fy0 + _far_y_down if _far_y_down > 0 else _band_y2
+                        _clipped = []
+                        for _cb in _merged:
+                            _ccx = (_cb[0] + _cb[2]) // 2
+                            _ccy = _cb[3]  # 怪框底边=脚(与metric/分桶cy=y2同口径)
+                            if abs(_ccx - _fx0) <= _far_x and _fy_lo <= _ccy <= _fy_hi:
+                                _clipped.append(_cb)
+                        _merged = _clipped
                     self._raw_cached_feature_monsters = _feat
                     # 几何距离在B线程算(同帧人物点_ch):cx中心/cy脚/x_gap水平差/dy垂直差(负=怪在上),与怪框打包原子发布;
                     # 主线程整包取,phantom过滤只删怪不改坐标,剩余怪四角key必命中;_ch丢失(人物没识别到)则metric空、主线程兜底现算
