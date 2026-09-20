@@ -42,3 +42,6 @@ Thumbs.db
 build_*/
 dist_*/
 v*_test.png
+
+# 真机抓帧调试图不入版本(本地保留)
+data/real_capture/
