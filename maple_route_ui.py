@@ -16200,39 +16200,6 @@ class MinimapRouteRecorder:
         return True
 
 
-    def _temporal_smooth_detections(self, merged):
-        """检测稳定化：YOLO 对同一只怪会闪检(有时检出/有时没检出)。
-        把"本帧检出的怪"并入近期列表(同一只按中心位置去重、EMA平滑位置)，每只怪用随机1500-2000ms的保留到期时间，
-        到点清除；返回近期列表：本帧漏检但近期还在的怪也保留，避免走进/切怪时目标单帧闪没→犹豫/卡(用户2026-09-05)。"""
-        if not merged and not hasattr(self, '_detect_recent'):
-            return []
-        now_ms = time.time() * 1000
-        if not hasattr(self, '_detect_recent'):
-            self._detect_recent = []  # [(x1,y1,x2,y2,score,expire_at_ms)]
-        recent = self._detect_recent
-        # 过期清除(每只怪用各自到期时间)
-        recent = [(x1, y1, x2, y2, s, ex) for (x1, y1, x2, y2, s, ex) in recent if now_ms < ex]
-        # 把本帧检出的怪并入(更新或新增)，到期时间=now+随机1500-2000ms
-        for (x1, y1, x2, y2, s) in merged:
-            cx = (x1 + x2) // 2
-            cy = y2
-            found = False
-            for i in range(len(recent)):
-                ox1, oy1, ox2, oy2, os, oex = recent[i]
-                ocx = (ox1 + ox2) // 2
-                ocy = oy2
-                if abs(cx - ocx) <= 60 and abs(cy - ocy) <= 60:  # 中心接近=同一只
-                    # 位置EMA平滑：新检测权重0.6+旧位置0.4，减少框体晃来晃去(用户2026-09-05"识别到的不稳定")
-                    recent[i] = (int(0.6 * x1 + 0.4 * ox1), int(0.6 * y1 + 0.4 * oy1),
-                                 int(0.6 * x2 + 0.4 * ox2), int(0.6 * y2 + 0.4 * oy2), s,
-                                 now_ms + random.randint(MON_DETECT_KEEP_MIN, MON_DETECT_KEEP_MAX))
-                    found = True
-                    break
-            if not found:
-                recent.append((x1, y1, x2, y2, s, now_ms + random.randint(MON_DETECT_KEEP_MIN, MON_DETECT_KEEP_MAX)))
-        self._detect_recent = recent
-        return [(x1, y1, x2, y2, s) for (x1, y1, x2, y2, s, ex) in recent]
-
     def _filter_dropped_phantoms(self, monsters):
         """剔除两类怪，避免死循环/原地卡：
         ①最近被判定空怪/已放弃位置±60px内的怪(打一下无血条无伤害→drop,1秒不重锁,用户2026-09-18)；
@@ -16774,15 +16741,10 @@ class MinimapRouteRecorder:
                         _dt_bars += time.time() - _tb0
                         self._bars_last_t = _now_det
                     _bars = self._bars_cache
-                    if _merged:   # 怪2秒宽限:本轮空但2秒内有怪则保留,防偶发漏检闪没
-                        self._detect_last_monsters = _merged
-                        self._detect_last_monsters_time = time.time()
-                    elif (time.time() - self._detect_last_monsters_time < 2.0
-                          and self._detect_last_monsters):
-                        _merged = self._detect_last_monsters
-                    _merged = self._temporal_smooth_detections(_merged)  # 单帧漏检不清目标
+                    # 【最原始·用户2026-09-20】怪表只用当帧检出:删2秒宽限、删EMA/跨帧续命,
+                    # 每帧最新怪+当帧人坐标算最新距离;在打(技能范围内)的怪由决策层锁到打死,不靠怪表续命。
                     _merged = [b for b in _merged if _band_y1 <= (b[1] + b[3]) // 2 <= _band_y2]  # 识别带兜底剔UI误检
-                    # 【锁怪治本·用户2026-09-20】最终怪表(已含2秒宽限/时序平滑续命)按当前帧人物点+面板寻怪范围硬几何裁：
+                    # 【锁怪治本·用户2026-09-20】最终怪表(当帧检出)按当前帧人物点+面板寻怪范围硬几何裁：
                     # 续命只防漏检，不得把人已走离的屏外/超范围陈旧框、背景误检继续喂锁怪(实测锁X差729>寻怪500旧框致满屏瞬移追空)。
                     # 人物点当帧丢失(_ch is None)不裁防闪丢清空；X超far_range_x或Y超far_range上下沿一律剔除；metric/红框/决策统一用裁后表。
                     if _ch is not None and _far_x > 0:
@@ -16992,7 +16954,7 @@ class MinimapRouteRecorder:
             self._b_probe_side, self._b_probe_switched,
             self._is_monster_on_platform, self._get_monster_platform,
             self._b_lock_time, self._b_hp_confirmed, self._b_gone, _bl,
-            _attacked, _eff_up, _ydn, True, freeze_lock=_freeze,
+            _attacked, _eff_up, _ydn, False, freeze_lock=_freeze,  # 同层调试期allow_cross=False:不上下梯,超跳高带怪不参选(用户2026-09-20)
             group_priority=_gp, group_radius=_aoe,
             aoe_y_up=_ayup, aoe_y_down=_aydn, aoe_dual=_dual,
             can_strike=_in_skill, lock_tier=self._b_lock_tier,

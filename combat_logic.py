@@ -171,12 +171,14 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
                 _same_pf = False
         # 【用户2026-09-17定稿cross条件;2026-09-18修正:高度线读面板实际可达带】
         # ①X差>=300:再高也先pursue水平走近;②X<300且Y超这套打法面板可达高度=cross梯子/下跳;③可达带内一律cand。
+        _too_high = (_pool_y_up is not None and dy < -_pool_y_up)
+        _too_low = (_pool_y_down is not None and dy > _pool_y_down)
         if x_gap >= CROSS_X_MAX:
             cand.append((x_gap, cx, cy))   # X还很远,先水平走近,不判跨层
-        elif allow_cross and (
-                (_pool_y_up is not None and dy < -_pool_y_up) or      # 怪在上方、超过面板上可达高度=跳高也够不到
-                (_pool_y_down is not None and dy > _pool_y_down)):    # 怪在下方、超过面板下方技能带=够不到
-            cross.append((x_gap, cx, cy))  # 实际够不着、X<300=走梯子/下跳
+        elif _too_high or _too_low:
+            if allow_cross:
+                cross.append((x_gap, cx, cy))   # 跳高/技能够不着、X<300=走梯子/下跳(接入跨层时才开)
+            # 同层调试期 allow_cross=False:够不着的高/低层怪本帧不参选、不上梯不下跳(用户2026-09-20)
         else:
             cand.append((x_gap, cx, cy))   # 在面板可达带内:原地打/跳高打/走近
 
@@ -296,7 +298,8 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                     return _mk(('cast' if d <= cast_range else 'pursue'), (cx, cy), _dir_to(cx, px), d,
                                tier='in' if d <= cast_range else 'out')
             # 冻结目标本帧脱检：沿最后已知坐标继续cross(跨层目标本就在别的层),不落到重选、不左右横跳
-            return _mk('cross', (target_cx, target_cy), _dir_to(target_cx, px), abs(target_cx - px), cross, tier='cross')
+            if allow_cross:   # 同层调试期关cross:冻结脱检也不走梯,落pick/表空idle(用户2026-09-20)
+                return _mk('cross', (target_cx, target_cy), _dir_to(target_cx, px), abs(target_cx - px), cross, tier='cross')
 
         # === 非冻结·按"锁定类别 in/out/cross"维持 ===
         locked_in = None        # 本帧仍在同层桶cand里
@@ -317,12 +320,8 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
             if ld <= cast_range:
                 # 【in】本帧确在技能范围内(X近且Y在带):钉死站定打,打死(drop)/脱检才换,不被任何远处怪带走
                 return _mk('cast', (lx, ly), _dir_to(lx, px), ld, tier='in')
-            # 【out】同层但在范围外:仅当身边刷新"技能范围内能直打"的怪才落下方pick让位(唯一合法换锁);
-            if has_in_range:
-                pass   # 让位：落 pick_from_buckets 改打技能范围内近怪
-            else:
-                # 没有能直打的近怪 → 死咬当前目标走过去,绝不换成另一只范围外怪/另一侧(治左右横跳)
-                return _mk('pursue', (lx, ly), _dir_to(lx, px), ld, tier='out')
+            # 【out·最原始·用户2026-09-20】走近段(没进技能范围)不锁死,每帧用当帧最新怪表落pick重选最近,刷近立刻换;
+            # 技能范围内(上方cast)才锁到打死。
         elif locked_cross is not None:
             if has_in_range:
                 pass   # 跨层途中身边刷出能直打真怪 → 落 pick 先打(两类规则唯一合法换锁,对称out分支)
