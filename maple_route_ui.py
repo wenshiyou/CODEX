@@ -472,7 +472,8 @@ PERF_PROFILES = {
                    bars_s=0.20, feat_s=0.15, precise_ms=18, ui_wait_ms=15, bound_poll_ms=50),
 }
 # 推理线程/频率不在此写死:运行时按性能档+os.cpu_count()定(见_perf_val/_perf_onnx_threads),四核→少线程并自动放慢YOLO帧率,八核→多线程维持跟手
-POST_STRIKE_CHECK_MS = 450 # 攻击后反馈检测窗口(用户2026-09-11:130→450)：首次出手满450ms后才看血条/伤害判"打死没/是不是空怪";怪多/特效/掉帧(实测帧率曾掉到1-3fps)时130ms拿不到出手后稳定帧、真怪被当空怪清掉→一圈怪轮流锁左右抖;另须拿到出手之后的新帧才判,避免用出手前旧帧误丢真怪
+POST_STRIKE_CHECK_MS = 100 # 攻击后开始检测血条/伤害(用户2026-09-20:450→100):首次出手满100ms就开始看头顶血条/伤害,不再干等
+STRIKE_DEADLINE_MS = 500   # 判死截止(2026-09-20定稿):首次出手满500ms仍无血条无伤害=空怪/已死才drop;100~500ms间出现血条/伤害=打着怪
 MOVE_STALL_CHECK_MS = 1000 # 位移检测(用户2026-09-07定稿)：下令左/右移动后每这么多ms比对一次是否真移动；1秒还在原地=卡住→按住方向+跳解卡(原5000太慢)
 MOVE_MIN_DX = 10          # (旧屏幕特征判定位移,已弃用保留) 屏幕X像素门槛
 MOVE_MIN_MAP_DX = 2       # 位移检测·小地图版(用户2026-09-07)：直接用光点X判定更准,1秒窗口内光点朝移动方向走≥2个小地图单位=真在动(约合20屏幕px,抗光点抖动)
@@ -1487,8 +1488,6 @@ class MinimapRouteRecorder:
         self._combat_target_hp_confirmed = False   # 是否已确认命中过血条(空怪判定用)；combat_step直接访问，必须__init__初始化
         self._combat_target_attacked = False       # 已对锁定目标出手(打一下无血条无伤害=空怪判定用)
         self._combat_first_strike_time = 0         # 对当前锁定目标【首次】出手时间(ms)：出手后留POST_STRIKE_CHECK_MS(130ms)反馈窗口再判空怪/打死，换目标清零
-        self._combat_dropped_phantoms = []         # [(cx,cy,ms)] 最近放弃的空怪位置，短时间不再重锁，防空打死循环
-        self._combat_suppress_side = None          # ('left'/'right', 到期ms) 某侧地形过不去时短时压制该侧、改锁另一侧(用户2026-09-07)
         self._slope_high_mode = False              # 跳高打动作状态机(留主线);打空=普通空怪换一只,绝不降级cross(能不能打到只看面板跳高带)
         self._slope_high_last_jump = 0             # 跳高打最后一次起跳时刻ms(余温窗内禁向下跳,治腾空误判;用户2026-09-18)
         # === 打怪分层探测状态（350近距→500同平台一边随机→跨层）===
@@ -1666,7 +1665,6 @@ class MinimapRouteRecorder:
         self._b_lock_time = 0                # B私有:当前锁锁定时刻ms
         self._b_probe_side = random.choice([-1, 1])   # B私有:左右探测侧(决策归B)
         self._b_probe_switched = False
-        self._show_next_candidate = True    # 蒙板是否画预备怪黄框(调试可见开关,默认开)
         self._locked_box_cache = None       # 锁定怪最近检测框宽高(w,h):脱检帧红框用它补位,锁定在红框就在、不因YOLO漏帧消失
         # 世界快照仓(识别线程唯一出口)。动作权仲裁器/范围迟滞门已按用户2026-09-15整套删除:打怪/巡路一条线直连,不再有第三方劝架。
         self._snap_store = SnapshotStore()
@@ -11640,16 +11638,12 @@ class MinimapRouteRecorder:
                                 # 宽高补位),锁定在红框就在。预备怪next另画黄框。
                                 _locked_t = data.get('locked_target')
                                 _locked_rect = data.get('locked_rect')
-                                _next_p = data.get('next_target')
                                 green_pen = gdi32.CreatePen(0, 2, 0x00FF00)
                                 red_pen = gdi32.CreatePen(0, 3, 0x0000FF)
-                                yellow_pen = gdi32.CreatePen(0, 2, 0x00FFFF)
                                 if green_pen:
                                     gdi_objs.append(green_pen)
                                 if red_pen:
                                     gdi_objs.append(red_pen)
-                                if yellow_pen:
-                                    gdi_objs.append(yellow_pen)
                                 null_brush = gdi32.GetStockObject(5)
                                 old_brush = gdi32.SelectObject(hdc, null_brush)
                                 # 绿框+连线:所有未锁定怪(锁定那只跳过留给红框,避免红绿重影)
@@ -11672,13 +11666,6 @@ class MinimapRouteRecorder:
                                     gdi32.LineTo(hdc, _lcx, _locked_rect[3])
                                     gdi32.Rectangle(hdc, int(_locked_rect[0]), int(_locked_rect[1]),
                                                     int(_locked_rect[2]), int(_locked_rect[3]))
-                                # 预备怪next:黄色小空心框(调试可见、不连线);与current重合则不画
-                                if data.get('show_next') and _next_p and not (
-                                        _locked_t and abs(_next_p[0] - _locked_t[0]) <= 40
-                                        and abs(_next_p[1] - _locked_t[1]) <= 50):
-                                    gdi32.SelectObject(hdc, yellow_pen)
-                                    gdi32.Rectangle(hdc, int(_next_p[0]) - 22, int(_next_p[1]) - 64,
-                                                    int(_next_p[0]) + 22, int(_next_p[1]))
                                 gdi32.SelectObject(hdc, old_pen)
                                 gdi32.SelectObject(hdc, old_brush)
                                 # ===== 梯子框(用户2026-09-11定稿):所有真实梯子先画细白框;选中哪把,哪把白框消失、原地转红框 =====
@@ -13602,7 +13589,8 @@ class MinimapRouteRecorder:
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
                                 cv2.getStructuringElement(cv2.MORPH_RECT, (7, 2)))
         bars = []
-        areas = search_areas if search_areas else [(0, 0, w, h)]
+        # 用户2026-09-20:删除全屏退化——没传区域/没怪就不扫,全屏血条多是别的玩家打的,无意义
+        areas = search_areas or []
         for (sx1, sy1, sx2, sy2) in areas:
             sx1, sy1 = max(0, sx1), max(0, sy1)
             sx2, sy2 = min(w, sx2), min(h, sy2)
@@ -13672,8 +13660,8 @@ class MinimapRouteRecorder:
         # （样本红簇约占彩色27%；绿血条/橙金场景/蓝背景的红簇≈0，实测≤22）。故以红簇为锚，
         # 再要求橙黄主体够量——两者同时满足才可能是数字，从根上杜绝把暖色背景/血条当伤害。
         hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        m_red = cv2.inRange(hsv, np.array([0, 70, 70]),  np.array([12, 255, 255]))   # 红(描边/阴影)
-        m_org = cv2.inRange(hsv, np.array([14, 70, 70]), np.array([35, 255, 255]))   # 橙黄(主体)
+        m_red = cv2.inRange(hsv, np.array([0, 70, 70]),  np.array([18, 255, 255]))   # 红橙渐变(用户2026-09-20:0-12→0-18,覆盖99的橙红)
+        m_org = cv2.inRange(hsv, np.array([10, 70, 70]), np.array([35, 255, 255]))  # 橙黄主体(137黄)
         n_red, n_org = int(np.sum(m_red > 0)), int(np.sum(m_org > 0))
         if n_red < 80 or n_org < 70:
             return False  # 红簇不足=暖色背景/绿血条，不是伤害数字
@@ -15627,16 +15615,8 @@ class MinimapRouteRecorder:
         return True
 
     def _abort_unreachable_target(self, cx, cy, now, why=""):
-        """防卡死(用户2026-09-07)：连续想走却走不动/靠近300跑跳仍上不去=当前锁定怪打不到/地形过不去，放弃它并强制下帧改锁最近的怪。
-        - 该位置加入空怪去重列表(3秒内不再重锁同一只,避免drop又立刻选回原地死循环)；
-        - 同时短时压制"这一侧"(用户2026-09-07：右边过不去就放弃右边整侧、直接锁左边的怪),由_filter_dropped_phantoms剔除；
-        - 清锁定/移动/高坡相位，松开方向键，下帧 combat_step 从另一侧剩余怪里重选X最近且Y达标者。"""
-        self._combat_dropped_phantoms.append((cx, cy, now))
-        _pp = getattr(self, '_player_screen_pos', None)
-        if _pp is not None:
-            _side = 'right' if cx >= _pp[0] else 'left'
-            self._combat_suppress_side = (_side, now + 3000)  # 3秒内不锁该侧怪(到点_filter自动失效)
-            _debug_log("[防卡死] 压制%s侧3秒(地形过不去)" % _side)
+        # 防卡死:连续想走却走不动/跑跳仍上不去=目标打不到,放弃它;清锁定+移动相位+松键,下帧按纯最近重选。
+        # (用户2026-09-20:不再把位置拉黑1秒、不再压制整侧3秒,避免同屏近怪被黑名单/压制吞掉导致有怪不锁。)
         self._combat_locked_target = None
         self._combat_target_attacked = False
         self._combat_first_strike_time = 0
@@ -15646,7 +15626,7 @@ class MinimapRouteRecorder:
         self._slope_high_mode = False
         self._release_combat_move()
         self._slope_high_last_jump = 0
-        _debug_log("[防卡死] 连续移动受阻(%s)，判定目标(%d,%d)打不到→放弃，下帧改锁另一侧最近怪" % (why or "卡住", cx, cy))
+        _debug_log("[防卡死] 连续移动受阻(%s)，判定目标(%d,%d)打不到→放弃，下帧纯最近重选" % (why or "卡住", cx, cy))
 
     def _single_home_platform(self):
         """掉台归位只在【只勾选一个平台=单台锁定】时启用，返回该home平台对象；
@@ -16200,58 +16180,6 @@ class MinimapRouteRecorder:
         return True
 
 
-    def _filter_dropped_phantoms(self, monsters):
-        """剔除两类怪，避免死循环/原地卡：
-        ①最近被判定空怪/已放弃位置±60px内的怪(打一下无血条无伤害→drop,1秒不重锁,用户2026-09-18)；
-        ②被短时压制的那一侧怪(用户2026-09-07：某侧地形过不去,3秒内不锁该侧、改锁另一侧,到期自动恢复)。"""
-        if not monsters:
-            return monsters
-        now_ms = time.time() * 1000
-        # 只保留近1秒内的空怪记录(用户2026-09-18:空怪拉黑1秒就换下一只,不蹲5秒)
-        self._combat_dropped_phantoms = [(cx, cy, t) for (cx, cy, t) in self._combat_dropped_phantoms
-                                         if now_ms - t < 1000]
-        # 被压制侧到期清除
-        if self._combat_suppress_side is not None and now_ms >= self._combat_suppress_side[1]:
-            self._combat_suppress_side = None
-        _ss = self._combat_suppress_side
-        _ppx = self._player_screen_pos[0] if self._player_screen_pos else None
-        if not self._combat_dropped_phantoms and not (_ss and _ppx is not None):
-            return monsters
-        out = []
-        for (x1, y1, x2, y2, score) in monsters:
-            cx = (x1 + x2) // 2
-            cy = y2
-            near = False
-            for (dx, dy, _t) in self._combat_dropped_phantoms:
-                if abs(cx - dx) <= 60 and abs(cy - dy) <= 60:
-                    near = True
-                    break
-            # 被压制侧：怪相对人物在该侧(右=怪X≥人X)则本帧不锁
-            side_blocked = bool(_ss and _ppx is not None
-                                and (('right' if cx >= _ppx else 'left') == _ss[0]))
-            if not near and not side_blocked:
-                out.append((x1, y1, x2, y2, score))
-        return out
-
-    def _phantom_filter_readonly(self, monsters, px):
-        """【阶段二·B线程只读】按当前空怪1秒黑名单+压制侧剔除候选,不清理不append
-        (过期清理/写入都归主线_filter,避免两线程同改一个list)。px=人物X(判压制侧左右)。"""
-        if not monsters or px is None:
-            return monsters
-        _now_ms = time.time() * 1000
-        _ph = list(self._combat_dropped_phantoms)
-        _ss = self._combat_suppress_side
-        out = []
-        for (x1, y1, x2, y2, score) in monsters:
-            cx = (x1 + x2) // 2
-            cy = y2
-            near = any(abs(cx - dx) <= 60 and abs(cy - dy) <= 60 for (dx, dy, _t) in _ph)
-            _side = 'right' if cx >= px else 'left'
-            side_blocked = bool(_ss and _now_ms < _ss[1] and _side == _ss[0])
-            if not near and not side_blocked:
-                out.append((x1, y1, x2, y2, score))
-        return out
-
     def _merge_detections(self, yolo_monsters, feature_monsters):
         """合并YOLO+怪物特征匹配结果，去重(距离太近保留置信度高的)。返回 [(x1,y1,x2,y2,score)]"""
         _all_m = list(yolo_monsters) + list(feature_monsters)
@@ -16737,7 +16665,7 @@ class MinimapRouteRecorder:
                                             min(_frame.shape[1], _tx + 50), min(_frame.shape[0], _ty + 10)))
                     if _now_det - self._bars_last_t >= self._perf_val('bars_s'):
                         _tb0 = time.time()
-                        self._bars_cache = self._detect_monster_hp_bars(_frame, _search if _search else None)
+                        self._bars_cache = self._detect_monster_hp_bars(_frame, _search)  # 用户2026-09-20:只扫技能范围内怪头顶,没怪_search=空→不扫
                         _dt_bars += time.time() - _tb0
                         self._bars_last_t = _now_det
                     _bars = self._bars_cache
@@ -16895,7 +16823,7 @@ class MinimapRouteRecorder:
         """【阶段二·B识别线程=锁怪唯一脑子】每检测轮跑完整目标生命周期(选/维持/判死/同帧重选),
         原子写 _combat_decision_packet,主线只读它执行、永不自己选怪。B永不发键;出手事实由主线经
         _combat_exec_feedback 回传,血条/伤害数字由B在本检测帧感知。
-        跳高打空(怪在面板跳高带内、出手后无血条无伤)=普通空怪drop、1秒黑名单换一只,绝不降级cross;
+        跳高打空(怪在面板跳高带内、出手后无血条无伤)=普通空怪drop、当帧重选最近一只,绝不降级cross;
         能不能跳高打到只由面板跳高Y范围决定(用户2026-09-18)。"""
         if ch is None or not merged:
             self._b_lock = None
@@ -16925,40 +16853,42 @@ class MinimapRouteRecorder:
         _far_x = max(50, int(fc.get("far_range_x", COMBAT_FAR_RANGE) or COMBAT_FAR_RANGE))
         _gp = bool(fc.get("group_priority"))
         _dual = bool(fc.get("aoe_dual"))
-        # 空怪1秒黑名单+压制侧:只读过滤候选(清理/append归主线,避免两线程同改list)
-        _cand = self._phantom_filter_readonly(list(merged), px)
+        _cand = list(merged)   # 纯最近(2026-09-20):不黑名单/不压制删怪,当帧检出全留,真假靠出手后无血无伤判死
         # 主线出手反馈→必须与当前b_lock是同一只(±40X/±50Y)才算数,防换目标后旧出手污染新怪
         _bl = self._b_lock
         _fb = getattr(self, '_combat_exec_feedback', None)
         _attacked = False
+        _detect_open = False   # 用户2026-09-20:100ms开始看伤害数字(判死仍走500ms截止)
         if _bl is not None and _fb and _fb.get('pos'):
             _fpos = _fb['pos']
             if abs(_fpos[0] - _bl[0]) <= 40 and abs(_fpos[1] - _bl[1]) <= 50:
                 _first = _fb.get('first', 0) or 0
-                # 过POST_STRIKE反馈窗才判(本轮处理的帧时间在出手之后=出手后新帧,杜绝拿旧帧误杀真怪)
-                if _first and now_ms >= _first and (now_ms - _first) > POST_STRIKE_CHECK_MS:
+                _el = now_ms - _first
+                # 用户2026-09-20:100ms起开始看血条/伤害(检测门);满500ms仍无血无伤才判死(判死门)
+                if _first and now_ms >= _first and _el > POST_STRIKE_CHECK_MS:
+                    _detect_open = True
+                if _first and now_ms >= _first and _el > STRIKE_DEADLINE_MS:
                     _attacked = True
         # can_strike=锁在停步线+主攻Y带(真打得到);只有成立时才用"无血无伤"判死
         _in_skill = bool(_bl) and abs(_bl[0] - px) <= _stop and -_yup <= (_bl[1] - py) <= _ydn
         _has_dmg = False
-        if _in_skill and _attacked:
+        if _in_skill and _detect_open:
             try:
                 _has_dmg = self._detect_damage_number(_bl[0], _bl[1], frame=frame, monsters=merged)
             except Exception as _e:
                 _debug_log("[B决策] 伤害数字检测异常: %s" % _e)
                 _has_dmg = False
-        _freeze = self._is_lock_frozen()
         _dl = combat_logic.combat_step(
             now_ms, px, py, _cand, self._selected_platforms, _skr, _aoe, _far_x,
             _bl, bars, _has_dmg, True, True,
             self._b_probe_side, self._b_probe_switched,
             self._is_monster_on_platform, self._get_monster_platform,
-            self._b_lock_time, self._b_hp_confirmed, self._b_gone, _bl,
-            _attacked, _eff_up, _ydn, False, freeze_lock=_freeze,  # 同层调试期allow_cross=False:不上下梯,超跳高带怪不参选(用户2026-09-20)
+            self._b_lock_time, self._b_hp_confirmed, self._b_gone, None,  # cur_cross同层传None:脱检不续cross(此前错传当前锁_bl致续命条件恒真→漏帧误cross呆住);未来跨层才传真cross目标
+            _attacked, _eff_up, _ydn, False, freeze_lock=False,  # 同层调试期allow_cross=False:不上下梯,超跳高带怪不参选(用户2026-09-20)
             group_priority=_gp, group_radius=_aoe,
             aoe_y_up=_ayup, aoe_y_down=_aydn, aoe_dual=_dual,
             can_strike=_in_skill, lock_tier=self._b_lock_tier,
-            same_platform_fn=None, metric=metric, fallback_next=None)
+            same_platform_fn=None, metric=metric)
         # B锁生命周期回存
         self._b_hp_confirmed = _dl['hp_confirmed']
         self._b_gone = _dl['gone_frames']
@@ -16985,23 +16915,11 @@ class MinimapRouteRecorder:
         if _drop:
             self._yolo_last_t = 0.0
             self._bars_last_t = 0.0
-        # 备胎next给蒙板黄框(current活着时);current死当帧combat_step已全表重选、0等待接手
-        _nxt = None
-        if _tgt is not None and not _drop:
-            try:
-                _nd = combat_logic.pick_next(
-                    px, py, list(_cand), self._selected_platforms, _skr,
-                    self._get_monster_platform, _eff_up, _ydn, _gp, _aoe,
-                    _ayup, _aydn, _dual, True, metric=metric, same_platform_fn=None,
-                    exclude=_tgt, cur_cross=_tgt)
-                _nxt = _nd.get('target')
-            except Exception:
-                _nxt = None
         self._combat_decision_packet = {
             'target': _tgt, 'state': _dl.get('state'), 'tier': _dl.get('tier'),
             'dist': _dl.get('dist'), 'cross_candidates': _dl.get('cross_candidates'),
-            'group': _dl.get('group'), 'next': _nxt,
-            'drop': _drop, 'drop_pos': _dl.get('drop_pos'),
+            'group': _dl.get('group'),
+            'drop': _drop,
             'new_target': _new_target, 'alive': _dl.get('alive'),
             'hp_confirmed': _dl['hp_confirmed'], 'gone': _dl['gone_frames'],
             'has_dmg': _has_dmg, 'attacked': _attacked, 'in_skill': _in_skill,
@@ -17318,14 +17236,15 @@ class MinimapRouteRecorder:
         target = (t_dist, t_cx, t_cy)
         self._combat_locked_target = (t_cx, t_cy)
         self._combat_last_target_pos = (t_cx, t_cy)
-        # --- drop善后(动作层):B判死,主线把旧坐标拉黑1秒+清出手反馈+上屏;跳高打空也走这(=普通空怪,不降级cross) ---
+        # --- drop善后(动作层):B判死,主线只清出手反馈+上屏+当帧重选(纯最近不拉黑位置);跳高打空也走这(=普通空怪,不降级cross) ---
         if _dl.get('drop'):
-            _dpos = _dl.get('drop_pos') or (t_cx, t_cy)
-            self._combat_dropped_phantoms.append((_dpos[0], _dpos[1], now))
-            self._note_phantom_drop('空怪')
+            self._note_phantom_drop('空怪')   # 纯最近(2026-09-20):判死只放手当帧重选,不再拉黑位置
             self._combat_target_attacked = False
             self._combat_first_strike_time = 0
             self._combat_exec_feedback = None
+            # 用户2026-09-20:打完/空怪干净利落收势——松战斗套(动态遍历_held_keys=面板设定攻击键,不写死)+巡路套全部键,再进下一只
+            self._release_combat_move()
+            self._release_all_keys()
             self._rlog("怪无血条/无伤害(已死或假怪),放弃并重新锁怪", LOG_RED)
         # --- 新目标:动作层重置出手反馈/跳高节奏/上屏(选怪权在B,这里只管执行侧状态不选怪) ---
         if _dl.get('new_target'):
@@ -17369,9 +17288,13 @@ class MinimapRouteRecorder:
         # 空怪诊断(1s,全从B决策包读)
         if not hasattr(self, '_kong_last') or now - self._kong_last > 1000:
             self._kong_last = now
-            _debug_log("[空怪诊断] 状态=%s 活着=%s drop=%s 伤害=%s 已出手=%s 确认血=%s gone=%d 血条数=%d" % (
+            _near_hp = 0
+            for (_bx,_by,_bw,_bh) in (self._monster_hp_bars or []):
+                if abs((_bx+_bw/2)-t_cx) < 35 and abs((_by+_bh/2)-t_cy) < 45:
+                    _near_hp += 1
+            _debug_log("[空怪诊断] 状态=%s 活着=%s drop=%s 伤害=%s 已出手=%s 确认血=%s | 锁怪=(%d,%d) 血条数=%d" % (
                 _dl['state'], _dl.get('alive'), _dl.get('drop'), _dl.get('has_dmg'),
-                _dl.get('attacked'), _dl.get('hp_confirmed'), _dl.get('gone'), len(self._monster_hp_bars)))
+                _dl.get('attacked'), _dl.get('hp_confirmed'), t_cx, t_cy, len(self._monster_hp_bars)))
 
         # === 跨层两档(用户2026-09-19主线合并,同一帧唯一司机) ===
         # 硬档(已起跳post_jump/校准realign/爬梯climbing/下跳descend):帧首唯一硬闸独占,本帧只_transit_step爬梯,
@@ -18027,10 +17950,10 @@ class MinimapRouteRecorder:
                         if _mpkt is not None:
                             _rmons, _rmetric = _mpkt
                             self._monsters_metric = _rmetric
-                            self._monsters = self._filter_dropped_phantoms(list(_rmons))
+                            self._monsters = list(_rmons)
                         else:
                             self._monsters_metric = {}
-                            self._monsters = self._filter_dropped_phantoms(list(self._raw_monsters))
+                            self._monsters = list(self._raw_monsters)
                         _t3 = time.time()
                         self._fps_char_time += (_t3 - _t2)  # 读后台结果耗时（原人物匹配耗时）
                         # 蒙板重绘节流(2026-09-07 CPU优化)：原每帧InvalidateRect→WM_PAINT高达30次/秒，
@@ -18381,7 +18304,6 @@ class MinimapRouteRecorder:
             if not self._running:
                 self._monster_overlay_data["ladder_sel"] = None
                 self._monster_overlay_data["ladder_rect"] = None
-                self._monster_overlay_data["next_target"] = None
                 self._monster_overlay_data["locked_rect"] = None
             _now_sync = time.time()
             if not hasattr(self, '_last_monster_sync_log') or _now_sync - self._last_monster_sync_log > 2:
@@ -18412,9 +18334,6 @@ class MinimapRouteRecorder:
                         # 【阶段一】红框按锁定坐标直画(脱检也在,修"打怪正常但红框经常不显示");预备怪next下发黄框
                         self._monster_overlay_data["locked_rect"] = self._compute_locked_rect(
                             self._monster_overlay_data["locked_target"])
-                    _dlpkt_o = getattr(self, '_combat_decision_packet', None)
-                    self._monster_overlay_data["next_target"] = (_dlpkt_o.get('next') if _dlpkt_o else None)
-                    self._monster_overlay_data["show_next"] = bool(getattr(self, '_show_next_candidate', True))
                     # === 梯子选框(用户2026-09-15:不锁定,每帧实时选) ===
                     # 白框【下发蒙板】已挪到常开层(不按运行也显示,便于肉眼检查检测稳不稳);运行态这里只取最新白框供下面实时选梯
                     _now_lm = time.time() * 1000
