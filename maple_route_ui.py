@@ -1665,6 +1665,7 @@ class MinimapRouteRecorder:
         self._b_hp_confirmed = False         # B私有:当前锁是否已见血条
         self._b_gone = 0                     # B私有:连续无血条帧
         self._b_lock_time = 0                # B私有:当前锁锁定时刻ms
+        self._b_lock_enabled = True          # B锁怪总开关(用户2026-09-21):False=停锁怪决策并当场清已锁+不出包;识怪(YOLO/怪表/血条快照)在锁怪闸之前独立常跑、永不停(识怪与锁怪分开设置)
         self._b_probe_side = random.choice([-1, 1])   # B私有:左右探测侧(决策归B)
         self._b_probe_switched = False
         self._locked_box_cache = None       # 锁定怪最近检测框宽高(w,h):脱检帧红框用它补位,锁定在红框就在、不因YOLO漏帧消失
@@ -14839,6 +14840,25 @@ class MinimapRouteRecorder:
             return True
         return False
 
+    def _set_b_lock_enabled(self, on, why=''):
+        """B锁怪总开关(用户2026-09-21),与识怪彻底分开:只控锁怪决策,绝不影响YOLO识怪/怪表/血条快照(那些在锁怪闸之前常跑)。
+        on=False 停止锁怪并【当场】清掉已锁一整套(锁/类别/确认/决策包/出手反馈),主线当帧即不再打旧目标,不必等B下一帧;
+        on=True  恢复锁怪,不清场,B下一帧用一直热着的怪表立即重锁。返回是否发生了切换。"""
+        on = bool(on)
+        if on == getattr(self, '_b_lock_enabled', True):
+            return False
+        self._b_lock_enabled = on
+        if not on:
+            self._b_lock = None; self._b_lock_tier = None
+            self._b_hp_confirmed = False; self._b_gone = 0; self._b_lock_time = 0
+            self._combat_decision_packet = None; self._combat_exec_feedback = None
+            _debug_log("[锁怪开关] 关闭锁怪并清已锁(原因=%s);识怪/怪表/血条照常" % (why or '?'))
+            self._rlog("关闭锁怪·清已锁(%s)" % (why or '?'), log='behavior')
+        else:
+            _debug_log("[锁怪开关] 恢复锁怪(原因=%s);B下帧用热怪表重锁,识怪未停过" % (why or '?'))
+            self._rlog("恢复锁怪(%s)" % (why or '?'), log='behavior')
+        return True
+
 
     def _set_combat_move(self, direction, allow_in_transit=False):
         """设置持续移动方向，direction='left'/'right'/None。流畅切换不卡顿。
@@ -16764,7 +16784,7 @@ class MinimapRouteRecorder:
                     # 【阶段一】B线程同帧算预备怪next(纯看和选、不发键),current一死主线同帧晋升,根治"打完一波发呆几秒"
                     # 【阶段二】B线程跑完整锁怪决策(选/维持/判死/同帧重选),原子发布决策包;纯看不发键;关怪扫/上梯精准模式不跑
                     try:
-                        if self._is_lock_frozen() or int(time.time() * 1000) < getattr(self, '_arrival_relock_until', 0):  # 再叠到顶/下跳落地重锁保护窗(下跳=进descend+2秒):窗内同样清锁不出包、怪表照刷,落稳零等待重锁(用户2026-09-19)
+                        if (not getattr(self, '_b_lock_enabled', True)) or self._is_lock_frozen() or int(time.time() * 1000) < getattr(self, '_arrival_relock_until', 0):  # 锁怪总开关关=清锁不出包(识怪/怪表/血条照跑,与锁怪分开);或硬冻/到顶下跳重锁保护窗:窗内清锁不出包、怪表照刷,落稳零等待重锁
                             # 硬冻(已起跳/校准/爬梯/下跳):识别与怪表照刷(上面_raw已更新),但清锁定、不出打怪目标,
                             # 主线帧首硬闸一心爬梯绝不锁怪;到顶/失败解冻后B下一帧用一直热着的新层怪表立即重锁、零等待
                             self._b_lock = None; self._b_lock_tier = None
