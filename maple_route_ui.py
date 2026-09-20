@@ -383,6 +383,8 @@ ROLE_ANCHORS = [
 ]
 ROLE_ANCHOR_KEYS = [_a[0] for _a in ROLE_ANCHORS]
 ROLE_OFF_LEARN_THR = 0.45  # 脸/后脑学"→人名基点"偏移的最低分(用户2026-09-18):同帧人名已过阈锚定真人,脸/后脑有0.45以上可信命中即可量几何差,不必也过定位阈值0.62(实测脸分常0.56~0.62)
+AUX_ANCHOR_MAX_MOVE = 80   # 脸/后脑/宠物这些【兜底锚点】映射点相对上一可信基点的最大合法跳变px(用户2026-09-20):兜底锚点误匹配多,不能像人名那样允许maxmove=250的瞬移,>80且弱匹配(<0.75)即当误匹配丢弃,全图重搜帧也生效
+ANCHOR_OFF_LEARN_MAXDEV = 70  # 脸/后脑学"→人名"偏移时,新量几何差与已学/固化偏移允许的最大偏离px(用户2026-09-20):超过=锚点本帧误匹配在人名外、丢弃不学,锁死固化几何(实测误匹配偏离可达134px,正常帧间抖动<30)
 # 跟踪参数默认值(默认写死,角色识别面板可调、自动存盘)
 ROLE_TRACK_DEFAULT = {
     "fps": 24,         # 每秒跟踪次数
@@ -657,6 +659,7 @@ LADDER_REALIGN_NO_TPL_MS = 1200   # 校准直跳里连续多久拿不到梯子�
 #   抓住=起跳后连续2帧看到后脑;到顶=climbing中连续500ms看不到后脑(已翻出台子,再补按↑LADDER_TOP_HOLD_MS翻稳),
 #   小地图光点重合梯端+录梯时长超时仅作兜底;卡住=后脑在梯但小地图光点Y连续2s不动→监管线程只置令、主线climbing非阻塞横跳解卡)。仅上梯direction>0生效 ===
 BACK_ON_LADDER_THR = 0.55       # 后脑勺"在梯子上"分数阈(定位thr约0.62,在梯判定单独0.55;真机看[爬梯·后脑]日志分数再微调)
+NAME_ONLY_AFTER_CLIMB_MS = 800  # 跨层结束(到顶/落地/失败回主线)后多少ms内人物定位只认人名(用户2026-09-20):翻台瞬间脸/后脑/宠物最易误匹配把坐标拽飞,短窗只认最稳的人名
 BACK_GRAB_FRAMES = 2            # 起跳后连续几帧看到后脑=抓住梯子(抗单帧误检)
 BACK_TOP_LOST_MS = 333          # climbing中连续多久看不到后脑=翻出平台到顶(用户2026-09-19:500→333缩短1/3留2/3,治上梯到顶发呆;低帧率实测旧值常拖到574~836ms)
 LADDER_STUCK_MS = 2000          # 卡住:后脑在梯且光点Y连续多久不动(小地图系)
@@ -4857,6 +4860,7 @@ class MinimapRouteRecorder:
         if VK_RIGHT in self._random_move_keys:
             self._key_up(VK_RIGHT)
         self._climb_state = "none"
+        self._name_only_until = time.time() * 1000 + NAME_ONLY_AFTER_CLIMB_MS  # 跨层结束短窗只认人名,防翻台锚点误匹配拽飞坐标(用户2026-09-20)
         self._ladder_precise_mode = False   # 退出上梯:检测线程恢复正常120ms全检测档(用户2026-09-10方案B)
         self._ladder_snap_x = None          # 出梯清空选中梯屏幕X,下把重新就近选(用户2026-09-15)
         self._ladder_lock = None            # 出梯清"锁定梯身份"(用户2026-09-15锁像素块不锁位置)
@@ -14435,8 +14439,15 @@ class MinimapRouteRecorder:
                 _locstr("name"), _locstr("face_r"), _locstr("back")))
         # 定位仲裁:人名优先;人名丢了用脸/后脑里分高者兜底(谁分高谁更可能是真角色),不让定位框丢
         _nv = got.get("name")
+        # 爬梯硬态(to_ladder对位/climbing在爬)及跨层结束短窗只认人名(用户2026-09-20):这些姿势脸/后脑/宠物最易误匹配,
+        # 一旦兜底会把坐标拽飞(实测到顶后脑误命中把人X 953拽到1184→B误判下层、无锁空跳下台)。人名丢本帧_cand留空→返回None等下一帧;
+        # 后脑到顶检测_back_head_visible独立读_role_last_scores(照常写),不受此影响。
+        _name_only = (getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')) \
+            or (now < getattr(self, '_name_only_until', 0))
         if _nv is not None and _nv[0] >= thr:
             _cand = [("name", _nv)]
+        elif _name_only:
+            _cand = []
         else:
             # 人名丢→脸/后脑/宠物名里谁过阈且分最高谁兜底(宠物是最后一道,人名脸后脑都没时顶上)
             _cand = sorted(((kk, got[kk]) for kk in _AUX if kk in got and got[kk][0] >= thr),
@@ -14445,12 +14456,23 @@ class MinimapRouteRecorder:
         # 于是所有源的【实际基点】统一在人名位置、打怪不上下跳;但各锚点橙框仍画在命中原位(显示不动)。
         # 人名在时只给脸/后脑学"→人名中心"偏移(EMA);宠物在人左右位置不固定、无法学固定偏移,故宠物不偏移、兜底时直接用其命中点
         _nloc = _nv[1] if (_nv is not None and _nv[0] >= thr) else None
+        # 偏移学习姿势门控(用户2026-09-20,根治off_back被平地误匹配从固化240污染成~14、到顶坐标飞到1184):
+        # 后脑back只在人物真在梯子上爬(_climb_state==climbing,后脑姿势真实)才学"→人名"偏移;平地/到顶/特效帧后脑在别处误匹配绝不学。
+        # 脸face_r只在非爬梯硬态(climb_state==none,平地打怪脸几何稳定)学;爬梯/下跳姿势脸会变形不学。
+        _climb_st_learn = getattr(self, '_climb_state', 'none')
+        _learn_anchor_on = {"face_r": (_climb_st_learn == "none"),
+                            "back": (_climb_st_learn == "climbing")}
         for _kk in ("face_r", "back"):
             _g = got.get(_kk)
-            # 人名在(已锚定真人)时,脸/后脑只要有≥学习门限的可信命中(低于定位阈值0.62也可,实测脸分常0.56~0.62)就量"→人名"几何偏移,同帧人名兜底不怕量错
-            if _nloc is not None and _g is not None and _g[0] >= ROLE_OFF_LEARN_THR and _g[1] is not None:
+            # 人名在(已锚定真人)+姿势门控通过时,锚点有≥学习门限可信命中才量"→人名"几何偏移
+            if (_nloc is not None and _g is not None and _g[0] >= ROLE_OFF_LEARN_THR and _g[1] is not None
+                    and _learn_anchor_on.get(_kk, False)):
                 _dx, _dy = _nloc[0] - _g[1][0], _nloc[1] - _g[1][1]
                 _o = tr.get("off_" + _kk)
+                # 几何合理性门控(用户2026-09-20取证补):姿势门控过了锚点仍可能低分误匹配在人名外(实测平地face 0.54命中点离人名134px)
+                # 已有偏移时,新样本与现偏移相差>ANCHOR_OFF_LEARN_MAXDEV即判本帧误匹配、丢弃不学,锁死固化几何;冷启动(无偏移)首帧仍采用,之后由门控+EMA收敛。
+                if _o is not None and np.hypot(_dx - _o[0], _dy - _o[1]) > ANCHOR_OFF_LEARN_MAXDEV:
+                    continue
                 if _o is None:
                     tr["off_" + _kk] = [float(_dx), float(_dy)]; tr["off_n_" + _kk] = 1
                 else:  # EMA平滑,避免单帧抖动让基点飘
@@ -14485,10 +14507,12 @@ class MinimapRouteRecorder:
                     _bx, _by = float(last[0]), float(last[1])
                 else:
                     _bx, _by = float(_ploc[0]), float(_ploc[1])
-            # 局部窗内离上一基点跳变>maxmove:弱匹配(<0.75)当误匹配丢弃;≥0.75强匹配=合法瞬移直接采信(背景假分到不了0.75)
-            if last is not None and not need_full \
-                    and np.hypot(_bx - last[0], _by - last[1]) > maxmove and _pv[0] < 0.75:
-                continue
+            # 跳变门(用户2026-09-20收紧治兜底锚点拽飞):人名name保留原规则(局部窗跳变>maxmove且弱匹配<0.75才丢,全图重搜/强匹配=合法瞬移放行);
+            # 脸/后脑/宠物兜底锚点误匹配多,用独立小阈值AUX_ANCHOR_MAX_MOVE(80px)且【不分局部/全图帧都查】(全图重搜也不许兜底锚点一帧瞬移>80),仅≥0.75强匹配放行。
+            if last is not None and _pv[0] < 0.75:
+                _move_lim = maxmove if _pk == "name" else AUX_ANCHOR_MAX_MOVE
+                if np.hypot(_bx - last[0], _by - last[1]) > _move_lim and (_pk != "name" or not need_full):
+                    continue
             _pick = (_pk, _pv, _bx, _by); break
         if _pick is not None:
             _pk, (ps, _srcloc, _pf0), axf, ayf = _pick
@@ -16066,6 +16090,12 @@ class MinimapRouteRecorder:
             self._trans_stall_diag('no_pos(人物小地图/屏幕坐标缺失,多为人物特征没匹配上)', now,
                                    map_pos=self._player_map_pos, screen_pos=self._player_screen_pos)
             return False
+        # 跨层(上梯/下跳/选台/walk)是不可逆大动作,只准人名name坐标驱动(用户2026-09-20):脸/后脑/宠物兜底坐标可能误匹配偏几十~几百px,
+        # 会把同层怪dy算反→误判下层、无锁空跳下台。坐标源不是name本帧不跨层(普通打/追同层怪不受影响),松手等下一帧人名。
+        if getattr(self, '_role_pos_src', 'name') != 'name':
+            self._trans_stall_diag('cross_wait_name(坐标源=%s非人名,本帧不跨层防误跳)' % getattr(self, '_role_pos_src', '?'), now)
+            self._release_move_conflicts()
+            return False
         mpx, mpy = self._player_map_pos
         spx, spy = self._player_screen_pos
         if getattr(self, '_climb_fail_pause_until', 0) and now < self._climb_fail_pause_until:
@@ -16153,11 +16183,11 @@ class MinimapRouteRecorder:
             going_up = fy < spy
             if going_up:
                 self._enter_to_ladder_up(mpx, mpy, now, fx, fy)  # fx,fy=目标怪屏幕坐标,冻结作"怪→梯→人两段总距离最短"选梯固定参照
-                print("[跨层] 上层怪(屏幕人Y%.0f 怪Y%.0f),进纯屏幕上梯段" % (spy, fy))
+                _debug_log("[跨层] 上层怪 人=(%.0f,%.0f) 怪=(%.0f,%.0f) 源=%s,进纯屏幕上梯段" % (spx, spy, fx, fy, getattr(self, '_role_pos_src', '?')))
             else:
                 self._reset_climb()
                 self._enter_descend(mpx, mpy + 1, mpx, mpy, now)  # 横跳下台;方式一不用target值,仅表方向向下
-                print("[跨层] 下层怪(屏幕人Y%.0f 怪Y%.0f),进descend横跳段" % (spy, fy))
+                _debug_log("[跨层] 下层怪 人=(%.0f,%.0f) 怪=(%.0f,%.0f) 源=%s,进descend横跳段" % (spx, spy, fx, fy, getattr(self, '_role_pos_src', '?')))
             return True
         # 选台模式:目标=录制台点(真实小地图坐标),state保持none交_transit_step选台分支(水平脚+跨层状态机)
         self._ladder_precise_mode = True
@@ -18361,8 +18391,13 @@ class MinimapRouteRecorder:
             # 白框由识别B线程(运行态)/人物线程(停止态)互斥扫描写_lad_marks_cache,这里只读下发;停止态没有"选中",清掉残留红框
             if not hasattr(self, '_lad_marks_cache'):
                 self._lad_marks_cache = []
-            # 全部梯子白框都下发显示(不隐藏/不禁任何候选);选中那把另由 ladder_sel 红框标出(用户2026-09-15:不能把别的梯禁掉)
-            self._monster_overlay_data["ladder_marks"] = [(c[0], c[1], (c[3] if len(c) > 3 else None)) for c in self._lad_marks_cache]  # 下发(cx,cy,模板序号)
+            # 白框显示(用户2026-09-20):未锁定/停止态下发全部候选(停止态靠全白框检查检测质量);一旦锁定某把梯(_ladder_lock非空),
+            # 备选白框全部清空、屏幕只留 ladder_sel 红框(避免多把白框干扰/像另一把还锁着);出梯/掉锁 _ladder_lock 回None即恢复全白框重选。
+            # 只改显示层:内部跟踪仍直接读 _lad_marks_cache 全量数据,不受影响。
+            if self._running and getattr(self, '_ladder_lock', None) is not None:
+                self._monster_overlay_data["ladder_marks"] = []
+            else:
+                self._monster_overlay_data["ladder_marks"] = [(c[0], c[1], (c[3] if len(c) > 3 else None)) for c in self._lad_marks_cache]  # 下发(cx,cy,模板序号)
             if not self._running:
                 self._monster_overlay_data["ladder_sel"] = None
                 self._monster_overlay_data["ladder_rect"] = None
@@ -18450,7 +18485,7 @@ class MinimapRouteRecorder:
                                     else:
                                         _pick_l, _pick_reason, _db_band = self._dir_band_pick_ladder(
                                             _half, _psx, _psy, _cdir, _tmox,
-                                            x_half=_far_x, y_far=_far_yu, y_near=0)
+                                            x_half=LADDER_DIR_X_HALF, y_far=_far_yu, y_near=0)  # 锁梯必须人梯|X差|<=300(用户2026-09-20);原_far_x=1300会锁到离人451够不着的远梯
                                     if _down_fast:
                                         if _scan_t != self._ladder_pick_beat_scan_t:
                                             self._ladder_pick_beat_scan_t = _scan_t
