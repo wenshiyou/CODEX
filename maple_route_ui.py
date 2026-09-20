@@ -1652,6 +1652,7 @@ class MinimapRouteRecorder:
         # === 同层巡游找怪(用户2026-09-19) ===
         self._roam_active = False         # 正在朝小地图远侧走路找怪
         self._roam_target_mx = None       # 巡游目标小地图X(光点像素)
+        self._roam_start_mx = None        # 巡游起点小地图X(算全程,末段30%停瞬移用)
         self._roam_cd_until = 0           # 巡游冷却截止ms(一次结束起15s)
         self._raw_char_t = 0                # 后台线程最近一次发布人物脚位置的时间戳(ms)
         self._monster_scan_enabled = True   # 怪物识别B线程百分百总开关(锁梯/上梯/下跳关,回打怪开):关=主线程当帧拿不到任何怪数据
@@ -6444,12 +6445,48 @@ class MinimapRouteRecorder:
                 return False
             _tgt = mx + ROAM_SIDE_RATIO * dR if dR >= dL else mx - ROAM_SIDE_RATIO * dL
             self._roam_target_mx = _tgt
+            self._roam_start_mx = mx
             self._roam_active = True
             _debug_log("[巡游] 同层无怪,朝%s侧找怪:光点%.0f→目标%.0f(远侧%.0f小地图px,走%.0f%%)" % (
                 "右" if dR >= dL else "左", mx, _tgt, _far, ROAM_SIDE_RATIO * 100))
         if self._roam_target_mx is None:
             self._roam_end(False)
             return False
+        # === 巡游瞬移(用户2026-09-21):配合走路、不单独用。符合条件朝巡游方向闪一段,闪不成/冷却内落下面走路,不发呆 ===
+        # 复用战斗/向梯瞬移同一套(键+X距离、2秒冷却、前摇后摇、边界拉回冷却),不挂战斗pending校验;末段30%只走不闪防冲过头。
+        try:
+            _rtcfg = self._get_fight_config()
+            _rtp_key = _rtcfg.get("teleport_key", "")
+            _rtp_x = int(_rtcfg.get("teleport_distance", 0) or 0)
+            _rsgn = 1 if self._roam_target_mx > mx else -1
+            _rrem = abs(self._roam_target_mx - mx)
+            _rspan = abs(self._roam_target_mx - (getattr(self, '_roam_start_mx', mx) or mx))
+            _rspan = _rspan if _rspan > 4 else _rrem
+            _rside = 'right' if _rsgn > 0 else 'left'
+            _rbound = (_rside == getattr(self, '_bound_last_side', None)
+                       and now_ms < getattr(self, '_bound_tp_block_until', 0))
+            if (bool(_rtp_key) and _rtp_x > 0
+                    and now_ms - getattr(self, '_combat_last_h_teleport', 0) > TP_COOLDOWN_MS
+                    and now_ms >= getattr(self, '_combat_tp_post_until', 0)
+                    and not _rbound and _rrem > 0.3 * _rspan):
+                # 配合移动:先朝巡游方向按住左右键(_move_horizontal同款_random_move_keys),瞬移不单独用
+                if _rsgn > 0:
+                    if VK_LEFT in self._random_move_keys:
+                        self._key_up(VK_LEFT)
+                    if VK_RIGHT not in self._random_move_keys:
+                        self._key_down(VK_RIGHT)
+                else:
+                    if VK_RIGHT in self._random_move_keys:
+                        self._key_up(VK_RIGHT)
+                    if VK_LEFT not in self._random_move_keys:
+                        self._key_down(VK_LEFT)
+                self._pre_teleport_release()   # 松主攻+前摇(不松方向),攻击硬直过了才闪得出
+                self._press_game_key(_rtp_key, duration=120)
+                self._combat_last_h_teleport = now_ms   # 与战斗/向梯瞬移共用2秒冷却
+                self._char_relocate_until = now_ms + 700   # 瞬移合法大跳变:人物识别700ms全图重捕
+                self._rlog_throttle('roam_tp', "巡游找怪朝%s瞬移(剩余小地图%.0fpx)" % (_rside, _rrem), 800, log='behavior')
+        except Exception as _rte:
+            _debug_log("[巡游] 瞬移异常:%s" % _rte)
         try:
             _arrived = self._move_horizontal((mx, my), self._roam_target_mx, my)
         except Exception as _e:
@@ -6465,6 +6502,7 @@ class MinimapRouteRecorder:
         """结束巡游:物理松开左右移动键(_move_horizontal同款_random_move_keys键);start_cooldown=True起15s冷却。"""
         self._roam_active = False
         self._roam_target_mx = None
+        self._roam_start_mx = None
         try:
             self._key_up(VK_LEFT)
             self._key_up(VK_RIGHT)
