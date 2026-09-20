@@ -17032,7 +17032,7 @@ class MinimapRouteRecorder:
             self._b_probe_side, self._b_probe_switched,
             self._is_monster_on_platform, self._get_monster_platform,
             self._b_lock_time, self._b_hp_confirmed, self._b_gone, None,  # cur_cross同层传None:脱检不续cross(此前错传当前锁_bl致续命条件恒真→漏帧误cross呆住);未来跨层才传真cross目标
-            _attacked, _eff_up, _ydn, False, freeze_lock=False,  # 同层调试期allow_cross=False:不上下梯,超跳高带怪不参选(用户2026-09-20)
+            _attacked, _eff_up, _ydn, True, freeze_lock=False,  # 跨层已开allow_cross=True(用户2026-09-21):超跳高带怪产cross走上梯/下跳;cur_cross仍传None防续命恒真漏帧误cross呆住
             group_priority=_gp, group_radius=_aoe,
             aoe_y_up=_ayup, aoe_y_down=_aydn, aoe_dual=_dual,
             can_strike=_in_skill, lock_tier=self._b_lock_tier,
