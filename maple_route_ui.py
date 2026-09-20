@@ -10685,7 +10685,7 @@ class MinimapRouteRecorder:
                 y_far = LADDER_DIR_Y_UP_FAR
             if y_near is None:
                 y_near = LADDER_TPL_Y_NEAR
-            ylo, yhi = psy - y_far, psy - y_near              # 上行:头顶-y_far~-y_near(蒙板段传寻怪范围且y_near=0含脚边,用户2026-09-19)
+            ylo, yhi = psy - y_far, psy - y_near              # 上行:头顶-y_far~-y_near(蒙板段传LADDER_DIR_Y_UP_FAR=200作人梯Y差硬门、y_near=0含脚边,用户2026-09-20)
         band = [(x, y) for (x, y) in half if ylo <= y <= yhi and abs(x - psx) <= x_half]
         if not band:
             return None, '带内无梯', band
@@ -18446,7 +18446,7 @@ class MinimapRouteRecorder:
                         self._lad_marks_cache = []
                     # === 选梯(用户2026-09-15定稿:锁像素块身份、不锁坐标;候选累积约两帧抗闪) ===
                     # ①recent累积约两帧白框(同一把邻帧≤归并半径就刷新位置),单帧扫不到邻帧扫到仍在池里;
-                    # ②未锁:在池里按方向带(上行头顶Y-150~-20/下行脚下0~+150、X左右各300怪在哪侧选哪侧)建锁(只用一次),当场反查钉录制端;
+                    # ②未锁:在池里按方向带(上行头顶0~-200人梯Y差硬门/下行脚下0~+150、X左右各300怪在哪侧选哪侧)建锁(只用一次),当场反查钉录制端;
                     # ③已锁:不再全局重选,只在池里找离上一帧锁点最近的=同一把,坐标随它动(身份固定、值在动);
                     # ④空帧(寻怪范围两帧池也没):不钉旧点、snap置None(红框这帧不画、直跳不拿旧坐标算差值),锁身份保留;连续LADDER_MERGE_WAIT_MS真没有才清锁回主线。
                     _white_now = [(c[0], c[1]) for c in self._lad_marks_cache]
@@ -18466,9 +18466,6 @@ class MinimapRouteRecorder:
                             _db_band = []
                             _stage = ''
                             _lock = getattr(self, '_ladder_lock', None)
-                            _fc = self._get_fight_config()
-                            _far_x = max(50, int(_fc.get("far_range_x") or COMBAT_FAR_RANGE))
-                            _far_yu = max(20, int(_fc.get("far_range_y_up") or FAR_RANGE_Y_UP_DEFAULT))
                             _ap = getattr(self, '_ladder_approach_phase', 'align')
                             _scan_t = getattr(self, '_lad_marks_scan_t', 0.0)
                             _jumped = (_climb_st == 'climbing') or (getattr(self, '_ladder_jump_phase', None) == 'post_jump') \
@@ -18489,7 +18486,7 @@ class MinimapRouteRecorder:
                                     else:
                                         _pick_l, _pick_reason, _db_band = self._dir_band_pick_ladder(
                                             _half, _psx, _psy, _cdir, _tmox,
-                                            x_half=LADDER_DIR_X_HALF, y_far=_far_yu, y_near=0)  # 锁梯必须人梯|X差|<=300(用户2026-09-20);原_far_x=1300会锁到离人451够不着的远梯
+                                            x_half=LADDER_DIR_X_HALF, y_far=LADDER_DIR_Y_UP_FAR, y_near=0)  # X半宽300 + 上行人梯Y差硬门200(用户2026-09-20:锁梯第一时间卡人Y-梯Y,>=200放弃;原y_far传寻怪far_range_y_up=350,锁到离人306高梯)
                                     if _down_fast:
                                         if _scan_t != self._ladder_pick_beat_scan_t:
                                             self._ladder_pick_beat_scan_t = _scan_t
@@ -18520,23 +18517,32 @@ class MinimapRouteRecorder:
                                                 _beats = 1
                                             self._ladder_pick_stable = (_bx, _by, _beats)
                                             if _beats >= LADDER_PICK_STABLE_BEATS:
-                                                # 二帧稳梯:建锁+冻像素块身份,这一帧才关怪扫(关扫窗口最短),转align对位
-                                                self._ladder_lock = (_bx, _by, _now_lm)
-                                                self._ladder_snap_x = _bx
-                                                self._ladder_lock_t0 = _now_lm
-                                                self._freeze_ladder_patch(_bx, _by)
-                                                self._ladder_approach_phase = 'align'
-                                                self._ladder_pick_stable = None
-                                                self._ladder_pick_fail_beats = 0
-                                                self._ladder_lost_beats = 0
-                                                self._ladder_lost_beat_scan_t = _scan_t
-                                                self._ladder_precise_mode = True
-                                                _sel = (_bx, _by, True)
-                                                _rx, _ry = _bx, _by
-                                                _stage = '二帧稳梯建锁'
-                                                self._note_freq_event('lock_lad', 3, 1000, "1秒内反复锁定梯子%d次(疑似掉锁/白框不稳)")
-                                                _debug_log("[选梯·建锁] 二帧稳定向%s 人=(%d,%d) 怪X=%s 带内%d把[%s] 选中(%d,%d),已关怪扫一心上梯" % (
-                                                    '上' if _cdir > 0 else '下', _psx, _psy, _tmox, len(_db_band), _pick_reason, _bx, _by))
+                                                _dy_lock = _psy - _by        # 上行=人名基点Y-锁点Y(>0梯在人上方);锁梯人梯Y差硬门 LADDER_DIR_Y_UP_FAR=200(用户2026-09-20)
+                                                if _cdir > 0 and _dy_lock > LADDER_DIR_Y_UP_FAR:
+                                                    # 二帧稳到的锁点仍在人上方200外=这把当前够不着(跨拍漂到高梯/选错):不建锁,丢弃重观察并计失败节拍(连续3拍走挪位/回主线,不发呆、不锁高梯)
+                                                    self._ladder_pick_stable = None
+                                                    self._ladder_pick_fail_beats += 1
+                                                    _stage = '人梯Y差%d>%d放弃重选' % (_dy_lock, LADDER_DIR_Y_UP_FAR)
+                                                    _debug_log("[选梯·Y门] 稳梯锁点(%d,%d) 人Y=%d 人梯Y差%d>%d,放弃这把不建锁(连续%d拍无合格梯→挪位/回主线重锁)" % (
+                                                        _bx, _by, _psy, _dy_lock, LADDER_DIR_Y_UP_FAR, LADDER_PICK_FAIL_BEATS))
+                                                else:
+                                                    # 二帧稳梯且Y差合格:建锁+冻像素块身份,这一帧才关怪扫(关扫窗口最短),转align对位
+                                                    self._ladder_lock = (_bx, _by, _now_lm)
+                                                    self._ladder_snap_x = _bx
+                                                    self._ladder_lock_t0 = _now_lm
+                                                    self._freeze_ladder_patch(_bx, _by)
+                                                    self._ladder_approach_phase = 'align'
+                                                    self._ladder_pick_stable = None
+                                                    self._ladder_pick_fail_beats = 0
+                                                    self._ladder_lost_beats = 0
+                                                    self._ladder_lost_beat_scan_t = _scan_t
+                                                    self._ladder_precise_mode = True
+                                                    _sel = (_bx, _by, True)
+                                                    _rx, _ry = _bx, _by
+                                                    _stage = '二帧稳梯建锁'
+                                                    self._note_freq_event('lock_lad', 3, 1000, "1秒内反复锁定梯子%d次(疑似掉锁/白框不稳)")
+                                                    _debug_log("[选梯·建锁] 二帧稳定向%s 人=(%d,%d) 怪X=%s 带内%d把[%s] 选中(%d,%d) 人梯Y差%d,已关怪扫一心上梯" % (
+                                                        '上' if _cdir > 0 else '下', _psx, _psy, _tmox, len(_db_band), _pick_reason, _bx, _by, _dy_lock))
                                             else:
                                                 self._ladder_pick_fail_beats += 1
                                                 _stage = '稳梯观察%d/%d' % (_beats, LADDER_PICK_STABLE_BEATS)
