@@ -4862,6 +4862,9 @@ class MinimapRouteRecorder:
         self._ladder_lock = None            # 出梯清"锁定梯身份"(用户2026-09-15锁像素块不锁位置)
         self._ladder_lock_patch = None      # 出梯同步清冻结像素块,防旧块误匹配下一把梯
         self._lad_marks_recent = []         # 出梯清两帧累积候选池
+        _ovd_reset = getattr(self, '_monster_overlay_data', None)  # 出梯清选中梯红框,防到顶后梯红框残留(用户2026-09-20)
+        if _ovd_reset is not None:
+            _ovd_reset["ladder_sel"] = None
         # 上梯approach相位复位(用户2026-09-19):站定/二帧建锁/挪位每把梯重来;挪位冷却_ladder_repos_cd_until有意保留
         self._ladder_approach_phase = 'none'
         self._ladder_settle_last_x = None
@@ -11636,7 +11639,8 @@ class MinimapRouteRecorder:
                                     gdi32.LineTo(hdc, mx, my)
                                     gdi32.Rectangle(hdc, x1, y1, x2, y2)
                                 # 红框:按主线locked_rect直画(脱检也在)+人物到锁定中心红线
-                                if _locked_rect:
+                                # 红框全局唯一:有选中梯红框ladder_sel时怪红框让位(用户2026-09-20,同屏只一个红框)
+                                if _locked_rect and not data.get('ladder_sel'):
                                     gdi32.SelectObject(hdc, red_pen)
                                     _lcx = (_locked_rect[0] + _locked_rect[2]) // 2
                                     gdi32.MoveToEx(hdc, cx, cy, None)
@@ -16362,6 +16366,7 @@ class MinimapRouteRecorder:
         """田字背景迁移检测线程(常开层):只在有移动意图时算按住的那条轴,吊在运动反方向(身后)500px。
         采集匹配区160(搜索半径56,吃低帧大位移),显示田字120十字四格。诊断版只发布+打日志,不参与任何动作判定。"""
         FLOW_BOX, FLOW_MATCH, FLOW_TAIL_GAP, FLOW_MIN_GAP, FLOW_MARGIN = 120, 160, 500, 160, 24
+        FLOW_LIFT_Y = 150   # 水平移动时田字框在吊身后基础上再上移的像素(斜后方、不平齐人物;用户2026-09-20)
         FLOW_WIN_MS, FLOW_MIN_ROUNDS, FLOW_MATCH_THR, FLOW_MIN_D = 300, 3, 0.5, 1.0
         _hd = FLOW_BOX // 2; _hm = FLOW_MATCH // 2
         _last_seq = -1
@@ -16394,7 +16399,7 @@ class MinimapRouteRecorder:
                     _cx = _px; _cy = (_py - FLOW_TAIL_GAP) if _d > 0 else (_py + FLOW_TAIL_GAP)
                 else:
                     _axis = 'x'; _d = int(_intents['x'].get('dir', 1) or 1)
-                    _cx = (_px - FLOW_TAIL_GAP) if _d > 0 else (_px + FLOW_TAIL_GAP); _cy = _py
+                    _cx = (_px - FLOW_TAIL_GAP) if _d > 0 else (_px + FLOW_TAIL_GAP); _cy = _py - FLOW_LIFT_Y  # 水平:身后+上移=斜后方
                 _cx = max(FLOW_MARGIN + _hm, min(_cx, _fw - FLOW_MARGIN - _hm))
                 _cy = max(FLOW_MARGIN + _hm, min(_cy, _fh - FLOW_MARGIN - _hm))
                 _gap = abs(_cx - _px) if _axis == 'x' else abs(_cy - _py)
@@ -18297,10 +18302,20 @@ class MinimapRouteRecorder:
                     # 同步怪物和人物位置到蒙板
                     self._monster_overlay_data["monsters"] = self._monsters
                     self._monster_overlay_data["monster_hp_bars"] = self._monster_hp_bars
-                    self._monster_overlay_data["locked_target"] = getattr(self, '_combat_locked_target', None)
-                    # 【阶段一】红框按锁定坐标直画(脱检也在,修"打怪正常但红框经常不显示");预备怪next下发黄框
-                    self._monster_overlay_data["locked_rect"] = self._compute_locked_rect(
-                        self._monster_overlay_data["locked_target"])
+                    # 一心爬梯(关怪扫:precise=True 且 to_ladder建锁后/climbing/descend)清主线怪锁,怪红框不与梯红框并存(用户2026-09-20红框唯一)
+                    # 目标怪屏幕X/Y已冻结在_ladder_target_mon_x/y,爬梯不读怪锁;出梯_reset_climb置precise=False后B重开怪扫重锁
+                    _climb_hide_mon = bool(getattr(self, '_ladder_precise_mode', False)) and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing', 'descend')
+                    if _climb_hide_mon:
+                        self._combat_locked_target = None
+                        self._locked_box_cache = None
+                        self._combat_had_target = False
+                        self._monster_overlay_data["locked_target"] = None
+                        self._monster_overlay_data["locked_rect"] = None
+                    else:
+                        self._monster_overlay_data["locked_target"] = getattr(self, '_combat_locked_target', None)
+                        # 【阶段一】红框按锁定坐标直画(脱检也在,修"打怪正常但红框经常不显示");预备怪next下发黄框
+                        self._monster_overlay_data["locked_rect"] = self._compute_locked_rect(
+                            self._monster_overlay_data["locked_target"])
                     _dlpkt_o = getattr(self, '_combat_decision_packet', None)
                     self._monster_overlay_data["next_target"] = (_dlpkt_o.get('next') if _dlpkt_o else None)
                     self._monster_overlay_data["show_next"] = bool(getattr(self, '_show_next_candidate', True))
