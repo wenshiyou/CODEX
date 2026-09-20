@@ -1488,6 +1488,7 @@ class MinimapRouteRecorder:
         self._combat_target_hp_confirmed = False   # 是否已确认命中过血条(空怪判定用)；combat_step直接访问，必须__init__初始化
         self._combat_target_attacked = False       # 已对锁定目标出手(打一下无血条无伤害=空怪判定用)
         self._combat_first_strike_time = 0         # 对当前锁定目标【首次】出手时间(ms)：出手后留POST_STRIKE_CHECK_MS(130ms)反馈窗口再判空怪/打死，换目标清零
+        self._dbg_probe = {'atk':0,'aoe':0,'win':0,'probe_dmg':0,'gate_dmg':0,'hpframe':0,'abhit':0,'misalign':0,'early':0,'notskill':0,'t0':0}  # 判活检测端探针计数(只观测不改决策,2026-09-20)
         self._slope_high_mode = False              # 跳高打动作状态机(留主线);打空=普通空怪换一只,绝不降级cross(能不能打到只看面板跳高带)
         self._slope_high_last_jump = 0             # 跳高打最后一次起跳时刻ms(余温窗内禁向下跳,治腾空误判;用户2026-09-18)
         # === 打怪分层探测状态（350近距→500同平台一边随机→跨层）===
@@ -13612,7 +13613,7 @@ class MinimapRouteRecorder:
             bars = filtered
         return bars
 
-    def _detect_damage_number(self, target_cx, target_cy, frame=None, monsters=None):
+    def _detect_damage_number(self, target_cx, target_cy, frame=None, monsters=None, dbg=None):
         """【冒险岛世界】检测目标头顶上方是否飘出伤害数字（样本"15041"：红描边→橙黄主体渐变+黑描边）
         用途：攻击命中时怪头顶飘伤害数字，有数字=怪还活着；打一下既没血条也没伤害数字=空怪→drop换目标。
         参数：target_cx=目标中心X, target_cy=目标脚底Y
@@ -13632,6 +13633,7 @@ class MinimapRouteRecorder:
                 best_d = d
                 target_y1 = y1  # 记录怪物头顶Y
         if target_y1 is None:
+            if dbg is not None: dbg['reason'] = 'no_monster'
             return False  # 没找到对应怪物，无法检测
 
         # 步骤2：在目标头顶上方区域搜索。B线程调用必须传入本检测帧frame(禁止B自行截图抢capture线程);
@@ -13644,6 +13646,7 @@ class MinimapRouteRecorder:
             else:
                 frame = self._capture_window()
         if frame is None:
+            if dbg is not None: dbg['reason'] = 'no_frame'
             return False
         h, w = frame.shape[:2]
         # 搜索区域：限定在目标头顶附近(±30px，垂直头顶-50~+5)，别把附近怪/背景的误判成伤害数字(用户2026-09-05)
@@ -13652,6 +13655,7 @@ class MinimapRouteRecorder:
         ry1 = max(0, target_y1 - 50)  # 头顶上方50px
         ry2 = min(h, target_y1 + 5)   # 包含头顶位置
         if rx2 <= rx1 or ry2 <= ry1:
+            if dbg is not None: dbg['reason'] = 'bad_roi'
             return False
         roi = frame[ry1:ry2, rx1:rx2]  # 截取搜索区域
 
@@ -13663,7 +13667,10 @@ class MinimapRouteRecorder:
         m_red = cv2.inRange(hsv, np.array([0, 70, 70]),  np.array([18, 255, 255]))   # 红橙渐变(用户2026-09-20:0-12→0-18,覆盖99的橙红)
         m_org = cv2.inRange(hsv, np.array([10, 70, 70]), np.array([35, 255, 255]))  # 橙黄主体(137黄)
         n_red, n_org = int(np.sum(m_red > 0)), int(np.sum(m_org > 0))
+        if dbg is not None:
+            dbg.update(n_red=n_red, n_org=n_org, ty=int(target_y1))
         if n_red < 80 or n_org < 70:
+            if dbg is not None: dbg['reason'] = 'color_low'
             return False  # 红簇不足=暖色背景/绿血条，不是伤害数字
         mask = cv2.bitwise_or(m_red, m_org)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
@@ -13671,11 +13678,18 @@ class MinimapRouteRecorder:
 
         # 步骤4：存在"团状笔画"连通域(面积≥50、高≥9、且不是扁横条血条)才算数字
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        _max_area, _max_h = 0, 0
         for cnt in contours:
             _cx, _cy, _cw, _ch = cv2.boundingRect(cnt)
+            _ar = cv2.contourArea(cnt)
+            if dbg is not None:
+                _max_area = max(_max_area, int(_ar)); _max_h = max(_max_h, int(_ch))
             _is_bar = (_cw > _ch * 2 and _ch <= 8)   # 扁横条=血条，排除
-            if cv2.contourArea(cnt) >= 50 and _ch >= 9 and not _is_bar:
+            if _ar >= 50 and _ch >= 9 and not _is_bar:
+                if dbg is not None: dbg.update(reason='hit', max_area=int(_ar), max_h=int(_ch))
                 return True
+        if dbg is not None:
+            dbg.update(reason='no_contour', max_area=_max_area, max_h=_max_h)
         return False
 
     def _load_blue_box(self):
@@ -16878,6 +16892,58 @@ class MinimapRouteRecorder:
             except Exception as _e:
                 _debug_log("[B决策] 伤害数字检测异常: %s" % _e)
                 _has_dmg = False
+        # ===== 判活检测端探针(2026-09-20,只观测不改决策):先证画面里能不能检出伤害数字/血条,再证门控对接 =====
+        try:
+            P = self._dbg_probe
+            if not P.get('t0'):
+                P['t0'] = now_ms
+            _fposP = _fb.get('pos') if _fb else None
+            _alignP = bool(_bl is not None and _fposP and abs(_fposP[0] - _bl[0]) <= 40 and abs(_fposP[1] - _bl[1]) <= 50)
+            if _bl is not None and _fposP and _fb.get('first'):
+                _elP = now_ms - (_fb.get('first') or 0)
+                if not _alignP:
+                    P['misalign'] += 1
+                elif _elP <= POST_STRIKE_CHECK_MS:
+                    P['early'] += 1
+                elif not _in_skill:
+                    P['notskill'] += 1
+            # 无条件探针:出手后100~650ms,绕开_in_skill/_detect_open,直接对出手目标头顶跑颜色检测
+            if _fposP and _fb.get('first'):
+                _elP = now_ms - (_fb.get('first') or 0)
+                if POST_STRIKE_CHECK_MS < _elP < 650:
+                    P['win'] += 1
+                    _pdb = {}
+                    try:
+                        _p_hit = self._detect_damage_number(_fposP[0], _fposP[1], frame=frame, monsters=merged, dbg=_pdb)
+                    except Exception:
+                        _p_hit = False
+                    if _p_hit:
+                        P['probe_dmg'] += 1
+                    if _has_dmg:
+                        P['gate_dmg'] += 1
+                    _debug_log("[伤害探针] 出手后%dms 对齐=%s 射程内=%s 门开=%s | 探针见字=%s 门控见字=%s n红=%s n橙=%s 最大面积=%s 最大高=%s 顶y=%s 原因=%s" % (
+                        int(_elP), _alignP, _in_skill, _detect_open, _p_hit, _has_dmg,
+                        _pdb.get('n_red'), _pdb.get('n_org'), _pdb.get('max_area'), _pdb.get('max_h'),
+                        _pdb.get('ty'), _pdb.get('reason')))
+            # 血条A/B命中复算(与combat_logic同口径,垂直180)
+            if bars and _bl is not None:
+                P['hpframe'] += 1
+                for (_bxP, _byP, _bwP, _bhP) in bars:
+                    _bxcP = _bxP + _bwP / 2.0; _bycP = _byP + _bhP / 2.0
+                    _inaP = (_bl[0] - 35) <= _bxcP <= (_bl[0] + 35) and (_bl[1] - 180) <= _bycP <= _bl[1]
+                    _inbP = abs(_bxcP - px) <= _skr and (py - 180) <= _bycP <= py
+                    if _inaP or _inbP:
+                        P['abhit'] += 1
+                        break
+            if now_ms - P['t0'] >= 5000:
+                _debug_log("[判活汇总] 近5秒: 主攻%d 群攻%d | 检测窗%d帧 探针见伤害%d 门控见伤害%d | 血条帧%d A/B命中%d | 门未开[对不齐%d 太早%d 非射程%d]" % (
+                    P['atk'], P['aoe'], P['win'], P['probe_dmg'], P['gate_dmg'], P['hpframe'], P['abhit'],
+                    P['misalign'], P['early'], P['notskill']))
+                for _kP in ('atk','aoe','win','probe_dmg','gate_dmg','hpframe','abhit','misalign','early','notskill'):
+                    P[_kP] = 0
+                P['t0'] = now_ms
+        except Exception as _pe:
+            _debug_log("[判活探针] 异常: %s" % _pe)
         _dl = combat_logic.combat_step(
             now_ms, px, py, _cand, self._selected_platforms, _skr, _aoe, _far_x,
             _bl, bars, _has_dmg, True, True,
@@ -17661,6 +17727,7 @@ class MinimapRouteRecorder:
                 # 仍登记出手时刻(站桩输出判定GLOBAL_SKILL_HB_MS用),只是不再拿它当群攻CD门控(用户2026-09-18群攻无CD)
                 self._attack_last["aoe"] = now
                 self._combat_target_attacked = True  # 群攻也算对锁定目标出手：空放无反馈时同样走130ms空怪drop换目标
+                self._dbg_probe['aoe'] += 1  # 探针:群攻真实出手计数(写debug.log可统计)
                 if not self._combat_first_strike_time:
                     self._combat_first_strike_time = now
                 self._combat_exec_feedback = {'pos': (t_cx, t_cy), 'first': self._combat_first_strike_time, 't': now}
@@ -17699,6 +17766,7 @@ class MinimapRouteRecorder:
                 self._press_game_key(atk_key)  # keybd_event tap(keydown+keyup)，能松开(用户：用特定模式)
                 self._attack_last["atk1"] = now
                 self._combat_target_attacked = True  # 已对锁定目标出手：空怪判定用
+                self._dbg_probe['atk'] += 1  # 探针:主攻真实出手计数(写debug.log可统计)
                 self._note_stale_target_attack(t_cx, t_cy, now)  # I纯观测:锁定目标不在当前怪列表(限频5s,不干预)
                 if not self._combat_first_strike_time:  # 仅记首次出手，持续攻击不刷新，保证130ms窗口后空怪能被drop
                     self._combat_first_strike_time = now

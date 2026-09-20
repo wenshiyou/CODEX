@@ -395,15 +395,15 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
       skill: 'main'|'aoe'|'none'   本次要施放的技能
     """
     lcx, lcy = (lock if lock else (None, None))
-    # 用户2026-09-20定稿:判活血条区域=两部分并集。A=怪物基点X±35(Y在人物上方150px内,血条在怪头顶);
-    # B=人物技能范围(人物X±skill_range,Y向上150px)。血条落A或B任一=打着怪/怪活着。
+    # 用户2026-09-20定稿:判活血条区域=两部分并集。A=怪物基点X±35(Y在人物上方180px内,血条在怪头顶);
+    # B=人物技能范围(人物X±skill_range,Y向上180px)。血条落A或B任一=打着怪/怪活着。垂直范围2026-09-20由150改180。
     has_hp = False
     if lock:
         for (bx, by, bw, bh) in hp_bars:
             bxc = bx + bw / 2
             byc = by + bh / 2
-            in_a = (lcx - 35) <= bxc <= (lcx + 35) and (lcy - 150) <= byc <= lcy   # A:怪物基点X前35~后35,Y怪物上方150
-            in_b = abs(bxc - px) <= skill_range and (py - 150) <= byc <= py  # B:血条中心X离人物基点X不超过技能范围,Y人物上方150
+            in_a = (lcx - 35) <= bxc <= (lcx + 35) and (lcy - 180) <= byc <= lcy   # A:怪物基点X前35~后35,Y怪物上方180
+            in_b = abs(bxc - px) <= skill_range and (py - 180) <= byc <= py  # B:血条中心X离人物基点X不超过技能范围,Y人物上方180
             if in_a or in_b:
                 has_hp = True
                 break
