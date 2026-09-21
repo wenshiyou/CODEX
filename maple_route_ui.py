@@ -5989,6 +5989,49 @@ class MinimapRouteRecorder:
                 "右" if sdx > 0 else "左", asdx, self._desc_scr_nudge_n, _this_step, _this, _this_gap), 400, log='behavior')
         return False
 
+    def _enter_desc_mm_ladder(self, px, py, now_ms):
+        """方式二入口(实心台方式一跳不下):改用小地图光点+录制梯选一把【向下】的梯,进mm_to_lad对位(用户2026-09-21,删白框lad_scr)。"""
+        self._release_move_conflicts()
+        self._key_up(VK_LEFT); self._key_up(VK_RIGHT); self._key_up(VK_DOWN)
+        self._desc_phase = 'mm_to_lad'
+        self._desc_phase_t = now_ms
+        self._desc_mm_no_pick_t = 0
+        self._ladder_precise_mode = True   # 方式二期间停锁怪(识怪照开),出段_reset_climb/落地重开
+        _debug_log("[下行·方式二] 转小地图找下行梯(光点%.0f,%.0f)" % (px, py))
+
+    def _desc_mm_ladder_tick(self, px, py, now_ms):
+        """方式二小地图选梯+对位:选下行梯(梯顶Y差<=LADDER_MM_END_TOL、梯身下通)钉x;对齐<=LADDER_MM_DESC_ALIGN_TOL
+        直接lad_grab按↓;没到按住朝梯走(_desc_horiz_walk带stall);连续选不到/走不到=放弃回主线打怪,不死等不发呆。"""
+        ld = self._pick_ladder_minimap(getattr(self, 'ladders', None), px, py, -1, None)
+        if ld is None:
+            self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
+            if getattr(self, '_desc_mm_no_pick_t', 0) == 0:
+                self._desc_mm_no_pick_t = now_ms
+            elif now_ms - self._desc_mm_no_pick_t >= LADDER_MM_NOPICK_TIMEOUT_MS:
+                _debug_log("[下行·方式二] 连续%.0fms小地图无下行合格梯,放弃回主线" % LADDER_MM_NOPICK_TIMEOUT_MS)
+                self._rlog("小地图找不到下行梯,回主线打怪", LOG_RED, log='exception')
+                self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS
+                self._reset_climb(); self._decide_climb_fail_action()
+            return False
+        self._desc_mm_no_pick_t = 0
+        self._climb_ladder_x = float(ld['x'])
+        self._climb_ladder_y_top = float(ld['y_top'])
+        self._climb_ladder_y_bottom = float(ld['y_bottom'])
+        dx = float(ld['x']) - float(px)
+        if abs(dx) <= LADDER_MM_DESC_ALIGN_TOL:
+            self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
+            _debug_log("[下行·方式二] 光点对齐梯X(差%.1f<=%d),直接按↓抓梯" % (dx, LADDER_MM_DESC_ALIGN_TOL))
+            self._enter_desc_lad_grab(py, now_ms)
+            return False
+
+        def _on_stall():
+            _debug_log("[下行·方式二] 小地图走不到梯X,放弃回主线")
+            self._rlog("下行走不到梯子,回主线打怪", LOG_RED, log='exception')
+            self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS
+            self._reset_climb(); self._decide_climb_fail_action()
+        self._desc_horiz_walk(float(ld['x']), px, now_ms, _on_stall, "[下行·方式二] 小地图朝下行梯移动,走不到放弃")
+        return False
+
     def _enter_desc_lad_grab(self, py, now_ms):
         """方式二步骤2:梯子正上方按住↓,观察DESC_LAD_GRAB_MS看Y有没有变大(抓住梯子下滑)。"""
         self._desc_phase = 'lad_grab'
@@ -6127,31 +6170,15 @@ class MinimapRouteRecorder:
                 _debug_log("[下行·方式一] 观察%.0fms Y始终没增大(屏幕Δ%s/世界Δ%.0f)=实心台,直接主窗口找梯(不走小地图)" % (
                     _el, ("%.0f" % _dsy) if _dsy is not None else "NA", _dmy))
                 self._rlog("下台阶横跳%.0fms没下去,转主窗口找梯子" % _el, LOG_RED, log='exception')
-                self._enter_desc_lad_scr(now_ms)
+                self._enter_desc_mm_ladder(px, py, now_ms)
             # 其余(未到最早判定/还在腾空下落途中):不按任何键继续观察
             return False
 
-        # ②to_ladder【方式二·段1·小地图粗导航】直接跳不了:用小地图梯X对齐人物光点中心(|差|≤DESC_LAD_ALIGN_TOL=5),
-        #   >5持续按住走、≤5切段2主窗口lad_scr精对位(同拍进30Hz高帧);被挡走不到(stall)也切段2用梯子特征白框兜底。
-        if ph == 'to_ladder':
-            _ladx = self._climb_ladder_x
-            _ldx = _ladx - px
-            if abs(_ldx) <= DESC_LAD_ALIGN_TOL:
-                self._key_up(VK_LEFT)
-                self._key_up(VK_RIGHT)
-                self._enter_desc_lad_scr(now_ms)
-                return False
-
-            def _on_lad_stall():
-                # 小地图走不到梯X(被挡/到平台边):不硬等,切主窗口段靠梯子特征白框就近对位
-                self._enter_desc_lad_scr(now_ms)
-            self._desc_horiz_walk(_ladx, px, now_ms, _on_lad_stall, "[下行·方式二] 小地图走不到梯X,切主窗口特征对位")
-            return False
-
-        # ②.5 lad_scr【方式二·段2·主窗口精对位(用户2026-09-10)】切游戏窗口,用人物特征对齐红框白框二合一白框X,
-        #   碎步三拍递减对齐后进lad_grab;具体状态机在_desc_align_ladder_screen(与上梯同套屏幕对位、但到点是按↓不是起跳)。
-        if ph == 'lad_scr':
-            return self._desc_align_ladder_screen(px, py, now_ms)
+        # ②mm_to_lad【方式二·小地图选梯+对位(用户2026-09-21定稿,删白框lad_scr精对位)】实心台直接跳不下:
+        #   每帧最新光点选下行合格梯(梯顶与光点Y差<=LADDER_MM_END_TOL且梯身下通)钉x;对齐|x差|<=LADDER_MM_DESC_ALIGN_TOL
+        #   松键直接lad_grab按↓;没到按住走;走不到(stall)/连续选不到=放弃回主线,不发呆不死等。
+        if ph == 'mm_to_lad':
+            return self._desc_mm_ladder_tick(px, py, now_ms)
 
         # ③lad_grab【方式二·步骤2】梯正上方按住↓,500ms内Y变大=抓住梯子下滑→lad_slide;满500没变=抓不住,回主线(不补跳/删除两小层)
         if ph == 'lad_grab':
