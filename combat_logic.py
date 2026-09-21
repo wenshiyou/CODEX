@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 打怪决策核心（纯逻辑，可脱离游戏用合成数据单元测试）。
 只负责"选哪只 / 往哪走 / 什么状态"，不碰底层检测/移动/存活。
@@ -279,8 +279,10 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
             if ld <= cast_range:
                 # 【in】本帧确在技能范围内(X近且Y在带):钉死站定打,打死(drop)/脱检才换,不被任何远处怪带走
                 return _mk('cast', (lx, ly), _dir_to(lx, px), ld, tier='in')
-            # 【out·最原始·用户2026-09-20】走近段(没进技能范围)不锁死,每帧用当帧最新怪表落pick重选最近,刷近立刻换;
-            # 技能范围内(上方cast)才锁到打死。
+            # 【out·用户2026-09-21】走近段(没进技能范围)锁死:没有近身怪就不换方向,避免左右各一怪来回抢;
+            # 只有出现cast_range内近身怪才让位打近身怪,远方向另一怪近一点点也不换。
+            if not has_in_range:
+                return _mk('pursue', (lx, ly), _dir_to(lx, px), ld, tier='out')
         elif locked_cross is not None:
             if has_in_range:
                 pass   # 跨层途中身边刷出能直打真怪 → 落 pick 先打(两类规则唯一合法换锁,对称out分支)
@@ -402,8 +404,8 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
         for (bx, by, bw, bh) in hp_bars:
             bxc = bx + bw / 2
             byc = by + bh / 2
-            in_a = (lcx - 35) <= bxc <= (lcx + 35) and (lcy - 180) <= byc <= lcy   # A:怪物基点X前35~后35,Y怪物上方180
-            in_b = abs(bxc - px) <= skill_range and (py - 180) <= byc <= py  # B:血条中心X离人物基点X不超过技能范围,Y人物上方180
+            in_a = (lcx - 35) <= bxc <= (lcx + 35) and (lcy - 150) <= byc <= (lcy - 55)   # A:怪物基点X前35~后35,Y基点上方55~150(排怪身体/近头顶背景)
+            in_b = abs(bxc - px) <= skill_range and (py - 150) <= byc <= (py - 55)  # B:血条中心X离人物基点X不超过技能范围,Y基点上方55~150
             if in_a or in_b:
                 has_hp = True
                 break

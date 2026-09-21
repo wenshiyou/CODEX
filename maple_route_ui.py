@@ -3366,7 +3366,7 @@ class MinimapRouteRecorder:
         旧单套格式(顶层anchors+平铺<png>)首次加载自动迁移成「角色一」、平铺png移进 c0/ 子目录。"""
         import shutil
         rec = {"anchors": {}, "params": dict(ROLE_TRACK_DEFAULT), "blocklist": [],
-               "blocklist_monster": False, "active": None, "characters": [], "_seq": 0}
+               "blocklist_monster": False, "blocklist_hp_dmg": False, "active": None, "characters": [], "_seq": 0}
         saved = {}
         _migrated = False  # 本次是否发生"旧单套→多套"迁移;迁移完落盘一次,json一步转新结构
         try:
@@ -3385,6 +3385,7 @@ class MinimapRouteRecorder:
                 rec["blocklist"] = [list(map(int, r)) for r in _bl
                                     if isinstance(r, (list, tuple)) and len(r) == 4]
             rec["blocklist_monster"] = bool(saved.get("blocklist_monster", False))  # 黑名单是否同时对怪物YOLO生效(默认只人物)
+            rec["blocklist_hp_dmg"] = bool(saved.get("blocklist_hp_dmg", False))  # 黑名单是否同时对血条/伤害数字生效
             try:
                 rec["_seq"] = int(saved.get("_seq", 0))
             except Exception:
@@ -3452,6 +3453,7 @@ class MinimapRouteRecorder:
             out = {"params": rec.get("params", dict(ROLE_TRACK_DEFAULT)),
                    "blocklist": rec.get("blocklist", []),
                    "blocklist_monster": bool(rec.get("blocklist_monster", False)),
+                   "blocklist_hp_dmg": bool(rec.get("blocklist_hp_dmg", False)),
                    "active": rec.get("active"),
                    "_seq": int(rec.get("_seq", 0)),
                    "characters": rec.get("characters", [])}
@@ -3829,6 +3831,16 @@ class MinimapRouteRecorder:
                     return True
             except Exception:
                 continue
+        return False
+
+    def _hp_dmg_blocked(self, cx, cy):
+        """血条/伤害数字中心点是否落在黑名单内(勾选blocklist_hp_dmg才生效)"""
+        rec = self._role_rec or {}
+        if not rec.get("blocklist_hp_dmg") or not rec.get("blocklist"):
+            return False
+        for (x0, y0, x1, y1) in rec["blocklist"]:
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                return True
         return False
 
     def _role_sub_rects(self, S, tw, th):
@@ -4301,6 +4313,11 @@ class MinimapRouteRecorder:
             self._role_rec["blocklist_monster"] = bool(_blk_mon_var.get()); self._save_role_recognize()
         tk.Checkbutton(blk_top, text="对怪物也生效", variable=_blk_mon_var,
                        command=_toggle_blk_mon, font=("微软雅黑", 8)).pack(side="left", padx=6)
+        _blk_hp_var = tk.BooleanVar(value=bool(self._role_rec.get("blocklist_hp_dmg", False)))
+        def _toggle_blk_hp():
+            self._role_rec["blocklist_hp_dmg"] = bool(_blk_hp_var.get()); self._save_role_recognize()
+        tk.Checkbutton(blk_top, text="对血条/伤害数字也生效", variable=_blk_hp_var,
+                       command=_toggle_blk_hp, font=("微软雅黑", 8)).pack(side="left", padx=6)
         _rebuild_blocklist()
 
         win.protocol("WM_DELETE_WINDOW", on_close)
@@ -13605,11 +13622,11 @@ class MinimapRouteRecorder:
             return []
         h, w = frame.shape[:2]
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        # 怪物血条颜色（样本取色：绿色为主 H:35-80 S:90-255 V:80-255）
-        m_g = cv2.inRange(hsv, np.array([35, 90, 80]), np.array([80, 255, 255]))
-        # 红色（低血量时可能变红，保留兼容）
-        m_r1 = cv2.inRange(hsv, np.array([0, 80, 80]), np.array([12, 255, 255]))
-        m_r2 = cv2.inRange(hsv, np.array([165, 80, 80]), np.array([180, 255, 255]))
+        # 怪物血条颜色(2026-09-21真机取色:纯亮绿 H=60 S=255 V=243)收紧到纯亮绿,排暗绿草地/平台背景
+        m_g = cv2.inRange(hsv, np.array([50, 200, 200]), np.array([70, 255, 255]))
+        # 红色(低血量时变红,同样收紧饱和度亮度)
+        m_r1 = cv2.inRange(hsv, np.array([0, 150, 150]), np.array([12, 255, 255]))
+        m_r2 = cv2.inRange(hsv, np.array([165, 150, 150]), np.array([180, 255, 255]))
         mask = cv2.bitwise_or(cv2.bitwise_or(m_r1, m_r2), m_g)
         # 【冒险岛世界2026-09-07样本校准】怪血条=黑槽+亮绿填充，常被等级字/竖边打断成几段；
         # 横向闭运算(7,2)把同一血条的断段连回一条，再按"扁横条"几何筛(真机绿条宽18-47/高2-7)
@@ -13629,6 +13646,9 @@ class MinimapRouteRecorder:
                 x, y, bw, bh = cv2.boundingRect(cnt)
                 # 血条特征：扁横条 宽>高*2，宽度15-90px，高度2-8px（样本校准：真机绿条宽18-47/高2-7）
                 if bw > bh * 2 and 15 <= bw <= 90 and 2 <= bh <= 8:
+                    _bcx = sx1 + x + bw / 2; _bcy = sy1 + y + bh / 2
+                    if self._hp_dmg_blocked(_bcx, _bcy):
+                        continue
                     bars.append((sx1 + x, sy1 + y, bw, bh))
         # 去重：位置接近的只保留一个
         if bars:
@@ -13675,13 +13695,18 @@ class MinimapRouteRecorder:
             if dbg is not None: dbg['reason'] = 'no_frame'
             return False
         h, w = frame.shape[:2]
-        # 搜索区域：限定在目标头顶附近(±30px，垂直头顶-50~+5)，别把附近怪/背景的误判成伤害数字(用户2026-09-05)
+        # 搜索区域(用户2026-09-21):X±30,Y从怪脚基点向上55~150(排怪身体/近头顶背景,与血条A/B同口径)
         rx1 = max(0, target_cx - 30)
         rx2 = min(w, target_cx + 30)
-        ry1 = max(0, target_y1 - 50)  # 头顶上方50px
-        ry2 = min(h, target_y1 + 5)   # 包含头顶位置
+        ry1 = max(0, target_cy - 150)  # 基点向上150
+        ry2 = min(h, target_cy - 55)   # 基点向上55
         if rx2 <= rx1 or ry2 <= ry1:
             if dbg is not None: dbg['reason'] = 'bad_roi'
+            return False
+        # 黑名单过滤:ROI中心落在黑名单内不检测
+        _roi_cx = (rx1 + rx2) / 2; _roi_cy = (ry1 + ry2) / 2
+        if self._hp_dmg_blocked(_roi_cx, _roi_cy):
+            if dbg is not None: dbg['reason'] = 'blocked'
             return False
         roi = frame[ry1:ry2, rx1:rx2]  # 截取搜索区域
 
@@ -16427,6 +16452,48 @@ class MinimapRouteRecorder:
             pass
         return dict(dd=float(_dd), score=float(_mv), half=float(_half), pcd=float(_pcd), pcr=_pcr, std=_std)
 
+    def _minimap_loop(self):
+        """小地图单独线程(用户2026-09-21定稿):自己mss只截小地图区域(map_area_rect),高频find_player_dot发布_player_map_pos。
+        不被全屏截图60ms周期拖着,光点20ms=50fps零延时更新(和熊猫精灵固定点检测一样)。蒙板/平台录/梯录后续挂这里。"""
+        import mss as _mss_mod
+        try:
+            _sct = _mss_mod.mss()
+        except Exception as _e:
+            print("[小地图] mss初始化失败:", _e); return
+        while self._detect_running:
+            try:
+                _r = self.window_rect
+                _ma = getattr(self, 'map_area_rect', None)
+                if _r and _ma and _ma.get('width', 0) > 0 and _ma.get('height', 0) > 0:
+                    _mon = {"left": int(_r['left'] + _ma['left']),
+                            "top": int(_r['top'] + _ma['top']),
+                            "width": int(_ma['width']),
+                            "height": int(_ma['height'])}
+                    _frame = np.array(_sct.grab(_mon))[:, :, :3]
+                    _pdot = self.find_player_dot(_frame)
+                    if _pdot is not None:
+                        self._player_map_pos = _pdot
+                        self._last_smooth_dot = _pdot
+                        self._map_dot_lost = 0
+                    else:
+                        if getattr(self, '_last_smooth_dot', None) is not None:
+                            self._player_map_pos = self._last_smooth_dot
+                        if getattr(self, '_auto_refresh', True) and self.hwnd:
+                            self._map_dot_lost = getattr(self, '_map_dot_lost', 0) + 1
+                            _now_force = time.time()
+                            if (self._map_dot_lost >= 15
+                                    and _now_force - getattr(self, '_last_minimap_force_t', 0) > 2.0):
+                                self._last_minimap_force_t = _now_force
+                                self._map_dot_lost = 0
+                                try:
+                                    self._detect_minimap(debug=False)
+                                except Exception:
+                                    pass
+            except Exception as _e:
+                if self._detect_running:
+                    _debug_log("[小地图线程] 异常:%s" % _e)
+            time.sleep(0.020)
+
     def _flow_loop(self):
         """田字背景迁移检测线程(常开层):只在有移动意图时算按住的那条轴,吊在运动反方向(身后)500px。
         采集匹配区160(搜索半径56,吃低帧大位移),显示田字120十字四格。诊断版只发布+打日志,不参与任何动作判定。"""
@@ -16544,40 +16611,7 @@ class MinimapRouteRecorder:
                 self._raw_char_pos = _ch                 # 原子发布:动作线程直接读最新人物点
                 self._raw_char_t = time.time() * 1000    # 同步发布坐标时间戳(判坐标新鲜/陈旧,瞬移校验防误判)
                 self._char_feature_matches = getattr(self, '_char_feature_matches', [])
-                # 2026-09-16:小地图光点检测也搬到本高频线程(原在主循环,空闲300ms才更新一次→黑框滞后)。
-                # 每来新帧就从整帧按map_area_rect裁小地图块→find_player_dot→写全局_player_map_pos,跟着截图帧十几ms更新。
-                try:
-                    _r = getattr(self, 'map_area_rect', None)
-                    if _r and _r.get("width", 0) > 0 and _r.get("height", 0) > 0:
-                        _fh2, _fw2 = _frame.shape[:2]
-                        _x0, _y0 = int(_r["left"]), int(_r["top"])
-                        _x1 = min(_x0 + int(_r["width"]), _fw2)
-                        _y1 = min(_y0 + int(_r["height"]), _fh2)
-                        if _x1 > _x0 and _y1 > _y0:
-                            _map_blk = _frame[_y0:_y1, _x0:_x1]
-                            _pdot = self.find_player_dot(_map_blk)
-                            if _pdot is not None:
-                                self._player_map_pos = _pdot
-                                self._last_smooth_dot = _pdot
-                                self._map_dot_lost = 0
-                            else:
-                                if getattr(self, '_last_smooth_dot', None) is not None:
-                                    self._player_map_pos = self._last_smooth_dot
-                                if getattr(self, '_auto_refresh', True) and self.hwnd:
-                                    self._map_dot_lost = getattr(self, '_map_dot_lost', 0) + 1
-                                    _now_force = time.time()
-                                    if (self._map_dot_lost >= 15
-                                            and _now_force - getattr(self, '_last_minimap_force_t', 0) > 2.0):
-                                        self._last_minimap_force_t = _now_force
-                                        self._map_dot_lost = 0
-                                        try:
-                                            self._detect_minimap(debug=False)
-                                            _debug_log("[小地图] 光点连续丢失，立即三模板重定位(换图/尺寸变化兜底)")
-                                        except Exception as _mpe:
-                                            print("[小地图] 光点丢失重定位异常:", _mpe)
-                except Exception as _dot_e:
-                    if self._detect_running:
-                        _debug_log("[人物] 光点检测异常:%s" % _dot_e)
+                # 2026-09-21:小地图光点检测已拆到独立_minimap_loop线程(自己mss截小地图20ms=50fps),本线程不再重复裁小地图块
                 try:
                     self._snap_store.update_parts(player_screen=_ch, player_t=time.time())
                 except Exception as _se:
@@ -16843,7 +16877,10 @@ class MinimapRouteRecorder:
         if not (self._flow_thread and self._flow_thread.is_alive()):
             self._flow_thread = threading.Thread(target=self._flow_loop, daemon=True, name="detect_flow")
             self._flow_thread.start()
-        print("[识别线程] 常开层启动: 截图+人物+田字背景流(绑定窗口常开)")
+        if not (getattr(self, '_minimap_thread', None) and self._minimap_thread.is_alive()):
+            self._minimap_thread = threading.Thread(target=self._minimap_loop, daemon=True, name="detect_minimap")
+            self._minimap_thread.start()
+        print("[识别线程] 常开层启动: 截图+人物+田字背景流+小地图(绑定窗口常开)")
 
     def _start_runtime_detection(self):
         # 运行层(方案B):怪物识别(模板+YOLO+血条)+移动监管+边界守护,点"开始运行"才启动、停止即停(幂等,主循环按_running收敛)
@@ -16873,11 +16910,12 @@ class MinimapRouteRecorder:
         # 全停(解绑窗口/彻底关闭用):先停运行层,再停常开层截图+人物
         self._stop_runtime_detection()
         self._detect_running = False
-        for _th in (self._capture_thread, self._person_thread):
+        for _th in (self._capture_thread, self._person_thread, getattr(self, '_minimap_thread', None)):
             if _th and _th.is_alive():
                 _th.join(timeout=1.0)
         self._capture_thread = None
         self._person_thread = None
+        self._minimap_thread = None
 
     def _publish_combat_decision(self, ch, merged, metric, fc, frame, bars, now_ms):
         """【阶段二·B识别线程=锁怪唯一脑子】每检测轮跑完整目标生命周期(选/维持/判死/同帧重选),
@@ -16981,8 +17019,8 @@ class MinimapRouteRecorder:
                 P['hpframe'] += 1
                 for (_bxP, _byP, _bwP, _bhP) in bars:
                     _bxcP = _bxP + _bwP / 2.0; _bycP = _byP + _bhP / 2.0
-                    _inaP = (_bl[0] - 35) <= _bxcP <= (_bl[0] + 35) and (_bl[1] - 180) <= _bycP <= _bl[1]
-                    _inbP = abs(_bxcP - px) <= _skr and (py - 180) <= _bycP <= py
+                    _inaP = (_bl[0] - 35) <= _bxcP <= (_bl[0] + 35) and (_bl[1] - 150) <= _bycP <= (_bl[1] - 55)
+                    _inbP = abs(_bxcP - px) <= _skr and (py - 150) <= _bycP <= (py - 55)
                     if _inaP or _inbP:
                         P['abhit'] += 1
                         break
@@ -17507,11 +17545,11 @@ class MinimapRouteRecorder:
                 and now - getattr(self, '_face_nudge_t', 0) > 300):
             _fvk = 0x27 if needed_facing > 0 else 0x25
             self._send_win_key(_fvk, keyup=False)
-            self._combat_timed_keys.append((_fvk, now + 40))
+            self._combat_timed_keys.append((_fvk, now + 60))
             self._combat_last_face_dir = needed_facing
             self._combat_facing = needed_facing
             self._face_nudge_t = now
-            _debug_log("[面向] 进停步线脸朝%s,40ms短点掰脸(不位移) 目标X=%d 人物X=%d" % (
+            _debug_log("[面向] 进停步线脸朝%s,60ms短点掰脸(不位移) 目标X=%d 人物X=%d" % (
                 "右" if needed_facing > 0 else "左", t_cx, px))
         # 上轮刚转身：等转身动画结束再打，避免转身瞬间就出手打反方向
         if now < self._combat_turn_until:
@@ -17715,7 +17753,7 @@ class MinimapRouteRecorder:
                         self._release_combat_move()   # 法师落地站定放技能
                     _fvk = VK_RIGHT if _ref_x >= px else VK_LEFT   # 出手前短点朝怪方向掰脸40ms
                     self._send_win_key(_fvk, keyup=False)
-                    self._combat_timed_keys.append((_fvk, now + 40))
+                    self._combat_timed_keys.append((_fvk, now + 60))
                     if _sl_atk:
                         self._press_game_key(_sl_atk)
                         self._attack_last["atk1"] = now
@@ -17813,7 +17851,7 @@ class MinimapRouteRecorder:
                 # 走_combat_timed_keys到期自动松,不进_combat_held_keys、不设move_dir→不会被下面"移动中不发技能"拦
                 _fvk = VK_RIGHT if t_cx >= px else VK_LEFT
                 self._send_win_key(_fvk, keyup=False)
-                self._combat_timed_keys.append((_fvk, now + 50))  # 用户2026-09-20:40ms经常不转向,改50ms(与攻击同帧不位移)
+                self._combat_timed_keys.append((_fvk, now + 60))  # 用户2026-09-21:改60ms
                 self._press_game_key(atk_key)  # keybd_event tap(keydown+keyup)，能松开(用户：用特定模式)
                 self._attack_last["atk1"] = now
                 self._combat_target_attacked = True  # 已对锁定目标出手：空怪判定用

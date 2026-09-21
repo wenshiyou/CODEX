@@ -26,7 +26,8 @@
       88
     ]
   ],
-  "blocklist_monster": false,
+  "blocklist_monster": true,
+  "blocklist_hp_dmg": true,
   "active": "c0",
   "_seq": 2,
   "characters": [
