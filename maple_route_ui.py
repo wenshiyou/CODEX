@@ -16346,8 +16346,7 @@ class MinimapRouteRecorder:
             # 高帧档只在to_ladder/climbing用;但_ladder_precise_mode(=梯子段关怪扫)只允许由进/出段
             # 事件显式置位,绝不在此"看climb_state不对就自动关"——那会在刚决定cross、正平地朝梯走的空档
             # 重开怪扫->冒出cast->争抢抖动(用户2026-09-15拔除该后门)。
-            _precise_now = bool(getattr(self, '_ladder_precise_mode', False)) \
-                and getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing')
+            _precise_now = bool(getattr(self, '_ladder_precise_mode', False))  # 建锁成功即高帧(不再要求climb_state=climbing,否则align走梯底段一直忙档60ms)
             _busy = (time.time() - self._last_monster_seen < 0.4) or bool(getattr(self, '_combat_locked_target', None))
             _elapse = (time.time() - _t0) * 1000   # 本轮检测实际耗时(先算,高帧自适应监管要用)
             if _precise_now:
@@ -16825,7 +16824,7 @@ class MinimapRouteRecorder:
     def _precise_target_period(self):
         """上梯高帧【目标周期】由CPU性能三档给(快22/普通28/慢34ms≈45/36/29Hz);实际周期再由检测线程自适应监管
         (跑不完每档+3退避、封顶LADDER_PRECISE_PERIOD_MAX、轻松再升回此目标),保证慢机不吃满核。读_perf缓存、切档即时变。"""
-        return int(self._perf_val('precise_ms'))
+        return 25  # 上梯高帧固定25ms=40fps(用户2026-09-21:一帧只走3-5px,75px跑跳窗不再错过)
 
     def _start_detection_thread(self):
         # 常开层(方案B·用户定稿):截图+人物 绑定游戏窗口就常开,喂角色识别框/实时识别率/加药竖框,不随运行停
