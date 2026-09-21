@@ -564,7 +564,6 @@ LADDER_PICK_STABLE_DY = 8        # 二帧稳梯:相邻扫描节拍同一把梯�
 LADDER_PICK_STABLE_BEATS = 2     # 连续几个扫描节拍候选都落在容差内=梯子稳定,才建锁(治跑动中锁到边缘/漂移峰)
 LADDER_PICK_FAIL_BEATS = 3       # 连续几个扫描节拍仍建不出稳梯=找不到稳梯,进挪位/冷却(非precise档250ms≈750ms)
 LADDER_REPOS_MS = 130            # 找梯挪位:朝目标怪X方向单次按住左右键时长(≥120ms铁律),挪完回主线自然重锁
-LADDER_REPOS_COOLDOWN_MS = 10000 # 挪1次后10秒冷却:只禁"找梯挪位",扫怪/锁梯/上梯/打怪全程正常,稳梯二帧稳定立即可上
 # === 冻结像素块跟踪(用户2026-09-15:锁像素块身份、不锁坐标) ===
 LADDER_LOCK_PATCH_W = 50       # 建锁时裁下的"这把梯此刻实拍块"宽(和白框矩形50同宽)
 LADDER_LOCK_PATCH_H = 120      # 裁块高(和白框120同高)
@@ -4898,7 +4897,7 @@ class MinimapRouteRecorder:
         _ovd_reset = getattr(self, '_monster_overlay_data', None)  # 出梯清选中梯红框,防到顶后梯红框残留(用户2026-09-20)
         if _ovd_reset is not None:
             _ovd_reset["ladder_sel"] = None
-        # 上梯approach相位复位(用户2026-09-19):站定/二帧建锁/挪位每把梯重来;挪位冷却_ladder_repos_cd_until有意保留
+        # 上梯approach相位复位(用户2026-09-21):站定/二帧建锁每把梯重来;挪位改“每次上梯仅一次”(标志_ladder_repos_done,进上梯入口重置),已删10s冷却
         self._ladder_approach_phase = 'none'
         self._ladder_settle_last_x = None
         self._ladder_settle_last_char_t = 0
@@ -5003,7 +5002,8 @@ class MinimapRouteRecorder:
         self._ladder_pick_fail_beats = 0      # 连续建不出稳梯的扫描节拍数
         self._ladder_lost_beat_scan_t = 0.0   # 已锁跟丢:已计数的扫描节拍
         self._ladder_lost_beats = 0           # 已锁后实时白框+冻结块连续补不回的扫描节拍数
-        self._ladder_repos_cd_until = 0       # 找梯挪位冷却截止ms(跨本次上梯保留10s,_reset_climb有意不清)
+        if not hasattr(self, '_ladder_repos_done'):  # 挪位“每次上梯只一次”标志:仅首次建属性,不在此重置(进上梯入口才置False)
+            self._ladder_repos_done = False
         self._ladder_repos_until = 0          # 本次挪位按住方向截止ms
         self._ladder_repos_dir = 0            # 挪位方向 +1右/-1左
         # === 梯子校准直跳(连续眼手同步伺服)状态复位(用户2026-09-19) ===
@@ -5089,8 +5089,7 @@ class MinimapRouteRecorder:
                     self._hold_toward_ladder(self._ladder_repos_dir)
                     return False
                 self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
-                _cd = max(0, int(self._ladder_repos_cd_until - now_ms))
-                _debug_log("[选梯·挪位] 挪位%dms结束回主线自然重锁(10s冷却剩%dms只禁挪位,稳梯二帧稳定仍立即上)" % (LADDER_REPOS_MS, _cd))
+                _debug_log("[选梯·挪位] 挪位%dms结束(本次上梯只挪这一次),回主线自然重锁;稳梯二帧稳定仍立即上" % LADDER_REPOS_MS)
                 self._reset_climb(); self._decide_climb_fail_action()
                 return False
             if phase == 'settle':
@@ -5130,19 +5129,21 @@ class MinimapRouteRecorder:
             return False
 
     def _ladder_pick_fail_action(self, spx, now_ms, tmox):
-        """连续3扫描节拍无稳梯(用户2026-09-19):冷却内直接回主线重锁同层/身边怪;否则朝怪X挪位LADDER_REPOS_MS(仅1次),
-        挪完回主线自然重锁;10s内不再挪位(扫怪/锁梯/上梯/打怪全程正常,稳梯二帧稳定立即可上)。"""
-        if now_ms < self._ladder_repos_cd_until:
-            _debug_log("[选梯·冷却] 无稳梯且挪位冷却中(剩%dms),回主线重锁;稳梯二帧稳定仍会立即上" % int(self._ladder_repos_cd_until - now_ms))
+        """连续3扫描节拍无稳梯(用户2026-09-21定稿:去掉10s冷却,每次上梯只许挪位一次)。
+        本轮还没挪过→朝怪X挪位LADDER_REPOS_MS这一次,挪完回主线自然重锁;
+        已经挪过仍无稳梯→绝不再挪(根治原地左右来回晃),直接回主线重锁同层/身边怪。
+        稳梯二帧稳定在任何时刻都能立即建锁上梯,不受影响。_ladder_repos_done 由进上梯入口 _enter_to_ladder_up 重置。"""
+        if getattr(self, '_ladder_repos_done', False):
+            _debug_log("[选梯·挪位] 本次上梯已挪位过仍无稳梯,不再挪(防左右来回晃),直接回主线重锁;稳梯二帧稳定仍立即上")
             self._reset_climb(); self._decide_climb_fail_action()
             return
         _dir = 1 if (tmox is None or int(tmox) >= spx) else -1
+        self._ladder_repos_done = True
         self._ladder_repos_dir = _dir
         self._ladder_repos_until = now_ms + LADDER_REPOS_MS
-        self._ladder_repos_cd_until = now_ms + LADDER_REPOS_COOLDOWN_MS
         self._ladder_approach_phase = 'repos'
-        _debug_log("[选梯·挪位] 连续%d扫描节拍无稳梯,朝怪X向%s挪位%dms后自然重锁;%ds内不再挪位(扫怪锁梯不影响)" % (
-            LADDER_PICK_FAIL_BEATS, '右' if _dir > 0 else '左', LADDER_REPOS_MS, LADDER_REPOS_COOLDOWN_MS // 1000))
+        _debug_log("[选梯·挪位] 连续%d扫描节拍无稳梯,朝怪X向%s挪位%dms(本次上梯仅这一次),挪完回主线自然重锁" % (
+            LADDER_PICK_FAIL_BEATS, '右' if _dir > 0 else '左', LADDER_REPOS_MS))
 
     def _back_head_visible(self):
         """后脑勺是否可见=人物是否在梯子上(用户2026-09-18:上爬/下爬梯子都看得到后脑,自由落体/下平台/地面看不到)。
@@ -5556,6 +5557,7 @@ class MinimapRouteRecorder:
         # 连续2帧稳梯建锁成功那一刻才由蒙板段权威置precise=True关扫,关扫窗口最短;走近/站定/扫梯/挪位全程怪扫开、身边出怪可打断回打。
         self._ladder_precise_mode = False
         self._ladder_approach_phase = 'settle'
+        self._ladder_repos_done = False   # 每次进上梯段重置:本轮最多挪位一次(用户2026-09-21去10s冷却改一次性)
         self._ladder_settle_last_x = None
         self._ladder_settle_last_char_t = 0
         self._ladder_settle_frames = 0
@@ -18553,6 +18555,11 @@ class MinimapRouteRecorder:
                                         _stage = '近身怪优先·暂缓锁梯'
                                     elif _scan_t != self._ladder_pick_beat_scan_t:
                                         self._ladder_pick_beat_scan_t = _scan_t   # 一个新扫描节拍
+                                        _dbg_pts = ",".join("(%d,%d)" % (int(_a), int(_b)) for _a, _b in _half[:12])
+                                        _debug_log("[选梯·诊断] 人=(%d,%d) 怪X=%s 带Y[%d,%d]且|X差|<=%d 当帧白框%d把:%s => %s" % (
+                                            _psx, _psy, str(_tmox), _psy - LADDER_DIR_Y_UP_FAR, _psy, LADDER_DIR_X_HALF,
+                                            len(_half), (_dbg_pts if _dbg_pts else "无"),
+                                            (("选中(%d,%d)" % (int(_pick_l[0]), int(_pick_l[1]))) if _pick_l is not None else str(_pick_reason))))
                                         if _pick_l is not None:
                                             _bx, _by = int(_pick_l[0]), int(_pick_l[1])
                                             _stb = self._ladder_pick_stable
