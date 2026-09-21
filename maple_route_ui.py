@@ -16802,15 +16802,6 @@ class MinimapRouteRecorder:
                     self._snap_store.update_parts(player_screen=_ch, player_t=time.time())
                 except Exception as _se:
                     _debug_log("[人物] 快照发布异常:%s" % _se)
-                # 停止态(没在运行打怪)低频扫梯子白框供蒙板常开显示;运行态由识别B线程扫,门控互斥、不同时写缓存(用户2026-09-15)
-                if not self._monster_running and self._raw_char_pos is not None:
-                    _lm_now = time.time()
-                    if _lm_now - getattr(self, '_lad_marks_scan_t', 0.0) >= LADDER_MARK_SCAN_MS / 1000.0:
-                        try:
-                            self._lad_marks_cache = self._scan_ladder_marks(_frame, self._raw_char_pos)
-                            self._lad_marks_scan_t = _lm_now
-                        except Exception:
-                            pass
                 _dt_rounds += 1
                 _rn = time.time()
                 if _rn - _dt_last_report >= 1.0:
@@ -17004,22 +16995,6 @@ class MinimapRouteRecorder:
                     except Exception as _ie:
                         _debug_log("[识别B] 锁怪决策异常:%s" % _ie)
                     _dt_rounds += 1
-                # 梯子白框扫描【2026-09-14性能·从主线程7d搬到识别B线程异步跑】:主线程不再被多模板matchTemplate/
-                # dilate堵住(原近全屏范围单次数百ms、帧率掉到3~5、人物1秒才跟手)。精准(上梯)用小ROI高频档、非精准用
-                # far_range大ROI的250ms档(_scan_ladder_marks内部按_ladder_precise_mode自选范围);结果原子写_lad_marks_cache,
-                # 主线程选梯/蒙板只读,数据格式[(cx,cy,sim)]与节流口径完全不变,仅生产位置改后台、异步一拍(在原gap内)。
-                try:
-                    _lm_ch = self._raw_char_pos
-                    if _frame is not None and _lm_ch is not None:
-                        _lm_precise = bool(getattr(self, '_ladder_precise_mode', False)) and \
-                            getattr(self, '_climb_state', 'none') in ('to_ladder', 'climbing', 'descend')
-                        _lm_gap_s = (LADDER_PRECISE_MARK_MS if _lm_precise else LADDER_MARK_SCAN_MS) / 1000.0
-                        _lm_now = time.time()
-                        if _lm_now - getattr(self, '_lad_marks_scan_t', 0.0) >= _lm_gap_s:
-                            self._lad_marks_cache = self._scan_ladder_marks(_frame, _lm_ch)
-                            self._lad_marks_scan_t = _lm_now
-                except Exception:
-                    pass
                 _rn = time.time()   # B耗时统计每秒一条
                 self._recognize_beat_t = _rn * 1000.0   # H陈旧观测心跳:每处理一新帧刷新(关怪扫上梯时仍扫梯子、照跳)
                 if _rn - _dt_last_report >= 1.0:
@@ -18633,20 +18608,8 @@ class MinimapRouteRecorder:
             except Exception:
                 self._monster_overlay_data["yolo_crop"] = None
                 self._monster_overlay_data["feat_crop"] = None
-            # 梯子白框【常开显示】(用户2026-09-15:不按运行也要看到梯子检测,静止画面还乱跳=检测源头漂)。
-            # 白框由识别B线程(运行态)/人物线程(停止态)互斥扫描写_lad_marks_cache,这里只读下发;停止态没有"选中",清掉残留红框
-            if not hasattr(self, '_lad_marks_cache'):
-                self._lad_marks_cache = []
-            # 白框显示(用户2026-09-20):未锁定/停止态下发全部候选(停止态靠全白框检查检测质量);一旦锁定某把梯(_ladder_lock非空),
-            # 备选白框全部清空、屏幕只留 ladder_sel 红框(避免多把白框干扰/像另一把还锁着);出梯/掉锁 _ladder_lock 回None即恢复全白框重选。
-            # 只改显示层:内部跟踪仍直接读 _lad_marks_cache 全量数据,不受影响。
-            if self._running and getattr(self, '_ladder_lock', None) is not None:
-                self._monster_overlay_data["ladder_marks"] = []
-            else:
-                self._monster_overlay_data["ladder_marks"] = [(c[0], c[1], (c[3] if len(c) > 3 else None)) for c in self._lad_marks_cache]  # 下发(cx,cy,模板序号)
+            # 白框特征梯整套已删(用户2026-09-21改小地图光点+录制梯);停止态只清残留锁定红框
             if not self._running:
-                self._monster_overlay_data["ladder_sel"] = None
-                self._monster_overlay_data["ladder_rect"] = None
                 self._monster_overlay_data["locked_rect"] = None
             _now_sync = time.time()
             if not hasattr(self, '_last_monster_sync_log') or _now_sync - self._last_monster_sync_log > 2:
@@ -18677,222 +18640,6 @@ class MinimapRouteRecorder:
                         # 【阶段一】红框按锁定坐标直画(脱检也在,修"打怪正常但红框经常不显示");预备怪next下发黄框
                         self._monster_overlay_data["locked_rect"] = self._compute_locked_rect(
                             self._monster_overlay_data["locked_target"])
-                    # === 梯子选框(用户2026-09-15:不锁定,每帧实时选) ===
-                    # 白框【下发蒙板】已挪到常开层(不按运行也显示,便于肉眼检查检测稳不稳);运行态这里只取最新白框供下面实时选梯
-                    _now_lm = time.time() * 1000
-                    if not hasattr(self, '_lad_marks_cache'):
-                        self._lad_marks_cache = []
-                    # === 选梯(用户2026-09-15定稿:锁像素块身份、不锁坐标;候选累积约两帧抗闪) ===
-                    # ①recent累积约两帧白框(同一把邻帧≤归并半径就刷新位置),单帧扫不到邻帧扫到仍在池里;
-                    # ②未锁:在池里按方向带(上行头顶0~-200人梯Y差硬门/下行脚下0~+150、X左右各300怪在哪侧选哪侧)建锁(只用一次),当场反查钉录制端;
-                    # ③已锁:不再全局重选,只在池里找离上一帧锁点最近的=同一把,坐标随它动(身份固定、值在动);
-                    # ④空帧(寻怪范围两帧池也没):不钉旧点、snap置None(红框这帧不画、直跳不拿旧坐标算差值),锁身份保留;连续LADDER_MERGE_WAIT_MS真没有才清锁回主线。
-                    _white_now = [(c[0], c[1]) for c in self._lad_marks_cache]
-                    _sel = None
-                    _climb_st = getattr(self, '_climb_state', 'none')
-                    if _climb_st != 'none' and _climb_st != 'descend' and self._player_screen_pos:
-                        # 用户2026-09-16:descend状态下不选梯(下跳前清梯子锁定,只有方式二找梯子时才重新锁)
-                        try:
-                            _psx, _psy = self._player_screen_pos
-                            _cdir = int(getattr(self, '_climb_direction', 1) or 1)
-                            _tmox = getattr(self, '_ladder_target_mon_x', None)  # 进梯冻结的目标怪屏幕X(固定终点)
-                            _tmoy = getattr(self, '_ladder_target_mon_y', None)  # 进梯冻结的目标怪屏幕Y
-                            # 候选=当帧实时白框(用户2026-09-19删两帧累积池:建锁改由"连续扫描节拍二帧稳定"判稳,
-                            # 已锁后红框坐标每帧取实时同条;数据层一把梯只一个对象,不再累积旧帧)。
-                            _half = _white_now
-                            _fc = self._get_fight_config()
-                            _rx = _ry = None
-                            _db_band = []
-                            _stage = ''
-                            _lock = getattr(self, '_ladder_lock', None)
-                            _ap = getattr(self, '_ladder_approach_phase', 'align')
-                            _scan_t = getattr(self, '_lad_marks_scan_t', 0.0)
-                            _jumped = (_climb_st == 'climbing') or (getattr(self, '_ladder_jump_phase', None) == 'post_jump') \
-                                or (getattr(self, '_ladder_realign_phase', None) in ('approach', 'settle'))
-                            if _lock is None:
-                                # ②未锁:只在to_ladder的pick相位(已走到怪下方站定、怪扫仍开)按"扫描节拍二帧稳定"建锁;
-                                # settle走近/repos挪位不在此建锁;上行选框范围=寻怪范围、含脚边(y_near=0)。建锁那一刻才权威关怪扫。
-                                _up_pick = (_climb_st == 'to_ladder' and _ap == 'pick')
-                                # 下行(下跳失败转走梯,cdir=-1,不走approach、phase=none):保持原"方向带每帧选中即锁",范围用默认下行带(用户:下行不碰)
-                                _down_fast = (_climb_st == 'to_ladder' and _cdir < 0 and _ap not in ('settle', 'pick'))
-                                # 上行pick站定期间,B线正在cast=技能范围有近身怪开打→暂缓建锁(不关扫/不累计失败),先打完边上的怪再锁梯(用户2026-09-19)
-                                _pkt = getattr(self, '_combat_decision_packet', None)
-                                _busy_cast = bool(_pkt and _pkt.get('state') == 'cast')
-                                if _up_pick or _down_fast:
-                                    if _down_fast:
-                                        _pick_l, _pick_reason, _db_band = self._dir_band_pick_ladder(
-                                            _half, _psx, _psy, _cdir, _tmox)
-                                    else:
-                                        _pick_l, _pick_reason, _db_band = self._dir_band_pick_ladder(
-                                            _half, _psx, _psy, _cdir, _tmox,
-                                            x_half=LADDER_DIR_X_HALF, y_far=LADDER_DIR_Y_UP_FAR, y_near=0)  # 锁梯人梯|X差|<=300;上范围统一头顶200(用户2026-09-21)
-                                    if _down_fast:
-                                        if _scan_t != self._ladder_pick_beat_scan_t:
-                                            self._ladder_pick_beat_scan_t = _scan_t
-                                            if _pick_l is not None:
-                                                _bx, _by = int(_pick_l[0]), int(_pick_l[1])
-                                                self._ladder_lock = (_bx, _by, _now_lm)
-                                                self._ladder_snap_x = _bx
-                                                self._ladder_lock_t0 = _now_lm
-                                                self._freeze_ladder_patch(_bx, _by)
-                                                self._set_b_lock_enabled(False, '下行建锁·关B锁专心下跳')
-                                                self._ladder_lost_beats = 0
-                                                self._ladder_lost_beat_scan_t = _scan_t
-                                                _sel = (_bx, _by, True); _rx, _ry = _bx, _by
-                                                _stage = '下行建锁'
-                                                _debug_log("[选梯·建锁] 下行方向带 人=(%d,%d) 带内%d把[%s] 选中(%d,%d)" % (
-                                                    _psx, _psy, len(_db_band), _pick_reason, _bx, _by))
-                                            else:
-                                                _stage = '下行带内无梯'
-                                    elif _busy_cast:
-                                        _stage = '近身怪优先·暂缓锁梯'
-                                    elif _scan_t != self._ladder_pick_beat_scan_t:
-                                        self._ladder_pick_beat_scan_t = _scan_t   # 一个新扫描节拍
-                                        _dbg_pts = ",".join("(%d,%d)" % (int(_a), int(_b)) for _a, _b in _half[:12])
-                                        _debug_log("[选梯·诊断] 人=(%d,%d) 怪X=%s 带Y[%d,%d]且|X差|<=%d 当帧白框%d把:%s => %s" % (
-                                            _psx, _psy, str(_tmox), _psy - LADDER_DIR_Y_UP_FAR, _psy, LADDER_DIR_X_HALF,
-                                            len(_half), (_dbg_pts if _dbg_pts else "无"),
-                                            (("选中(%d,%d)" % (int(_pick_l[0]), int(_pick_l[1]))) if _pick_l is not None else str(_pick_reason))))
-                                        if _pick_l is not None:
-                                            _bx, _by = int(_pick_l[0]), int(_pick_l[1])
-                                            _stb = self._ladder_pick_stable
-                                            if _stb and abs(_bx - _stb[0]) <= LADDER_PICK_STABLE_DX and abs(_by - _stb[1]) <= LADDER_PICK_STABLE_DY:
-                                                _beats = _stb[2] + 1
-                                            else:
-                                                _beats = 1
-                                            self._ladder_pick_stable = (_bx, _by, _beats)
-                                            if _beats >= LADDER_PICK_STABLE_BEATS:
-                                                # 建锁前先验高度差(用户2026-09-21):头顶>200/脚下>150或|X差|>300=选错梯,不跳不走、放弃清锁重锁;
-                                                # 合规才建锁、关B锁怪专心上梯,到顶或上梯失败再开B锁重锁。
-                                                _reach_dy = (_psy - _by) if _cdir > 0 else (_by - _psy)
-                                                _reach_lim = LADDER_DIR_Y_UP_FAR if _cdir > 0 else LADDER_TPL_Y_FAR
-                                                if (_reach_dy > _reach_lim) or (abs(_bx - _psx) > LADDER_DIR_X_HALF):
-                                                    _debug_log("[选梯·建锁] 锁点超限(头顶/脚%.0f>%d,X差%.0f>%d)放弃,清锁重锁同层怪" % (
-                                                        _reach_dy, _reach_lim, abs(_bx - _psx), LADDER_DIR_X_HALF))
-                                                    self._ladder_pick_stable = None
-                                                    self._ladder_pick_fail_beats = 0
-                                                    self._set_b_lock_enabled(True, '锁点超限放弃')
-                                                    self._reset_climb()
-                                                    self._decide_climb_fail_action()
-                                                else:
-                                                    self._ladder_lock = (_bx, _by, _now_lm)
-                                                    self._ladder_snap_x = _bx
-                                                    self._ladder_lock_t0 = _now_lm
-                                                    self._freeze_ladder_patch(_bx, _by)
-                                                    self._ladder_approach_phase = 'align'
-                                                    self._ladder_pick_stable = None
-                                                    self._ladder_pick_fail_beats = 0
-                                                    self._ladder_lost_beats = 0
-                                                    self._ladder_lost_beat_scan_t = _scan_t
-                                                    self._ladder_precise_mode = True
-                                                    self._set_b_lock_enabled(False, '二帧稳梯建锁·关B锁专心上梯')
-                                                    _sel = (_bx, _by, True)
-                                                    _rx, _ry = _bx, _by
-                                                    _stage = '二帧稳梯建锁'
-                                                    self._note_freq_event('lock_lad', 3, 1000, "1秒内反复锁定梯子%d次(疑似掉锁/白框不稳)")
-                                                    _debug_log("[选梯·建锁] 二帧稳定向%s 人=(%d,%d) 怪X=%s 带内%d把[%s] 选中(%d,%d),已关怪扫与B锁一心上梯" % (
-                                                        '上' if _cdir > 0 else '下', _psx, _psy, _tmox, len(_db_band), _pick_reason, _bx, _by))
-                                            else:
-                                                self._ladder_pick_fail_beats += 1
-                                                _stage = '稳梯观察%d/%d' % (_beats, LADDER_PICK_STABLE_BEATS)
-                                        else:
-                                            self._ladder_pick_stable = None
-                                            self._ladder_pick_fail_beats += 1
-                                            _stage = '带内无梯'
-                                else:
-                                    _stage = '未锁·相位%s' % _ap
-                            else:
-                                # ③已锁(用户2026-09-19):红框坐标每帧取【实时白框里的同一条】(X+Y双判,半径=合并阈值),
-                                # 数据层一把梯只一个对象、红框与真梯实时重合;实时这帧没同条,才用建锁冻结块matchTemplate补位(仅空帧补位)。
-                                _lx, _ly, _lt = _lock
-                                _rt = None
-                                _same = [p for p in _half if abs(p[0] - _lx) <= LADDER_MERGE_DX and abs(p[1] - _ly) <= LADDER_MERGE_DY]
-                                if _same:
-                                    _nx, _ny = min(_same, key=lambda p: (p[0] - _lx) ** 2 + (p[1] - _ly) ** 2)
-                                    _rt = (int(_nx), int(_ny)); _stage = '实时同把'
-                                else:
-                                    _patch = getattr(self, '_ladder_lock_patch', None)
-                                    _frf = self._raw_frame
-                                    if _patch is not None and _frf is not None:
-                                        _ph, _pw = _patch.shape[:2]
-                                        _fh2, _fw2 = _frf.shape[:2]
-                                        _sx1 = max(0, _lx - LADDER_LOCK_SEARCH_X); _sx2 = min(_fw2, _lx + LADDER_LOCK_SEARCH_X)
-                                        _sy1 = max(0, _ly - LADDER_LOCK_SEARCH_Y); _sy2 = min(_fh2, _ly + LADDER_LOCK_SEARCH_Y)
-                                        _search = _frf[_sy1:_sy2, _sx1:_sx2]
-                                        if _search.shape[0] > _ph and _search.shape[1] > _pw:
-                                            _rr = cv2.matchTemplate(_search, _patch, cv2.TM_CCOEFF_NORMED)
-                                            _, _mv, _, _mloc = cv2.minMaxLoc(_rr)
-                                            if _mv >= LADDER_LOCK_PATCH_SIM:
-                                                _rt = (int(_sx1 + _mloc[0] + _pw // 2), int(_sy1 + _mloc[1] + _ph // 2)); _stage = '冻结块补位'
-                                if _rt is not None:
-                                    _rx, _ry = _rt
-                                    if not _jumped:
-                                        _reach_dy2 = (_psy - _ry) if _cdir > 0 else (_ry - _psy)
-                                        _reach_lim2 = LADDER_DIR_Y_UP_FAR if _cdir > 0 else LADDER_TPL_Y_FAR
-                                        if (_reach_dy2 > _reach_lim2) or (abs(_rx - _psx) > LADDER_DIR_X_HALF):
-                                            _debug_log("[选梯·跟踪] 平地漂出带(%.0f>%d,X%.0f>%d)放弃清锁重锁" % (
-                                                _reach_dy2, _reach_lim2, abs(_rx - _psx), LADDER_DIR_X_HALF))
-                                            self._ladder_lock = None; self._ladder_lock_patch = None; self._ladder_snap_x = None
-                                            self._ladder_approach_phase = 'pick'; self._ladder_precise_mode = False
-                                            self._ladder_pick_stable = None; self._ladder_pick_fail_beats = 0
-                                            self._ladder_pick_beat_scan_t = 0.0; self._ladder_lost_beats = 0
-                                            self._set_b_lock_enabled(True, '跟踪漂出带放弃')
-                                            self._reset_climb(); self._decide_climb_fail_action()
-                                            _rx = _ry = None; _sel = None
-                                        else:
-                                            self._ladder_lock = (_rx, _ry, _now_lm)   # 身份不变、坐标更新到实时/补位点
-                                            self._ladder_snap_x = _rx
-                                            self._ladder_lost_beats = 0
-                                            _sel = (_rx, _ry, True)
-                                    else:
-                                        self._ladder_lock = (_rx, _ry, _now_lm)   # 身份不变、坐标更新到实时/补位点
-                                        self._ladder_snap_x = _rx
-                                        self._ladder_lost_beats = 0
-                                        _sel = (_rx, _ry, True)
-                                else:
-                                    # 实时+冻块这帧都补不回:snap=None(红框这帧不画、对位不拿旧点),按扫描节拍计丢失
-                                    self._ladder_snap_x = None
-                                    _sel = None
-                                    _stage = '补不回'
-                                    if _scan_t != self._ladder_lost_beat_scan_t:
-                                        self._ladder_lost_beat_scan_t = _scan_t
-                                        self._ladder_lost_beats += 1
-                                        if (not _jumped) and self._ladder_lost_beats >= LADDER_PICK_FAIL_BEATS and _cdir > 0:
-                                            # 上行未起跳(平地align)连续3拍补不回:清锁回pick重新二帧稳梯(再3拍无→主线挪位/冷却回主线),并重开怪扫;
-                                            # 起跳后(post_jump/realign/climbing)保身份等找回; 下行(cdir<0)不在此清锁,保身份交状态机连续找不到梯超时保命
-                                            _debug_log("[梯子·掉锁] 建锁后平地连续%d扫描节拍实时+冻块补不回(最后锁点(%d,%d)),清锁回pick重新稳梯" % (
-                                                LADDER_PICK_FAIL_BEATS, _lx, _ly))
-                                            self._ladder_lock = None
-                                            self._ladder_lock_patch = None
-                                            self._ladder_snap_x = None
-                                            self._ladder_approach_phase = 'pick'
-                                            self._ladder_pick_stable = None
-                                            self._ladder_pick_fail_beats = 0
-                                            self._ladder_pick_beat_scan_t = 0.0
-                                            self._ladder_lost_beats = 0
-                                            self._ladder_precise_mode = False   # 回pick重稳=未起跳,重开怪扫让身边同层怪可打断回打(用户2026-09-19)
-                                            _rx = _ry = None
-                                            _stage = '回pick重稳'
-                            if _now_lm - getattr(self, '_snap_dbg_t', 0) >= 300:
-                                self._snap_dbg_t = _now_lm
-                                if _lock is None:
-                                    if _climb_st == 'to_ladder' and _ap == 'pick':
-                                        _allx = ('%s 带内%d把:%s' % (_stage, len(_db_band), ';'.join('%d,%d' % (wx, wy) for wx, wy in _db_band))) if _db_band else ('%s 带内无梯' % _stage)
-                                    else:
-                                        _allx = '相位%s(不建锁)' % _ap
-                                else:
-                                    # 已锁补"锁点帧漂移"(镜头快滚/串梯一眼可见)、"人梯X差"、连续补不回拍数
-                                    _drift = (abs(_rx - _lock[0]) + abs(_ry - _lock[1])) if _rx is not None else -1
-                                    _xdiff = (_rx - _psx) if _rx is not None else 0
-                                    _allx = '%s 锁点(%d,%d)窗内%d把 帧漂移%d 人梯X差%+.0f 丢拍%d' % (
-                                        _stage, _lock[0], _lock[1], len(_half), _drift, _xdiff, self._ladder_lost_beats)
-                                _debug_log("[选梯·锁身份] %s 人=(%d,%d) 怪=(%s,%s) 向%s %s→选中=(%s,%s)" % (
-                                    _stage, _psx, _psy, _tmox, _tmoy, ('上' if _cdir > 0 else '下'), _allx, _rx, _ry))
-                        except Exception as _le:
-                            _debug_log("[选梯·锁身份] 选梯异常: %r" % (_le,))
-                            _sel = None
-                    self._monster_overlay_data["ladder_sel"] = _sel
-                    self._monster_overlay_data["ladder_rect"] = None  # 旧洋红16宽全长框停用,统一为120x50红框ladder_sel
                 except Exception as e:
                     print("[蒙板] 同步异常:", e)
 
