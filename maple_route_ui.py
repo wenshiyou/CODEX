@@ -18512,6 +18512,7 @@ class MinimapRouteRecorder:
                                                 self._ladder_snap_x = _bx
                                                 self._ladder_lock_t0 = _now_lm
                                                 self._freeze_ladder_patch(_bx, _by)
+                                                self._set_b_lock_enabled(False, '下行建锁·关B锁专心下跳')
                                                 self._ladder_lost_beats = 0
                                                 self._ladder_lost_beat_scan_t = _scan_t
                                                 _sel = (_bx, _by, True); _rx, _ry = _bx, _by
