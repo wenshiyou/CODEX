@@ -722,6 +722,7 @@ DESC_LAD_SLIDE_MS = 1000       # 方式二:滑梯1秒
 DESC_LAD_LEAP_SIDE_MS = 150    # 方式二:侧跳150ms
 DESC_LAD_FALL_WAIT_MS = 500    # 方式二:侧跳后500ms检测Y
 DESC_Y_MOVE_TOL = 5            # 方式二lad_grab:光点Y比基准增大>5=抓住梯子向下动了
+DESC_AVOID_LADDER_MM = 18     # 下跳横跳错开梯子:小地图光点X这一半径内、梯身竖向覆盖光点Y的梯=该侧有梯,横跳优先选无梯侧(用户2026-09-22);实心台两侧都跳不下仍由check_drop两次失败转方式二走梯
 DESC_LAD_LEAP_MAX = 2          # 方式二侧跳离梯后,lad_fall_wait仍见后脑=没甩开梯子,最多补几次侧跳横跳(用户2026-09-22),补满仍挂梯不死磕、回主线重锁
 LADDER_DEL_X_TOL = 6          # 梯删除点选命中：点击点与梯子X差≤6(小地图原始分辨率)且Y落在线段内=删这条
 LADDER_DEL_Y_TOL = 4
@@ -5773,16 +5774,55 @@ class MinimapRouteRecorder:
         if VK_DOWN not in self._random_move_keys:
             self._key_down(VK_DOWN)
 
-    def _pick_desc_side(self):
-        """下行横跳方向:怪在右边选右(1),怪在左边选左(-1),没怪随机"""
+    def _pick_desc_side(self, px=None, py=None):
+        """下行横跳方向(用户2026-09-22改):第一优先【错开梯子】。横跳是为下穿平台,朝梯子跳会抓住梯=没跳下去还误转方式二。
+        用小地图光点(px,py)与录制蓝梯self.ladders([{x,y_top,y_bottom}]):统计左右两侧 DESC_AVOID_LADDER_MM 内、
+        梯身竖向覆盖光点Y 的最近梯距;仅一侧有梯->跳无梯侧;两侧都无->按怪方向、无怪参照随机;两侧都有->跳梯距更远侧。
+        实心台真跳不下仍由check_drop两次失败后自动转方式二走到梯子位置下去,不在动作中途判。px/py必须是小地图坐标。"""
         try:
-            tx = getattr(self, '_target_monster_x', None)
-            px = getattr(self, '_player_x', None)
-            if tx is not None and px is not None:
-                return 1 if tx > px else -1
+            if px is None or py is None:
+                _mp = getattr(self, '_player_map_pos', None)
+                if _mp:
+                    px = _mp[0] if px is None else px
+                    py = _mp[1] if py is None else py
+            lds = getattr(self, 'ladders', None)
+            left_gap = right_gap = None
+            if lds and px is not None and py is not None:
+                _pfx, _pfy = float(px), float(py)
+                for _t in lds:
+                    try:
+                        tx = float(_t['x']); tt = float(_t['y_top']); tb = float(_t['y_bottom'])
+                    except Exception:
+                        continue
+                    # 只看梯身竖向覆盖光点当前高度的梯(同层台边能被抓住的),别层梯不参与
+                    if not (tt - DESC_AVOID_LADDER_MM <= _pfy <= tb + DESC_AVOID_LADDER_MM):
+                        continue
+                    if tx < _pfx:
+                        g = _pfx - tx
+                        left_gap = g if left_gap is None else min(left_gap, g)
+                    else:
+                        g = tx - _pfx
+                        right_gap = g if right_gap is None else min(right_gap, g)
+            l_near = left_gap is not None and left_gap <= DESC_AVOID_LADDER_MM
+            r_near = right_gap is not None and right_gap <= DESC_AVOID_LADDER_MM
+            if l_near and not r_near:
+                _d = 1; _why = '左侧%.0f有梯,错开跳右' % left_gap
+            elif r_near and not l_near:
+                _d = -1; _why = '右侧%.0f有梯,错开跳左' % right_gap
+            elif l_near and r_near:
+                _d = 1 if right_gap >= left_gap else -1
+                _why = '两侧皆有梯(左%.0f/右%.0f),跳更远的%s侧' % (left_gap, right_gap, '右' if _d > 0 else '左')
+            else:
+                tx = getattr(self, '_target_monster_x', None)
+                if tx is not None and px is not None:
+                    _d = 1 if tx > float(px) else -1
+                    _why = '两侧无梯,按怪方向跳%s' % ('右' if _d > 0 else '左')
+                else:
+                    _d = random.choice([-1, 1]); _why = '两侧无梯无怪参照,随机'
+            _debug_log('[下行·避梯] 横跳方向=%s (%s)' % ('右' if _d > 0 else '左', _why))
+            return _d
         except Exception:
-            pass
-        return random.choice([-1, 1])
+            return random.choice([-1, 1])
 
     def _enter_desc_fall(self, py, now_ms):
         """阶段fall：直接下跳已确认Y变大后的自由落体——不按任何键(用户2026-09-09:跳后即松↓不长按),
@@ -5834,7 +5874,7 @@ class MinimapRouteRecorder:
                     self._desc_side_t = now_ms
                     if VK_DOWN in self._random_move_keys:
                         self._key_up(VK_DOWN)  # 松↓
-                    self._desc_leap_dir = self._pick_desc_side()
+                    self._desc_leap_dir = self._pick_desc_side(px, py)
                     _svk = VK_RIGHT if self._desc_leap_dir > 0 else VK_LEFT
                     _ovk = VK_LEFT if _svk == VK_RIGHT else VK_RIGHT
                     if _ovk in self._random_move_keys:
@@ -5932,7 +5972,7 @@ class MinimapRouteRecorder:
             if now_ms - self._desc_phase_t >= DESC_LAD_SLIDE_MS:
                 if VK_DOWN in self._random_move_keys:
                     self._key_up(VK_DOWN)
-                self._desc_leap_dir = random.choice([-1, 1])   # 随机左/右拟人,避免每次同方向离梯
+                self._desc_leap_dir = self._pick_desc_side(px, py)   # 用户2026-09-22:离梯侧跳也错开梯子,别又跳回另一把梯
                 _svk = VK_RIGHT if self._desc_leap_dir > 0 else VK_LEFT
                 if _svk not in self._random_move_keys:
                     self._key_down(_svk)
@@ -5975,7 +6015,7 @@ class MinimapRouteRecorder:
                 _n2 = getattr(self, '_desc_side_leap_n', 0)
                 if _bv2 and _n2 < DESC_LAD_LEAP_MAX:
                     self._desc_side_leap_n = _n2 + 1
-                    self._desc_leap_dir = self._pick_desc_side()
+                    self._desc_leap_dir = self._pick_desc_side(px, py)
                     _svk2 = VK_RIGHT if self._desc_leap_dir > 0 else VK_LEFT
                     self._key_up(VK_LEFT); self._key_up(VK_RIGHT); self._key_up(VK_DOWN)
                     if _svk2 not in self._random_move_keys:
@@ -7733,6 +7773,10 @@ class MinimapRouteRecorder:
                 print("[启动] 脚本已启动 (F10)")
                 self._add_log("脚本已启动 F10")
                 _debug_log("[启动] F10 已触发, _running=True, hwnd=%s" % self.hwnd)
+                try:
+                    self._rlog("战斗已启动(F10)", LOG_OK, log='behavior')
+                except Exception:
+                    pass
         elif vk == VK_F11:
             print("[热键] 倍率校准 (F11)")
             self._start_auto_calibration()
@@ -7754,6 +7798,11 @@ class MinimapRouteRecorder:
                     self._stop_monster_overlay()
                 print("[停止] 脚本已停止 (F12)")
                 self._add_log("脚本已停止 F12")
+                _debug_log("[停止] F12 已触发, _running=False, 运行层已停")
+                try:
+                    self._rlog("战斗已停止(F12)", LOG_RED, log='behavior')
+                except Exception:
+                    pass
 
     def _on_mouse(self, event, x, y, flags, param):
         """鼠标点击回调：标签页切换 + 路线页按钮"""
@@ -16013,6 +16062,7 @@ class MinimapRouteRecorder:
         采集匹配区160(搜索半径56,吃低帧大位移),显示田字120十字四格。诊断版只发布+打日志,不参与任何动作判定。"""
         FLOW_BOX, FLOW_MATCH, FLOW_TAIL_GAP, FLOW_MIN_GAP, FLOW_MARGIN = 120, 160, 500, 160, 24
         FLOW_LIFT_Y = 150   # 水平移动时田字框在吊身后基础上再上移的像素(斜后方、不平齐人物;用户2026-09-20)
+        FLOW_TAIL_GAP_UP_Y = 150  # 垂直【向上】移动时田字框吊在身后(下方)的偏移(用户2026-09-22:原500太靠底改150);向下移动仍吊上方FLOW_TAIL_GAP
         FLOW_WIN_MS, FLOW_MIN_ROUNDS, FLOW_MATCH_THR, FLOW_MIN_D = 300, 3, 0.5, 1.0
         _hd = FLOW_BOX // 2; _hm = FLOW_MATCH // 2
         _last_seq = -1
@@ -16042,7 +16092,7 @@ class MinimapRouteRecorder:
                 _px, _py = int(_ch[0]), int(_ch[1])
                 if 'y' in _intents:
                     _axis = 'y'; _d = int(_intents['y'].get('dir', 1) or 1)
-                    _cx = _px; _cy = (_py - FLOW_TAIL_GAP) if _d > 0 else (_py + FLOW_TAIL_GAP)
+                    _cx = _px; _cy = (_py - FLOW_TAIL_GAP) if _d > 0 else (_py + FLOW_TAIL_GAP_UP_Y)  # 上移(d<0)身后下方只偏150(用户2026-09-22)
                 else:
                     _axis = 'x'; _d = int(_intents['x'].get('dir', 1) or 1)
                     _cx = (_px - FLOW_TAIL_GAP) if _d > 0 else (_px + FLOW_TAIL_GAP); _cy = _py - FLOW_LIFT_Y  # 水平:身后+上移=斜后方
@@ -16513,7 +16563,12 @@ class MinimapRouteRecorder:
                     if _inaP or _inbP:
                         P['abhit'] += 1
                         break
-            if now_ms - P['t0'] >= 5000:
+            if not getattr(self, '_running', False):
+                # 未运行(没点开始/F12或已停止):不统计不打印战斗判活;识别常开层照跑,照旧刷会造成'主攻0却血条命中=在打怪'假象(用户2026-09-22实锤长发呆根因)
+                P['t0'] = now_ms
+                for _kP in ('atk','aoe','win','probe_dmg','gate_dmg','hpframe','abhit','misalign','early','notskill'):
+                    P[_kP] = 0
+            elif now_ms - P['t0'] >= 5000:
                 _debug_log("[判活汇总] 近5秒: 主攻%d 群攻%d | 检测窗%d帧 探针见伤害%d 门控见伤害%d | 血条帧%d A/B命中%d | 门未开[对不齐%d 太早%d 非射程%d]" % (
                     P['atk'], P['aoe'], P['win'], P['probe_dmg'], P['gate_dmg'], P['hpframe'], P['abhit'],
                     P['misalign'], P['early'], P['notskill']))
@@ -16772,8 +16827,8 @@ class MinimapRouteRecorder:
             _debug_log("[战斗诊断] 运行=%s 人物=%s 怪数=%d has_target=%s "
                        "react余=%dms turn余=%dms busy余=%dms 锁定=%s 怪物匹配=%d套" % (
                 self._running, self._player_screen_pos, len(self._monsters), has_target,
-                int(self._combat_react_until - now), int(self._combat_turn_until - now),
-                int(self._combat_busy_until - now), self._combat_locked_target,
+                max(0, int(self._combat_react_until - now)), max(0, int(self._combat_turn_until - now)),
+                max(0, int(self._combat_busy_until - now)), self._combat_locked_target,
                 len(getattr(self, '_monster_templates', []))))
 
         # 左右越线强制拉回已上移到主循环帧首(_bound_pull_tick,第一时间独占拉回1000~1500ms),combat_tick内不再重复处理
