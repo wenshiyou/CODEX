@@ -9642,7 +9642,7 @@ class MinimapRouteRecorder:
             disp.extend(grp)
         return disp
 
-    def _maint_trim_debug_log(self, keep_minutes=5):
+    def _maint_trim_debug_log(self, keep_minutes=60):
         """debug.log 只保留最近 keep_minutes 分钟(按行首[HH:MM:SS])；小于0.5MB不动避免频繁IO。
         _debug_log 每次重开 'a' 追加，故这里可安全 os.replace 替换正在写的文件。"""
         try:
@@ -9697,9 +9697,9 @@ class MinimapRouteRecorder:
             _debug_log("[维护] 清缓存异常: %s" % ex)
 
     def _maint_run(self):
-        """定期维护：debug.log留最近5分钟 + 清1天前调试缓存。
+        """定期维护：debug.log留最近60分钟(1小时) + 清1天前调试缓存。
         backups自动快照按用户要求全部保留，不在此删除。"""
-        self._maint_trim_debug_log(5)
+        self._maint_trim_debug_log(60)
         self._maint_clean_old_cache(1)
 
     def _load_char_templates(self):
@@ -17822,7 +17822,7 @@ class MinimapRouteRecorder:
                 _debug_log("[停滞观测] 异常: %s" % _oe)
             self._seg_loop['6combat'] = self._seg_loop.get('6combat', 0) + time.time() - self._lk.get('before_combat', time.time())
             self._lk['after_combat'] = time.time()
-            # === 定期维护(启动即跑一次，之后每10分钟)：debug.log只留最近5分钟、清1天前调试缓存；backups全部保留 ===
+            # === 定期维护(启动即跑一次，之后每10分钟)：debug.log只留最近60分钟(1小时)、清1天前调试缓存；backups全部保留 ===
             try:
                 _mnt_now = time.time()
                 if _mnt_now - getattr(self, '_last_maint_ts', 0) > 600:
