@@ -529,7 +529,7 @@ TP_MIN_SCREEN_DY = 20     # 竖直瞬移有效:人物屏幕Y朝预期方向至�
 TP_FAIL_MAX = 2           # 同一目标连续瞬移无效达2次→暂时对它禁用瞬移,改走路/跳/梯子
 TP_BLOCK_MS = 3000        # 对该目标禁用瞬移3秒(绑定目标,换目标自动解除),过后可再试
 TP_ATK_RELEASE_MS = 170   # 瞬移前置:先松主攻键再等170ms前摇(攻击硬直没结束会吞瞬移键;2026-09-17真机:50ms太短瞬移被吞、肉眼没看到闪,提到120与"单次按键≥120ms"铁律一致)
-TP_POST_MS = 300          # 瞬移后摇:瞬移落地300ms内不发主攻/群攻/跳高打(瞬移硬直期发攻击会被吞),移动追怪照常,避免瞬移后空挥/发呆(2026-09-17用户定)
+TP_POST_MS = 150          # 瞬移后摇:瞬移落地150ms内不发主攻/群攻/跳高打(瞬移硬直期发攻击会被吞),移动追怪照常,避免瞬移后空挥/发呆(2026-09-17用户定)
 TP_COOLDOWN_MS = 2000      # 瞬移冷却:任意两次瞬移(战斗水平/竖直+向梯)最小间隔2秒(用户2026-09-18定);独立于前后摇,前后摇是技能必备时序不在此改
 TP_COORD_FRESH_MS = 400   # 瞬移生效校验:人物画面坐标在400ms内刷新过才算"新鲜";坐标陈旧=全图重定位还没出新点,不判瞬移无效继续等(治"闪了却被误判无位移")
 
@@ -588,7 +588,7 @@ CLIMB_BOX_SEP_MIN = 60         # 任意两采样点中心最小间距(曼哈顿�
 CLIMB_STILL_MS = 200           # 第二步:确认"真的在爬"后,背景点连续静止多久=到顶/到底(2026-09-10再提效300→200:垂直运动分解后被横向撞不误判,200ms足够确认停稳,到顶更快)
 CLIMB_TOTAL_TIMEOUT_MS = 12000 # 爬梯总超时兜底(防异常永久卡),到点按到顶收尾
 ARRIVAL_RESET_COOLDOWN_MS = 500 # 到顶/落地/走台"到达新平台"重扫冷却(2026-09-10再提效1200→500:到顶发呆主因之一;两次真实换台必>500ms仍挡得住"到达连发→清空重锁左右横跳",又能更快重锁本层怪)
-DESCEND_RELOCK_DELAY_MS = 2000  # 下跳(下台)【横跳(方式一第二跳/方式二侧跳离梯)后】多少ms才许B重新锁怪(用户2026-09-19定稿:不判落地,横跳起计时2秒,窗内B只清锁不出包、识别照开,到期用热怪表重锁;到顶/走台/边界仍只150ms)
+DESCEND_RELOCK_DELAY_MS = 1500  # 下跳(下台)【横跳(方式一第二跳/方式二侧跳离梯)后】多少ms才许B重新锁怪(用户2026-09-19定稿:不判落地,横跳起计时1.5秒,窗内B只清锁不出包、识别照开,到期用热怪表重锁;到顶/走台/边界仍只150ms)
 ARRIVAL_EMPTY_MAX = 3          # 走台"终点就在身边、根本没真移动却判到达"的连续次数上限:超了强制留本层正常打怪、短时间不再cross空转(用户:每个执行机制都要有次数上限,不许无限循环)
 # 【用户2026-09-09定稿】跳高打（怪比人高时，屏幕像素PX）——区间在"技能Y范围"弹窗最下一行两个框自定义：
 #   下限~上限(如25~180)两个都填才启用：怪比人高落在[下限,上限]内 且 X差≤300 → 直接朝怪"走-跳-打"，每500~600ms跳一次(不连跳)，
@@ -672,12 +672,12 @@ LADDER_DEBUG_DIFF_PX = 200        # 诊断(用户2026-09-15):人梯屏幕|X差|�
 LADDER_DEBUG_DIFF_MS = 1000       # 诊断:"人X-梯X"打印节流1秒1条
 LADDER_REALIGN_NO_TPL_MS = 1200   # 校准直跳里连续多久拿不到梯子屏幕X(无模板/匹配不到)=回主线,不死等
 # === 后脑勺抓梯/到顶/卡住监管(用户2026-09-18定稿:人在梯子上(上爬/下爬)才看得到后脑勺,自由落体/下平台/地面看不到;
-#   抓住=起跳后连续2帧看到后脑;到顶=climbing中连续500ms看不到后脑(已翻出台子,再补按↑LADDER_TOP_HOLD_MS翻稳),
+#   抓住=起跳后连续2帧看到后脑;到顶=climbing中连续450ms看不到后脑(已翻出台子,再补按↑LADDER_TOP_HOLD_MS翻稳;光点没到顶=漏检不判顶),
 #   小地图光点重合梯端+录梯时长超时仅作兜底;卡住=后脑在梯但小地图光点Y连续2s不动→监管线程只置令、主线climbing非阻塞横跳解卡)。仅上梯direction>0生效 ===
-BACK_ON_LADDER_THR = 0.55       # 后脑勺"在梯子上"分数阈(定位thr约0.62,在梯判定单独0.55;真机看[爬梯·后脑]日志分数再微调)
+BACK_ON_LADDER_THR = 0.52       # 后脑勺"在梯子上"分数阈(定位thr约0.62,在梯判定单独0.52;用户2026-09-22:0.55→0.52调低一点点少漏检;真机看[爬梯·后脑]日志分数再微调)
 NAME_ONLY_AFTER_CLIMB_MS = 800  # 跨层结束(到顶/落地/失败回主线)后多少ms内人物定位只认人名(用户2026-09-20):翻台瞬间脸/后脑/宠物最易误匹配把坐标拽飞,短窗只认最稳的人名
 BACK_GRAB_FRAMES = 2            # 起跳后连续几帧看到后脑=抓住梯子(抗单帧误检)
-BACK_TOP_LOST_MS = 333          # climbing中连续多久看不到后脑=翻出平台到顶(用户2026-09-19:500→333缩短1/3留2/3,治上梯到顶发呆;低帧率实测旧值常拖到574~836ms)
+BACK_TOP_LOST_MS = 450          # climbing中连续多久看不到后脑=翻出平台到顶(用户2026-09-22:333→450调长抗低帧漏检;新逻辑光点没到顶=梯中漏检不判顶继续爬,仅光点到顶后才用此时长确认翻台,坏梯纯后脑+总超时兜底)
 LADDER_STUCK_MS = 2000          # 卡住:后脑在梯且光点Y连续多久不动(小地图系)
 LADDER_STUCK_DOT_DY = 2.0       # 光点Y(小地图px)变化小于此=没动(卡住静止/解卡后恢复移动判据共用)
 LADDER_STUCK_SIDE_MS = 120      # 解卡:固定按右方向键时长
@@ -709,6 +709,7 @@ DESC_LAD_SLIDE_MS = 1000       # 方式二:滑梯1秒
 DESC_LAD_LEAP_SIDE_MS = 150    # 方式二:侧跳150ms
 DESC_LAD_FALL_WAIT_MS = 500    # 方式二:侧跳后500ms检测Y
 DESC_Y_MOVE_TOL = 5            # 方式二lad_grab:光点Y比基准增大>5=抓住梯子向下动了
+DESC_LAD_LEAP_MAX = 2          # 方式二侧跳离梯后,lad_fall_wait仍见后脑=没甩开梯子,最多补几次侧跳横跳(用户2026-09-22),补满仍挂梯不死磕、回主线重锁
 LADDER_DEL_X_TOL = 6          # 梯删除点选命中：点击点与梯子X差≤6(小地图原始分辨率)且Y落在线段内=删这条
 LADDER_DEL_Y_TOL = 4
 SLOPE_WALK_Y_DIFF = 60    # 斜坡可走判定：两平台小地图Y差≤60(约一层内)且X范围重叠=坡道连着→走台子不走梯子
@@ -1608,6 +1609,7 @@ class MinimapRouteRecorder:
         self._desc_j2 = False         # 方式一第二跳(随机侧向)是否已按
         self._desc_j2_pre = False     # 方式一:第一跳后等500ms→按侧键标记
         self._desc_leap_dir = 1       # 方式一/二侧跳离梯的随机方向(-1左/1右)
+        self._desc_side_leap_n = 0   # 方式二侧跳离梯补跳次数(lad_fall_wait仍见后脑=没甩开,回lad_leap再横跳,上限DESC_LAD_LEAP_MAX;每次进方式二清零,用户2026-09-22)
         self._desc_j2 = False         # 方式一:第二跳(随机侧向)是否已按
         self._desc_leap_dir = 1       # 方式一/二侧跳离梯的随机方向(1右/-1左)
         self._desc_pre_leap_sy = None  # 方式一:左右跳前人物特征屏幕Y基准
@@ -5705,6 +5707,7 @@ class MinimapRouteRecorder:
         self._desc_phase = 'mm_to_lad'
         self._desc_phase_t = now_ms
         self._desc_mm_no_pick_t = 0
+        self._desc_side_leap_n = 0   # 每次进方式二清零侧跳补跳计数(用户2026-09-22)
         self._ladder_precise_mode = True   # 方式二期间停锁怪(识怪照开),出段_reset_climb/落地重开
         _debug_log("[下行·方式二] 转小地图找下行梯(光点%.0f,%.0f)" % (px, py))
 
@@ -5835,7 +5838,7 @@ class MinimapRouteRecorder:
                     self._desc_j2 = True
                     self._desc_phase = 'check_drop'
                     self._desc_phase_t = now_ms
-                    self._arrival_relock_until = now_ms + DESCEND_RELOCK_DELAY_MS   # 横跳(第二跳)起2秒:窗内B只清锁不出包、识别照开,到期热怪表重锁(用户2026-09-19:不判落地,横跳后计时)
+                    self._arrival_relock_until = now_ms + DESCEND_RELOCK_DELAY_MS   # 横跳(第二跳)起1.5秒:窗内B只清锁不出包、识别照开,到期热怪表重锁(用户2026-09-19:不判落地,横跳后计时)
                     self._key_up(VK_LEFT)
                     self._key_up(VK_RIGHT)
                     _debug_log("[下行·方式一] 侧键%dms→第二跳+松键,等%dms判Y增大%dpx" % (
@@ -5857,10 +5860,11 @@ class MinimapRouteRecorder:
             _dmy = py - self._desc_pre_leap_my
             # 用户2026-09-16:删除小地图世界Y判定(_dmy>=DESC_DROP_DY_DY_MAP),只看主窗口人物特征Y
             _moved = (_dsy is not None and _dsy >= DESC_DROP_DY)
+            _cbv, _cbs = self._back_head_visible()   # 方式一横跳后查后脑(用户2026-09-22:横跳本就解挂梯,仍见后脑=人还巴梯;只记日志不改时序)
             if _el >= DESC_DROP_CHECK_MS and _moved:
                 # 观察窗内一旦Y往下增大=确实跳下,立刻自由落体等落地(直接跳成功,绝不去对齐梯子)
-                _debug_log("[下行·方式一] 直接下跳Y增大(屏幕Δ%s/世界Δ%.0f,起%.0fms)=穿到下一层,自由落体" % (
-                    ("%.0f" % _dsy) if _dsy is not None else "NA", _dmy, _el))
+                _debug_log("[下行·方式一] 直接下跳Y增大(屏幕Δ%s/世界Δ%.0f,起%.0fms,后脑%.2f/%s)=穿到下一层,自由落体" % (
+                    ("%.0f" % _dsy) if _dsy is not None else "NA", _dmy, _el, _cbs, ('在' if _cbv else '无')))
                 self._enter_desc_fall(py, now_ms)
             elif _el >= DESC_DROP_WAIT_MAX_MS:
                 # 实心台横跳不下去:用户2026-09-16——方式一失败后再重复一次,第二次还失败才转方式二找梯子
@@ -5876,8 +5880,8 @@ class MinimapRouteRecorder:
                     _debug_log("[下行·方式一] 第一次没下去,重复一次方式一")
                     return False
                 # 第二次还失败,转方式二找梯子
-                _debug_log("[下行·方式一] 观察%.0fms Y始终没增大(屏幕Δ%s/世界Δ%.0f)=实心台,直接主窗口找梯(不走小地图)" % (
-                    _el, ("%.0f" % _dsy) if _dsy is not None else "NA", _dmy))
+                _debug_log("[下行·方式一] 观察%.0fms Y始终没增大(屏幕Δ%s/世界Δ%.0f,后脑%.2f/%s)=实心台/仍挂梯,直接主窗口找梯(不走小地图)" % (
+                    _el, ("%.0f" % _dsy) if _dsy is not None else "NA", _dmy, _cbs, ('在=挂梯' if _cbv else '无')))
                 self._rlog("下台阶横跳%.0fms没下去,转主窗口找梯子" % _el, LOG_RED, log='exception')
                 self._enter_desc_mm_ladder(px, py, now_ms)
             # 其余(未到最早判定/还在腾空下落途中):不按任何键继续观察
@@ -5942,7 +5946,7 @@ class MinimapRouteRecorder:
                 self._key_up(VK_RIGHT)   # 侧按100ms给个初速度即可,跳后松侧键避免落地还在横走
                 self._desc_phase = 'lad_fall_wait'
                 self._desc_phase_t = now_ms
-                self._arrival_relock_until = now_ms + DESCEND_RELOCK_DELAY_MS   # 侧跳离梯(横跳)起2秒:窗内B只清锁不出包、识别照开,到期热怪表重锁(用户2026-09-19:不判落地,横跳后计时)
+                self._arrival_relock_until = now_ms + DESCEND_RELOCK_DELAY_MS   # 侧跳离梯(横跳)起1.5秒:窗内B只清锁不出包、识别照开,到期热怪表重锁(用户2026-09-19:不判落地,横跳后计时)
                 _debug_log("[下行·方式二] 侧向%dms+跳离梯,固定%dms后回主线" % (DESC_LAD_LEAP_SIDE_MS, DESC_LAD_FALL_WAIT_MS))
             return False
 
@@ -5952,8 +5956,30 @@ class MinimapRouteRecorder:
             self._key_up(VK_LEFT)
             self._key_up(VK_RIGHT)
             if now_ms - self._desc_phase_t >= DESC_LAD_FALL_WAIT_MS:
-                _debug_log("[下行·方式二] 侧跳离梯满%dms,直接回主线打怪" % DESC_LAD_FALL_WAIT_MS)
-                self._rlog("借梯侧跳落下,回主线打怪", log='behavior')
+                # 用户2026-09-22:横跳(侧跳)本身就是解挂梯动作,侧跳后查后脑勺——还在=没甩开梯子,回lad_leap再横跳,
+                # 最多补DESC_LAD_LEAP_MAX次;不在=已离梯,直接回主线重锁。补满仍挂梯不死磕回主线(怪在下方会自然再触发下行)
+                _bv2, _bsc2 = self._back_head_visible()
+                _n2 = getattr(self, '_desc_side_leap_n', 0)
+                if _bv2 and _n2 < DESC_LAD_LEAP_MAX:
+                    self._desc_side_leap_n = _n2 + 1
+                    self._desc_leap_dir = self._pick_desc_side()
+                    _svk2 = VK_RIGHT if self._desc_leap_dir > 0 else VK_LEFT
+                    self._key_up(VK_LEFT); self._key_up(VK_RIGHT); self._key_up(VK_DOWN)
+                    if _svk2 not in self._random_move_keys:
+                        self._key_down(_svk2)
+                    self._desc_phase = 'lad_leap'
+                    self._desc_phase_t = now_ms
+                    self._desc_jumped = False
+                    _debug_log("[下行·方式二] 侧跳后%dms仍见后脑(%.2f)=没甩开梯子,补第%d次横跳" % (
+                        DESC_LAD_FALL_WAIT_MS, _bsc2, self._desc_side_leap_n))
+                    self._rlog("下梯侧跳没甩开,补横跳第%d次" % self._desc_side_leap_n, log='behavior')
+                    return False
+                if _bv2:
+                    _debug_log("[下行·方式二] 补%d次横跳仍见后脑挂梯,不死磕回主线重锁" % DESC_LAD_LEAP_MAX)
+                    self._rlog("下梯侧跳%d次仍挂梯,回主线重锁" % DESC_LAD_LEAP_MAX, LOG_RED, log='exception')
+                else:
+                    _debug_log("[下行·方式二] 侧跳离梯满%dms后脑已消失=离梯,回主线打怪" % DESC_LAD_FALL_WAIT_MS)
+                    self._rlog("借梯侧跳落下,回主线打怪", log='behavior')
                 self._reset_climb()
                 self._reset_lock_after_arrival('借梯侧跳落下')
             return False
@@ -6048,10 +6074,10 @@ class MinimapRouteRecorder:
                 if _bv:
                     self._ladder_back_lost_since = 0
                 else:
+                    # 只记后脑连续丢失起点;是否到顶等下面端点_end_y确定后按光点位置判(用户2026-09-22:
+                    # 光点没到梯顶=梯中漏检,绝不判顶松手,继续按↑)
                     if self._ladder_back_lost_since == 0:
                         self._ladder_back_lost_since = now_ms
-                    elif now_ms - self._ladder_back_lost_since >= BACK_TOP_LOST_MS:
-                        self._ladder_back_top = True
                 if now_ms - self._ladder_back_diag_t >= 1000:
                     self._ladder_back_diag_t = now_ms
                     _lostms = (now_ms - self._ladder_back_lost_since) if self._ladder_back_lost_since else 0
@@ -6065,13 +6091,21 @@ class MinimapRouteRecorder:
                 _end_y = self._climb_ladder_y_top if _up else self._climb_ladder_y_bottom
             _arrived = False
             _arrive_why = ""
-            # 【用户2026-09-19】上行到顶只认后脑:连续BACK_TOP_LOST_MS看不到后脑=翻台到顶;
-            # 物理删除上行"光点Y重合梯顶"判据(坏/短录制梯顶会让人刚抓住、还在梯底就误判到顶松手=爬一半掉下来)。
-            # 下行不接后脑,仍只认光点Y重合梯底;总超时(录制duration+2s)保命不变。
+            # === 到顶判据(用户2026-09-22定稿:后脑为主、光点在梯子上的距离为辅;下行仍只认光点对梯底;总超时录制duration+2s保命)===
+            _dot_at_top = bool(_end_y) and py <= _end_y + LADDER_TOP_ARRIVE_TOL
+            _lost_enough = bool(self._ladder_back_lost_since and now_ms - self._ladder_back_lost_since >= BACK_TOP_LOST_MS)
+            if _up:
+                if _end_y:
+                    # 好梯(录到梯端):光点没到顶(还在梯中/梯底)时后脑丢失=漏检,绝不判顶、继续按↑;
+                    # 光点到顶后,后脑连续丢满BACK_TOP_LOST_MS才确认翻台(_top_by_back)
+                    self._ladder_back_top = bool(_lost_enough and _dot_at_top)
+                else:
+                    # 坏梯(没录到梯端):无光点判据,纯后脑连续丢满=到顶,总超时(录制时长+2s)保命
+                    self._ladder_back_top = bool(_lost_enough)
             _top_by_back = bool(_up and self._ladder_back_top)
-            # 上行快判(用户2026-09-20):后脑已开始消失(确在翻台,_lost计时已起)且小地图光点已到/越过录制梯顶→立即到顶,不干等BACK_TOP_LOST_MS;
-            # 双条件防坏梯/梯底误判:_end_y=0(没录到梯端)不触发、光点没到梯顶(还在梯中/梯底)不触发,退回后脑333ms兜底
-            _map_ok_up = bool(_up and bool(_end_y) and self._ladder_back_lost_since > 0 and py <= _end_y + LADDER_TOP_ARRIVE_TOL)
+            # 上行快判:光点已到梯顶且后脑刚开始消失(lost已起算,哪怕1帧)=立即到顶,不干等BACK_TOP_LOST_MS;
+            # 光点没到顶不成立(梯中漏检不误判);坏梯(_end_y=0)不走快判,退回纯后脑/总超时
+            _map_ok_up = bool(_up and bool(_end_y) and self._ladder_back_lost_since > 0 and _dot_at_top)
             _map_ok_down = bool((not _up) and bool(_end_y) and py >= _end_y - LADDER_TOP_ARRIVE_TOL)
             if _top_by_back or _map_ok_up or _map_ok_down:
                 # 触发到顶那一刻不立刻松,继续按住↑多走LADDER_TOP_HOLD_MS确保整个人翻上台/踩稳(本段每帧补按方向键,hold期天然保持)
@@ -15303,11 +15337,11 @@ class MinimapRouteRecorder:
         self._combat_had_target = False
         # 【用户2026-09-19】识别线程在爬梯硬态也全程不停(硬冻只清锁定、不清怪表),到顶时self._monsters已是新层热表,
         # 不再清空怪表/血条、不再强制等整轮重扫(旧逻辑清表→空站等YOLO=到顶发呆数秒的根因)。
-        # 重锁保护窗(用户2026-09-19定稿):下跳不判落地,2秒窗在"横跳(方式一第二跳/方式二侧跳离梯)"那一刻已起算;
+        # 重锁保护窗(用户2026-09-19定稿):下跳不判落地,1.5秒窗在"横跳(方式一第二跳/方式二侧跳离梯)"那一刻已起算;
         # 此处落地reset只清锁、用max保留横跳窗剩余(不被落地时刻缩短),横跳窗已过才给150ms短兜底;到顶/走台/边界一律150ms挡旧帧cross。
         _now_relock = time.time() * 1000
         if source in ('下行自由落', '借梯侧跳落下', '下跳落地'):
-            self._arrival_relock_until = max(getattr(self, '_arrival_relock_until', 0), _now_relock + 150)   # 保留横跳起算的2秒窗剩余
+            self._arrival_relock_until = max(getattr(self, '_arrival_relock_until', 0), _now_relock + 150)   # 保留横跳起算的1.5秒窗剩余
         else:
             self._arrival_relock_until = _now_relock + 150
         _debug_log("[跨层] 到达新平台(来源=%s):清旧锁定+寻怪范围立刻重扫重锁" % (source or '?'))
@@ -17012,7 +17046,7 @@ class MinimapRouteRecorder:
                 self._press_game_key(_tp_key, duration=120)
                 self._combat_last_h_teleport = now
                 self._char_relocate_until = now + 700
-                self._combat_tp_post_until = now + TP_POST_MS  # 瞬移后摇:落地250ms内压技能不压移动
+                self._combat_tp_post_until = now + TP_POST_MS  # 瞬移后摇:落地150ms内压技能不压移动
                 self._combat_tp_pending = {'axis': 'x', 'dir': 1 if move_dir == 'right' else -1,
                                            'sx': px, 'sy': py, 't': now, 'key': (t_cx, t_cy)}
                 _debug_log("[瞬移追怪] 水平向=%s X差=%d≥%d,瞬移(不看Y)" % (move_dir, t_dist, _tp_x))
@@ -17035,7 +17069,7 @@ class MinimapRouteRecorder:
                 self._press_game_key(_tp_key, duration=120)
                 self._combat_last_h_teleport = now
                 self._char_relocate_until = now + 700
-                self._combat_tp_post_until = now + TP_POST_MS  # 瞬移后摇:落地250ms内压技能不压移动
+                self._combat_tp_post_until = now + TP_POST_MS  # 瞬移后摇:落地150ms内压技能不压移动
                 self._combat_tp_pending = {'axis': 'y', 'dir': 1 if _dyv > 0 else -1,
                                            'sx': px, 'sy': py, 't': now, 'key': (t_cx, t_cy)}
                 _debug_log("[瞬移追怪] 竖直向=%s |Y差|=%d≥%d,瞬移(不看X)" % ("下" if _dyv > 0 else "上", abs(_dyv), _tp_y))
