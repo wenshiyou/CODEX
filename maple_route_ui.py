@@ -640,6 +640,8 @@ LADDER_END_MATCH_TOL = 1    # [小地图巡路模式预留]梯子连接端(上�
 LADDER_MM_X_HALF = 60       # 选梯X带:光点左右各60小地图px内找录制梯(白框旧值屏幕±300作废)
 LADDER_MM_Y_HALF = 25       # 选梯Y带:光点上/下各25小地图px(粗筛,最终高度门用梯端容差)
 LADDER_MM_END_TOL = 10      # 合格高度门:上行梯底y_bottom与光点Y差<=10(人跳起够得到底端)/下行梯顶y_top与光点Y差<=10
+LADDER_MM_GOTO_END_TOL = 14    # 锁后对位/起跳前Y复核容差(比选梯10略宽,抗走动光点量化):上行|梯底y_bottom-光点Y|<=此值且梯身上通才继续,否则解锁重选(用户2026-09-22:锁后只看X会锁错梯空跳)
+LADDER_MM_GOTO_UNLOCK_FRAMES = 2  # 锁后连续几帧Y不合格才解锁重选(与锁梯2帧对称,防光点单帧抖动误解锁)
 LADDER_MM_RUNJUMP_DEFAULT = 7   # 面板默认跑跳起跳人梯X差(小地图单位):6~7带水平速度起跳;面板rj_l/rj_r可调
 LADDER_MM_VERT_DEFAULT = 1      # 面板默认直跳起跳人梯X差(小地图单位):0~1松键原地直跳;面板vl_l/vl_r可调
 LADDER_MM_FINE_DX = 3           # |X差|<=3进微调点动(走60ms停50ms检测),>3且<跑跳窗=按住走
@@ -5101,6 +5103,7 @@ class MinimapRouteRecorder:
         self._ladder_mm_dir_sign = None      # 锁定的朝梯方向±1(ad>FINE_DX才更新,冲过梯X不翻向);None=首帧按d定
         self._ladder_mm_approach_streak = 0 # 连续朝梯移动拍数
         self._ladder_mm_still_frames = 0    # 连续停稳拍数(直跳门槛)
+        self._ladder_mm_ybad_streak = 0    # 锁后梯底Y不合格连续帧(出梯/换梯清零,用户2026-09-22)
         self._ladder_back_peak = 0.0        # 本次起跳抓梯窗内后脑分数峰值(标定0.55阈值,纯观测)
         self._ladder_realign_phase = None    # 'approach'连续闭环走近 / 'settle'松手停稳确认起跳
         self._ladder_realign_t = 0           # 当前相位(approach/settle)起始时刻ms
@@ -5487,6 +5490,29 @@ class MinimapRouteRecorder:
         # ---- 2) 已锁:算人梯差/朝梯速度/停稳 ----
         d = float(ld['x']) - float(px)
         ad = abs(d)
+        # ---- 2.0) 锁后全程Y复核(用户2026-09-22:锁后只看X不看Y,人漂到梯身/梯顶高度仍按X对位起跳=锁错梯空跳) ----
+        # 上行合格=梯底贴光点(容差GOTO_END_TOL,比选梯略宽抗量化)且梯身上通;连续GOTO_UNLOCK_FRAMES帧不合格才解锁,
+        # 用最新光点重新过X+Y门选当前够得着的梯(选不到走NOPICK超时回主线);不足连续帧本帧不起跳/不走向,松键等下一帧复核。
+        _goto_yb = float(ld['y_bottom']); _goto_yt = float(ld['y_top']); _goto_py = float(py)
+        if (abs(_goto_yb - _goto_py) <= LADDER_MM_GOTO_END_TOL
+                and _goto_yt <= _goto_py - LADDER_MM_GOTO_END_TOL):
+            self._ladder_mm_ybad_streak = 0
+        else:
+            self._ladder_mm_ybad_streak = getattr(self, '_ladder_mm_ybad_streak', 0) + 1
+            if self._ladder_mm_ybad_streak >= LADDER_MM_GOTO_UNLOCK_FRAMES:
+                _debug_log("[选梯·小地图] 锁后Y不合格连续%d帧(梯底%.0f/梯顶%.0f/光点Y%.0f,|底-光|=%.0f 容差%d):这把已够不着底,解锁用最新光点重选" % (
+                    LADDER_MM_GOTO_UNLOCK_FRAMES, _goto_yb, _goto_yt, _goto_py, abs(_goto_yb - _goto_py), LADDER_MM_GOTO_END_TOL))
+                self._ladder_mm_lock_id = None
+                self._ladder_mm_cand_id = None
+                self._ladder_mm_cand_streak = 0
+                self._ladder_mm_pick_t = 0
+                self._ladder_mm_ybad_streak = 0
+                self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
+            else:
+                # 不足连续帧:松键停一拍等下一帧复核,绝不在错误Y上起跳
+                self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
+                self._ladder_mm_prev_px = px; self._ladder_mm_prev_ad = ad
+            return False
         # 朝梯方向只在人还离梯有距离(ad>微调带)时按d符号更新;进微调/直跳带后保持,冲过梯X(d=0或轻微越线)不翻向
         if ad > LADDER_MM_FINE_DX:
             self._ladder_mm_dir_sign = 1 if d > 0 else -1
