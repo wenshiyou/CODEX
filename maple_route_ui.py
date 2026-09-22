@@ -9643,58 +9643,71 @@ class MinimapRouteRecorder:
         return disp
 
     def _maint_trim_debug_log(self, keep_minutes=60):
-        """debug.log 只保留最近 keep_minutes 分钟(按行首[HH:MM:SS])；小于0.5MB不动避免频繁IO。
-        _debug_log 每次重开 'a' 追加，故这里可安全 os.replace 替换正在写的文件。"""
-        try:
-            p = os.path.join(SCRIPT_DIR, "debug.log")
-            if not os.path.exists(p) or os.path.getsize(p) < 512 * 1024:
-                return
-            import io as _io
-            rows = _io.open(p, "rb").read().decode("utf-8", "ignore").splitlines()
+        """只保留最近 keep_minutes 分钟的 debug.log（按物理行序、正确处理午夜跨天）。
 
-            def _ts(l):
-                if l[:1] == "[" and len(l) >= 9 and l[3] == ":" and l[6] == ":":
-                    try:
-                        return int(l[1:3]) * 3600 + int(l[4:6]) * 60 + int(l[7:9])
-                    except Exception:
-                        return None
-                return None
-            last = None
-            for l in reversed(rows):
-                t = _ts(l)
-                if t is not None:
-                    last = t
+        日志按追加顺序写、行首只有 [HH:MM:SS] 无日期，午夜秒数会回退。旧实现直接拿
+        当日秒数和 cutoff 比较，跨天追加时会把今天上午(秒数小)误删、把昨晚(秒数大)误留。
+        新实现以末尾行时间为基准，从后往前还原每行跨天绝对秒数（从后往前当日秒数反而
+        明显变大=往前跨过一个午夜，基准减 86400），再按物理行序从末尾保留 N 分钟一次截断；
+        无时间戳的堆栈/续行随物理切片自然保留。文件<0.5MB 不动，避免频繁重写小文件。
+        """
+        p = DEBUG_LOG
+        try:
+            if not os.path.exists(p):
+                return
+            if os.path.getsize(p) < 0.5 * 1024 * 1024:
+                return
+            raw = io.open(p, "rb").read().decode("utf-8", "ignore")
+            lines = raw.splitlines()
+            if len(lines) < 200:
+                return
+
+            def _tod(line):
+                m = re.match(r"^\[(\d{2}):(\d{2}):(\d{2})\]", line)
+                if not m:
+                    return None
+                return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+
+            secs = [_tod(x) for x in lines]
+            last_idx = -1
+            for _i in range(len(secs) - 1, -1, -1):
+                if secs[_i] is not None:
+                    last_idx = _i
                     break
-            if last is None:
+            if last_idx < 0:
                 return
-            cut = last - keep_minutes * 60
-            keep = [l for l in rows if _ts(l) is None or _ts(l) >= cut]
-            if len(keep) < len(rows):
+            cutoff = secs[last_idx] - keep_minutes * 60
+            abs_secs = [None] * len(secs)
+            abs_secs[last_idx] = secs[last_idx]
+            day = 0
+            prev_tod = secs[last_idx]
+            for _i in range(last_idx - 1, -1, -1):
+                _t = secs[_i]
+                if _t is None:
+                    continue
+                # 从后往前正常应递减；当日秒数反而明显变大(>5分钟容差)=往前跨过一个午夜
+                if _t > prev_tod + 300:
+                    day -= 86400
+                abs_secs[_i] = day + _t
+                prev_tod = _t
+            # 从末尾往前第一个早于 cutoff 的有戳行即窗口旧边界，其前物理行全部更旧
+            cut_pos = -1
+            for _i in range(last_idx, -1, -1):
+                _a = abs_secs[_i]
+                if _a is not None and _a < cutoff:
+                    cut_pos = _i
+                    break
+            keep_from = cut_pos + 1
+            if keep_from <= 0:
+                return
+            out = lines[keep_from:]
+            if out:
                 tmp = p + ".tmp"
-                _io.open(tmp, "w", encoding="utf-8").write("\n".join(keep) + "\n")
+                io.open(tmp, "wb").write(("\n".join(out) + "\n").encode("utf-8"))
                 os.replace(tmp, p)
-                _debug_log("[维护] debug.log保留最近%d分钟 %d→%d行" % (keep_minutes, len(rows), len(keep)))
-        except Exception as ex:
-            _debug_log("[维护] 修剪debug.log异常: %s" % ex)
-
-    def _maint_clean_old_cache(self, days=1):
-        """清程序自己生成的调试截图/运行日志(超过days天)。绝不碰 backups/data/用户文件/模型。"""
-        try:
-            import glob as _glob
-            now = time.time()
-            n = 0
-            for pat in ("debug_*.png", "_dbg*.png", "runtime_out*.log", "runtime_err*.log"):
-                for fp in _glob.glob(os.path.join(SCRIPT_DIR, pat)):
-                    try:
-                        if now - os.path.getmtime(fp) > days * 86400:
-                            os.remove(fp)
-                            n += 1
-                    except Exception:
-                        pass
-            if n:
-                _debug_log("[维护] 清理过期调试缓存%d个" % n)
-        except Exception as ex:
-            _debug_log("[维护] 清缓存异常: %s" % ex)
+        except Exception as _e:
+            # 文件维护属外部IO，失败要可见、不能静默吞(规则8)；不影响主循环
+            print("[日志维护] debug.log 裁剪失败:", _e)
 
     def _maint_run(self):
         """定期维护：debug.log留最近60分钟(1小时) + 清1天前调试缓存。
