@@ -619,6 +619,19 @@ ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人
 ATTACK_Y_DOWN = 30       # 打怪Y范围·向下：怪比人物低最多30px(人物下方-30内可直打；>30够不着→走近)
 AOE_Y_UP = 60            # 群攻Y范围·向上(用户2026-09-07独立于主攻,默认与主攻一致-60)：群攻只数Y在[-上,+下]内的怪,可在Y弹窗改
 AOE_Y_DOWN = 30          # 群攻Y范围·向下(默认+30,用户2026-09-07)：下层差太多打不到的怪不许凑数触发群攻
+# === 伤害数字多点颜色加权检测(用户2026-09-22定稿,真机样本b0718d86离线标定:5串真数字全中/10类干扰0误判)===
+# 数字外观=白描边包裹+顶部橙红→底部亮黄竖向渐变粗体;橙瓶/岩石/木怪只有橙、无高亮黄无白边无渐变,血条是扁横条
+DMG_A_X = 35             # A窗:出手怪基点X前后各35px(与血条A同口径;旧值±30作废)
+DMG_Y_UP = 150           # A/B窗Y:基点上方55~150px(数字飘怪头顶,排怪身体与近头顶背景)
+DMG_Y_LO = 55
+DMG_SCORE_T = 1.0        # 加权命中阈值(实测真数字块1.32~2.0;过颜色共现门的血条0.91且被扁条形态门排除)
+DMG_YEL_MIN = 0.05       # 亮黄占比硬门(橙瓶/岩石/木怪≈0,真数字≥0.073)
+DMG_RED_MIN = 0.04       # 橙红+纯红占比硬门(真数字≥0.096,干扰≤0.067且多为0)
+DMG_FLAT_AR = 2.6        # 扁横条(血条)宽高比门…
+DMG_FLAT_H_R = 0.35      #   …配合团高/窗高<此值=血条(真数字团高约占窗高0.7)
+DMG_BIG_H_R = 1.15       # 团高/窗高超此=超大背景块(岩石/UI),排除
+DMG_MIN_H_R = 0.30       # 团高/窗高低于此=碎噪点,排除
+DMG_PAD = 3              # 暖色团外扩px,把外侧白描边纳入评分区
 # === 跨层选梯/爬梯常量（自由打怪版选梯=只看方向带、不算梯子距离:上行搜头顶Y-150~-20/下行搜脚下Y+0~+150、X左右各300,怪在哪侧选哪侧+锁像素块身份;用户2026-09-18)===
 # ↓ 下面两个为【小地图巡路模式】预留(用户2026-09-15:后续另做"沿小地图梯子+平台录制绿线规划巡路"的精准模式时使用;当前自由打怪版不引用,勿当死常量删)
 LADDER_REACH_HEIGHT = 15   # [小地图巡路模式预留]下端一个直跳够得着:人物光点比梯子下端y_bottom低不超过15个小地图px=一个直跳能抓到梯
@@ -13129,88 +13142,119 @@ class MinimapRouteRecorder:
             bars = filtered
         return bars
 
-    def _detect_damage_number(self, target_cx, target_cy, frame=None, monsters=None, dbg=None):
-        """【冒险岛世界】检测目标头顶上方是否飘出伤害数字（样本"15041"：红描边→橙黄主体渐变+黑描边）
-        用途：攻击命中时怪头顶飘伤害数字，有数字=怪还活着；打一下既没血条也没伤害数字=空怪→drop换目标。
-        参数：target_cx=目标中心X, target_cy=目标脚底Y
-        原理（2026-09-07 真机样本校准，旧"红橙黄总量≥35"会把暖色背景/血条误判成数字导致空打不停）：
-          1. 从怪物bbox找对应目标取头顶y1；只在头顶小窗(±30、上50下5)内搜
-          2. 红簇 H0-12 ≥80像素（伤害数字独有，场景暖色/绿血条红簇≈0）且 橙黄簇 H14-35 ≥70
-          3. 合并后存在团状笔画连通域(面积≥50、高≥9、非扁横条血条) → 判定有伤害数字
-        返回：True=有伤害数字(怪活着), False=没有"""
-        # 步骤1：从已检测怪物列表中找到离目标中心最近的怪物，获取其头顶y1
-        target_y1 = None
-        best_d = 999
-        for (x1, y1, x2, y2, _) in (monsters if monsters is not None else self._monsters):
-            cx = (x1 + x2) // 2  # 怪物中心X
-            cy = y2               # 怪物脚底Y
-            d = abs(cx - target_cx) + abs(cy - target_cy)  # 曼哈顿距离
-            if d < best_d:
-                best_d = d
-                target_y1 = y1  # 记录怪物头顶Y
-        if target_y1 is None:
-            if dbg is not None: dbg['reason'] = 'no_monster'
-            return False  # 没找到对应怪物，无法检测
+    # ===== 伤害数字检测核:多点颜色加权(2026-09-22重做,替代旧红橙阈值找色;离线5串真数字全中/10类干扰0误判)=====
+    @staticmethod
+    def _damage_roi_hit(roi):
+        # 对单个检测窗(A=怪头顶 / B=人物技能带)判有无伤害数字色块:白描边/纯红/橙红/橙/亮黄互斥分箱,
+        # 暖色闭合成团,以团bbox(外扩纳入白边)为分母算各色占比+上红下黄渐变,加扁条/超大形态门。返回(命中,info)。
+        if roi is None or getattr(roi, 'size', 0) == 0:
+            return False, {'reason': 'bad_roi', 'n_red': 0, 'n_org': 0, 'max_area': 0, 'max_h': 0, 'score': 0.0}
+        rh, rw = roi.shape[0], roi.shape[1]
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        hh, ss, vv = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+        wht = (ss <= 55) & (vv >= 195)
+        red = (((hh <= 8) | (hh >= 172)) & (ss >= 110) & (vv >= 140))
+        ror = ((hh >= 9) & (hh <= 20) & (ss >= 170) & (vv >= 150))
+        org = ((hh >= 9) & (hh <= 22) & (ss >= 85) & (vv >= 150) & (~ror))
+        yel = ((hh >= 23) & (hh <= 32) & (ss >= 55) & (vv >= 170))
+        warm = (red | ror | org | yel).astype(np.uint8) * 255
+        warm = cv2.morphologyEx(warm, cv2.MORPH_CLOSE,
+                                cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5)), iterations=2)
+        nlab, _lab, stats, _cent = cv2.connectedComponentsWithStats(warm, 8)
+        best = None
+        best_score = -9.0
+        for _i in range(1, nlab):
+            bx, by, bw, bh, ba = (int(x) for x in stats[_i])
+            if bh < rh * DMG_MIN_H_R or bw < 8 or ba < 250:
+                continue
+            x0 = max(0, bx - DMG_PAD); y0 = max(0, by - DMG_PAD)
+            x1 = min(rw, bx + bw + DMG_PAD); y1 = min(rh, by + bh + DMG_PAD)
+            chh = y1 - y0; cww = x1 - x0
+            area = float(max(1, chh * cww))
+            cw = wht[y0:y1, x0:x1]; cr = red[y0:y1, x0:x1]; crr = ror[y0:y1, x0:x1]
+            co = org[y0:y1, x0:x1]; cy = yel[y0:y1, x0:x1]
+            rr = cr | crr
+            pw = float(cw.sum()) / area
+            pr = float(cr.sum()) / area
+            prr = float(crr.sum()) / area
+            po = float(co.sum()) / area
+            py = float(cy.sum()) / area
+            t3 = max(1, chh // 3)
+            grad = float(rr[0:t3, :].mean()) - float(rr[chh - t3:, :].mean())
+            ar = bw / float(max(1, bh))
+            score = 3.0 * py + 2.0 * prr + 1.0 * pr + 1.2 * po + 1.5 * pw + 3.0 * grad
+            flat = bool(ar > DMG_FLAT_AR and bh < rh * DMG_FLAT_H_R)
+            big = bool(bh > rh * DMG_BIG_H_R)
+            cooc = bool(py >= DMG_YEL_MIN and (prr + pr) >= DMG_RED_MIN)
+            rec = {'score': round(score, 3), 'yel': round(py, 3), 'ror': round(prr, 3),
+                   'red': round(pr, 3), 'org': round(po, 3), 'wht': round(pw, 3),
+                   'grad': round(grad, 3), 'max_h': int(bh), 'ar': round(ar, 2),
+                   'n_red': int(rr.sum()), 'n_org': int((co | cy).sum()), 'max_area': int(ba),
+                   'flat': flat, 'big': big, 'co': cooc}
+            if cooc and not flat and not big and score >= DMG_SCORE_T:
+                rec['reason'] = 'hit'
+                return True, rec
+            if score > best_score:
+                best_score = score
+                rec['reason'] = 'flat' if flat else ('big' if big else ('color_low' if not cooc else 'score_low'))
+                best = rec
+        if best is None:
+            best = {'reason': ('no_contour' if nlab <= 1 else 'all_small'),
+                    'n_red': 0, 'n_org': 0, 'max_area': 0, 'max_h': 0, 'score': 0.0}
+        return False, best
 
-        # 步骤2：在目标头顶上方区域搜索。B线程调用必须传入本检测帧frame(禁止B自行截图抢capture线程);
-        # 主线兼容旧路径:未传frame时才复用_raw_frame、超龄补截
+    def _detect_damage_number(self, target_cx, target_cy, frame=None, monsters=None, dbg=None,
+                              person_center=None, skill_range=None):
+        # 多点颜色加权检测伤害数字(2026-09-22)。A窗=出手怪基点X±DMG_A_X/Y上55~150;B窗=人物基点X±技能范围/Y上55~150;
+        # 两窗逐暖色团评分,任一命中=有伤害=怪活着;不全图扫;B线程必须传本检测帧frame(禁止自行截图)。
+        target_y1 = None
+        _best_d = None
+        for (x1m, y1m, x2m, y2m, _sm) in (monsters if monsters is not None else self._monsters):
+            _d = abs(((x1m + x2m) // 2) - target_cx) + abs(y2m - target_cy)
+            if _best_d is None or _d < _best_d:
+                _best_d = _d
+                target_y1 = y2m
         if frame is None:
-            _rf = getattr(self, '_raw_frame', None)
-            _rft = getattr(self, '_raw_frame_t', 0)
-            if _rf is not None and (time.time() - _rft) <= 0.6:
-                frame = _rf
+            if not self._running and time.time() - self._raw_frame_t <= 0.6:
+                frame = self._raw_frame
             else:
                 frame = self._capture_window()
         if frame is None:
-            if dbg is not None: dbg['reason'] = 'no_frame'
-            return False
-        h, w = frame.shape[:2]
-        # 搜索区域(用户2026-09-21):X±30,Y从怪脚基点向上55~150(排怪身体/近头顶背景,与血条A/B同口径)
-        rx1 = max(0, target_cx - 30)
-        rx2 = min(w, target_cx + 30)
-        ry1 = max(0, target_cy - 150)  # 基点向上150
-        ry2 = min(h, target_cy - 55)   # 基点向上55
-        if rx2 <= rx1 or ry2 <= ry1:
-            if dbg is not None: dbg['reason'] = 'bad_roi'
-            return False
-        # 黑名单过滤:ROI中心落在黑名单内不检测
-        _roi_cx = (rx1 + rx2) / 2; _roi_cy = (ry1 + ry2) / 2
-        if self._hp_dmg_blocked(_roi_cx, _roi_cy):
-            if dbg is not None: dbg['reason'] = 'blocked'
-            return False
-        roi = frame[ry1:ry2, rx1:rx2]  # 截取搜索区域
-
-        # 步骤3：【冒险岛世界 2026-09-07 按伤害数字样本"15041"校准】数字=红描边→橙黄主体渐变。
-        # 决定性特征：橙黄色在场景里到处都是(飞碟/平台/暖色岩石)，但高饱和"红簇"是伤害数字独有
-        # （样本红簇约占彩色27%；绿血条/橙金场景/蓝背景的红簇≈0，实测≤22）。故以红簇为锚，
-        # 再要求橙黄主体够量——两者同时满足才可能是数字，从根上杜绝把暖色背景/血条当伤害。
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        m_red = cv2.inRange(hsv, np.array([0, 70, 70]),  np.array([18, 255, 255]))   # 红橙渐变(用户2026-09-20:0-12→0-18,覆盖99的橙红)
-        m_org = cv2.inRange(hsv, np.array([10, 70, 70]), np.array([35, 255, 255]))  # 橙黄主体(137黄)
-        n_red, n_org = int(np.sum(m_red > 0)), int(np.sum(m_org > 0))
-        if dbg is not None:
-            dbg.update(n_red=n_red, n_org=n_org, ty=int(target_y1))
-        if n_red < 80 or n_org < 70:
-            if dbg is not None: dbg['reason'] = 'color_low'
-            return False  # 红簇不足=暖色背景/绿血条，不是伤害数字
-        mask = cv2.bitwise_or(m_red, m_org)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE,
-                                cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)))
-
-        # 步骤4：存在"团状笔画"连通域(面积≥50、高≥9、且不是扁横条血条)才算数字
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        _max_area, _max_h = 0, 0
-        for cnt in contours:
-            _cx, _cy, _cw, _ch = cv2.boundingRect(cnt)
-            _ar = cv2.contourArea(cnt)
             if dbg is not None:
-                _max_area = max(_max_area, int(_ar)); _max_h = max(_max_h, int(_ch))
-            _is_bar = (_cw > _ch * 2 and _ch <= 8)   # 扁横条=血条，排除
-            if _ar >= 50 and _ch >= 9 and not _is_bar:
-                if dbg is not None: dbg.update(reason='hit', max_area=int(_ar), max_h=int(_ch))
+                dbg['reason'] = 'no_frame'
+            return False
+        fh, fw = frame.shape[0], frame.shape[1]
+        wins = [('A', int(target_cx) - DMG_A_X, int(target_cy) - DMG_Y_UP,
+                 int(target_cx) + DMG_A_X, int(target_cy) - DMG_Y_LO)]
+        if person_center is not None and skill_range:
+            _px, _py = person_center
+            _sr = int(skill_range)
+            wins.append(('B', int(_px) - _sr, int(_py) - DMG_Y_UP,
+                         int(_px) + _sr, int(_py) - DMG_Y_LO))
+        last = None
+        for _tag, ax1, ay1, ax2, ay2 in wins:
+            gx1, gy1 = max(0, ax1), max(0, ay1)
+            gx2, gy2 = min(fw, ax2), min(fh, ay2)
+            if gx2 - gx1 < 10 or gy2 - gy1 < 20:
+                continue
+            if self._hp_dmg_blocked((gx1 + gx2) / 2.0, (gy1 + gy2) / 2.0):
+                if last is None:
+                    last = {'reason': 'blocked', 'win': _tag, 'n_red': 0, 'n_org': 0,
+                            'max_area': 0, 'max_h': 0, 'score': 0.0}
+                continue
+            hit, info = self._damage_roi_hit(frame[gy1:gy2, gx1:gx2])
+            info['win'] = _tag
+            if hit:
+                if dbg is not None:
+                    dbg.update(info)
+                    dbg['ty'] = target_y1
                 return True
+            if last is None or float(info.get('score', -9)) > float(last.get('score', -9)):
+                last = info
         if dbg is not None:
-            dbg.update(reason='no_contour', max_area=_max_area, max_h=_max_h)
+            if last is not None:
+                dbg.update(last)
+            dbg['ty'] = target_y1
         return False
 
     def _load_blue_box(self):
@@ -16416,7 +16460,7 @@ class MinimapRouteRecorder:
                 _detect_open = True
                 _judge_pos = _fpos   # 0~500窗内判活/保锁钉死最近一击那只怪,不要求对齐/射程
                 try:
-                    _has_dmg = self._detect_damage_number(_fpos[0], _fpos[1], frame=frame, monsters=merged)
+                    _has_dmg = self._detect_damage_number(_fpos[0], _fpos[1], frame=frame, monsters=merged, person_center=(px, py), skill_range=_skr)
                 except Exception as _e:
                     _debug_log("[B决策] 伤害数字检测异常: %s" % _e)
                     _has_dmg = False
@@ -16448,17 +16492,17 @@ class MinimapRouteRecorder:
                     P['win'] += 1
                     _pdb = {}
                     try:
-                        _p_hit = self._detect_damage_number(_fposP[0], _fposP[1], frame=frame, monsters=merged, dbg=_pdb)
+                        _p_hit = self._detect_damage_number(_fposP[0], _fposP[1], frame=frame, monsters=merged, dbg=_pdb, person_center=(px, py), skill_range=_skr)
                     except Exception:
                         _p_hit = False
                     if _p_hit:
                         P['probe_dmg'] += 1
                     if _has_dmg:
                         P['gate_dmg'] += 1
-                    _debug_log("[伤害探针] 出手后%dms 对齐=%s 射程内=%s 门开=%s | 探针见字=%s 门控见字=%s n红=%s n橙=%s 最大面积=%s 最大高=%s 顶y=%s 原因=%s" % (
+                    _debug_log("[伤害探针] 出手后%dms 对齐=%s 射程内=%s 门开=%s | 探针见字=%s 门控见字=%s n红=%s n橙=%s 最大面积=%s 最大高=%s 顶y=%s 原因=%s 得分=%s 窗=%s" % (
                         int(_elP), _alignP, _in_skill, _detect_open, _p_hit, _has_dmg,
                         _pdb.get('n_red'), _pdb.get('n_org'), _pdb.get('max_area'), _pdb.get('max_h'),
-                        _pdb.get('ty'), _pdb.get('reason')))
+                        _pdb.get('ty'), _pdb.get('reason'), _pdb.get('score'), _pdb.get('win')))
             # 血条A/B命中复算(与combat_logic同口径,垂直180)
             if bars and _bl is not None:
                 P['hpframe'] += 1
