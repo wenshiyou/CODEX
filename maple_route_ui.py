@@ -385,7 +385,13 @@ ROLE_ANCHOR_KEYS = [_a[0] for _a in ROLE_ANCHORS]
 ROLE_OFF_LEARN_THR = 0.45  # 脸/后脑学"→人名基点"偏移的最低分(用户2026-09-18):同帧人名已过阈锚定真人,脸/后脑有0.45以上可信命中即可量几何差,不必也过定位阈值0.62(实测脸分常0.56~0.62)
 AUX_ANCHOR_MAX_MOVE = 80   # 脸/后脑/宠物这些【兜底锚点】映射点相对上一可信基点的最大合法跳变px(用户2026-09-20):兜底锚点误匹配多,不能像人名那样允许maxmove=250的瞬移,>80且弱匹配(<0.75)即当误匹配丢弃,全图重搜帧也生效
 ANCHOR_OFF_LEARN_MAXDEV = 70  # 脸/后脑学"→人名"偏移时,新量几何差与已学/固化偏移允许的最大偏离px(用户2026-09-20):超过=锚点本帧误匹配在人名外、丢弃不学,锁死固化几何(实测误匹配偏离可达134px,正常帧间抖动<30)
-ROLE_BIGJUMP_PX = 120       # 人物基点一帧最大合法跳变px(用户2026-09-20根治坐标帧间拽飞→B误判cross锁空梯):任何定位源(人名/脸/后脑/宠物)、任何帧(局部/全图)、无论分数多高,相对上一稳定基点位移>120一律不采信该模板候选、丢弃转黑框ROI重搜;正常跑步一帧远<120,真瞬移(>=250)由_research_anchor_around_dot借黑框光点第二源在新位置重捕
+# 人物基点帧间跳变速度闸(2026-09-22由固定120px改为按帧间隔dt归一化):根因是忙档提到30fps后固定px阈值相对变松,
+# 且误匹配到同名文本表现为"瞬时跳到另一固定文本"(高帧细密采样下真实移动是连续小步、误匹配是单帧大跳变)。
+# 合法位移=ROLE_MAX_SPEED_PX_S*dt,夹在[FLOOR,CAP]:30fps战斗约60px(真实跑步/下落/爬梯帧位移<60,实测误匹配70~236px被拦),
+# 低帧卡顿夹到150px(超大跳变不直接放行、仍转黑框光点第二源重捕);真瞬移(>=250)照样被拦后由_research_anchor_around_dot重捕。
+ROLE_MAX_SPEED_PX_S = 1800.0   # 基点合法最大速度px/s(旧120px@约67ms反推的保守初值,宁漏拦不误杀真移动;真机按[跳变拦截]日志复核再标定)
+ROLE_BIGJUMP_FLOOR_PX = 60     # dt很小(高帧)时单帧最小阈值,防真实快动作(下落/跳高)被误杀
+ROLE_BIGJUMP_CAP_PX = 150      # dt很大(卡顿/低帧)时单帧阈值上限,超过一律不采信、转黑框重捕
 # 跟踪参数默认值(默认写死,角色识别面板可调、自动存盘)
 ROLE_TRACK_DEFAULT = {
     "fps": 24,         # 每秒跟踪次数
@@ -453,6 +459,14 @@ LADDER_PRECISE_OVERLOAD_N = 3     # 连续几轮"单轮耗时逼近周期、留�
 LADDER_PRECISE_RELAX_N = 15       # 连续约多少轮都很轻松(≈0.3-0.4s)=性能够,升回一档直到目标周期
 LADDER_PRECISE_STEP_MS = 3        # 高帧自适应每档退避/回升的步长ms
 LADDER_PRECISE_MARK_MS = 20       # 高帧下梯子特征白框扫描节流(在识别线程;用户2026-09-15加快30→20≈50Hz,选梯更跟手;CPU有自适应退避兜底)
+# 忙档高帧(用户2026-09-22根因修复):战斗忙档截图/人物/B决策节拍目标30fps,治16fps下窗口人名基点帧间跳变把平层怪误判cross;
+# YOLO/怪模板/血条在B线程另按秒节流、提帧不多跑;跑不完照搬上梯高帧自适应退避、封顶60ms(=旧16fps,最坏退回现状),闲档仍100ms省电。
+PERSON_BUSY_TARGET_MS = 33       # 忙档目标周期≈30fps
+PERSON_BUSY_PERIOD_MAX = 60      # 自适应退避上限=旧忙档周期(机器再慢也只退回16fps现状,不会更差)
+PERSON_BUSY_MIN_SLEEP_MS = 3     # 忙档每轮至少让出的空闲ms(保GIL/主线UI),防吃满一个核(与上梯高帧同值)
+PERSON_BUSY_OVERLOAD_N = 3       # 连续几轮留不出最小空闲=过载,降帧一档
+PERSON_BUSY_RELAX_N = 15         # 连续约15轮很轻松(≈0.4s)=性能够,升回一档直到目标周期
+PERSON_BUSY_STEP_MS = 3          # 忙档自适应每档退避/回升步长ms
 # === CPU性能三档(用户2026-09-11定稿:慢/普通/快,默认普通;控制面板"性能档"弹窗三选一) ===
 # 集中收拢原本分散的检测/YOLO/血条/怪模板/上梯高帧/UI帧/边界轮询周期。档定基准,原"按核数自适应+
 # 高帧过载退避+每轮最少留3ms"安全网继续兜底,四核弱机误选快也会被退避兜住不会硬吃满一个核。
@@ -1648,7 +1662,6 @@ class MinimapRouteRecorder:
         # 自动刷新状态：默认开启，手动框选后关闭，点刷新重新开启
         self._auto_refresh = True
 
-        self.last_player_pos = None
         self.frame_count = 0
 
         # 热键状态（保留以备鼠标回调复用_handle_hotkey）
@@ -2337,7 +2350,7 @@ class MinimapRouteRecorder:
                 _dmax = max(abs(old["left"] - new_map["left"]), abs(old["top"] - new_map["top"]),
                             abs(old["width"] - new_map["width"]), abs(old["height"] - new_map["height"]))
                 if _dmax <= _RECT_LOCK_TOL:
-                    return  # 小抖动:锁定基准不动=坐标系恒定(关键:不清last_player_pos,光点最近邻锚点连续)
+                    return  # 小抖动:锁定基准不动=坐标系恒定(光点每帧独立检测,不依赖旧点)
                 print("[自动刷新] 小地图区域显著变化(%dpx>%d)才重定: L%dT%d %dx%d -> L%dT%d %dx%d" % (
                     _dmax, _RECT_LOCK_TOL, old["left"], old["top"], old["width"], old["height"],
                     new_map["left"], new_map["top"], new_map["width"], new_map["height"]))
@@ -2345,7 +2358,6 @@ class MinimapRouteRecorder:
         self.minimap_rect = new_minimap
         self.map_area_rect = new_map
         self._save_region()
-        self.last_player_pos = None
 
         if debug:
             # 调试图
@@ -6603,11 +6615,11 @@ class MinimapRouteRecorder:
         录制的平台绿线/梯子(全部由本中心点聚合)因此"刚录对、过一会就错位漂移"。
         现改:亮黄阈值圈住整颗芒星→连通域→取外接矩形几何中心(真机实测比像素质心稳,芒角亮灭不上下跳);优先锁定离上一帧最近的团(自己不瞬移,
         避免串到别的黄点),无历史/最近团过远才取最大团;面积区间滤碎点与异常大亮块。
-        返回:(x,y)小地图块坐标;空图沿用上一帧;无合格团返回None(主循环丢点/重定位契约不变)。"""
+        返回:(x,y)小地图块坐标;空图/无合格团一律返回None、绝不沿用旧光点(用户2026-09-22坐标不钉旧值;主循环丢点/重定位契约不变)。"""
         bgr = map_area  # BGR原图(小地图块)
-        # [健壮性] 截图瞬时失败传入None/空数组时沿用上一光点、不清空,绝不因inRange空图闪退
+        # [健壮性] 截图瞬时失败传入None/空数组时返回None(用户2026-09-22绝不沿用旧光点、不钉旧值),下游本帧跳过、下帧重检
         if bgr is None or getattr(bgr, "size", 0) == 0:
-            return getattr(self, "last_player_pos", None)
+            return None
         # 亮黄:R/G≥220、B≤205 → 圈住整颗黄芒星(中心ffff88、芒角亮黄都在内),排除土黄背景(G仅~170)
         mask = cv2.inRange(bgr, np.array([0, 220, 220]), np.array([205, 255, 255]))
         _n, _lab, _st, _ce = cv2.connectedComponentsWithStats(mask, 8)
@@ -6622,7 +6634,7 @@ class MinimapRouteRecorder:
             _cyh = _st[_k, cv2.CC_STAT_TOP] + _st[_k, cv2.CC_STAT_HEIGHT] / 2.0
             cands.append((_a, float(_cxh), float(_cyh)))
         if not cands:
-            # 本帧无合格团:不清除last_player_pos(留作下帧最近邻锚点),但仍返回None交主循环丢点逻辑
+            # 本帧无合格团:返回None交主循环丢点逻辑(不钉旧值、不冻结,用户2026-09-22)
             return None
         # 用户2026-09-16:去掉"优先选离上一帧最近的团"的最近邻逻辑,直接取最大团(黄芒星=自己,不靠历史锚点,防止串点后甩不掉)
         cands.sort(reverse=True)
@@ -6633,8 +6645,7 @@ class MinimapRouteRecorder:
         if getattr(self, 'frame_count', 0) % 10 == 0:
             _debug_log("[光点] 中心=(%d,%d) 候选团=%d 面积=%s" % (
                 cx, cy, len(cands), str(sorted([c[0] for c in cands], reverse=True)[:4])))
-        self.last_player_pos = (cx, cy)  # 更新上次位置(下帧最近邻锚点)
-        return (cx, cy)  # 录制绿线/梯子/导航/边界共用的唯一中心点
+        return (cx, cy)  # 录制绿线/梯子/导航/边界共用的唯一中心点(不缓存旧点,每帧独立检测,用户2026-09-22)
 
     # ==================== 打怪区域·小地图四线安全框(用户2026-09-11定稿) ====================
     def _bound_map_size(self):
@@ -8255,7 +8266,6 @@ class MinimapRouteRecorder:
             self._auto_refresh = True
             self._detect_minimap()
             self.frame_count = 0
-            self.last_player_pos = None
             return
         if _in(BTN_MANUAL, x, y):
             print("[鼠标] 手动框选")
@@ -9401,7 +9411,6 @@ class MinimapRouteRecorder:
                     }
                     self._save_region()
                     self.frame_count = 0
-                    self.last_player_pos = None
                     self._auto_refresh = False
                     print("已应用: (%d,%d) %dx%d（自动刷新已关闭，点刷新可重新开启）" % (x1, y1, w, h))
                 else:
@@ -9567,7 +9576,6 @@ class MinimapRouteRecorder:
         self._recalc_scale_from_region()
         self._save_region()
         self.frame_count = 0
-        self.last_player_pos = None
         self._auto_refresh = False
         self._selecting = False
         self._select_rect = None
@@ -13699,14 +13707,16 @@ class MinimapRouteRecorder:
                 getattr(self, '_raw_frame_t', 0),
                 self._bg_diff_values[0], self._bg_diff_values[1], self._bg_diff_values[2],
                 motion_count, self._camera_state, BG_DIFF_THRESHOLD))
-        # 判断光点是否在移动（光点不动=人物不动=镜头大概率不动）
+        # 判断光点是否在移动（光点不动=人物不动=镜头大概率不动）;当前帧光点None(光门遮挡)不判移动、不解包崩、不更新基准(用户2026-09-22)
         dot_moving = False
-        if self._last_dot_pos is not None:
-            dot_dx = self._player_map_pos[0] - self._last_dot_pos[0]
-            dot_dy = self._player_map_pos[1] - self._last_dot_pos[1]
+        _cur_dot = self._player_map_pos
+        if _cur_dot is not None and self._last_dot_pos is not None:
+            dot_dx = _cur_dot[0] - self._last_dot_pos[0]
+            dot_dy = _cur_dot[1] - self._last_dot_pos[1]
             if abs(dot_dx) > 0 or abs(dot_dy) > 0:
                 dot_moving = True
-        self._last_dot_pos = (self._player_map_pos[0], self._player_map_pos[1])
+        if _cur_dot is not None:
+            self._last_dot_pos = (_cur_dot[0], _cur_dot[1])
         # 状态机切换(用户规则2026-09-16):只看三点帧差,不看点——光点停了镜头因惯性还在动。
         # 三点全动(>=3)才是镜头在动→跟随;只要有一个点停→走衰减→切死区。
         if motion_count >= BG_MOTION_MIN_REGIONS:
@@ -14006,7 +14016,7 @@ class MinimapRouteRecorder:
         人物坐标=锚点中心(不做到脚补偿,单平台只看X、跨平台走引导线)。"""
         tr = getattr(self, '_role_track', None)
         if tr is None:
-            tr = {"last": None, "foot": None, "miss": 0, "last_full": 0.0, "face": None, "score": 0.0, "off_save_t": 0.0}
+            tr = {"last": None, "foot": None, "miss": 0, "last_full": 0.0, "face": None, "score": 0.0, "off_save_t": 0.0, "last_t": 0.0}
             self._role_track = tr
             # 脸/后脑→人名基点的固定偏移:启动先读采集数据里上次自动学习固化的off_x/off_y(重启不丢、不用重学);没有再运行时学
             try:
@@ -14028,7 +14038,7 @@ class MinimapRouteRecorder:
             _r0 = self._research_anchor_around_dot(frame, tr, float(_P0.get("thr", 0.62)))
             if _r0 is not None:
                 _ax0, _ay0, _src0, _sc0 = _r0
-                tr["last"] = (_ax0, _ay0); tr["foot"] = (_ax0, _ay0); tr["miss"] = 0; tr["score"] = _sc0
+                tr["last"] = (_ax0, _ay0); tr["foot"] = (_ax0, _ay0); tr["miss"] = 0; tr["score"] = _sc0; tr["last_t"] = time.time() * 1000
                 self._role_pos_src = _src0
                 self._last_char_match_pos = tr["foot"]; self._last_char_match_time = time.time() * 1000
                 return tr["foot"]
@@ -14162,11 +14172,24 @@ class MinimapRouteRecorder:
                     _bx, _by = float(last[0]), float(last[1])
                 else:
                     _bx, _by = float(_ploc[0]), float(_ploc[1])
-            # 大跳变硬闸(用户2026-09-20根治坐标帧间拽飞→B误判cross锁空梯;实测误匹配把人783,515一帧拽到505,302=284px):
-            # 任何定位源、任何帧(局部/全图)、无论分数多高(含≥0.75强匹配),相对上一稳定基点一帧位移>ROLE_BIGJUMP_PX一律不采信、continue转黑框ROI重搜;
-            # 正常跑步一帧远<120;真瞬移(≥250)由_research_anchor_around_dot以黑框光点(独立第二源)在新位置ROI内重捕,硬拦不影响真瞬移。
-            if last is not None and np.hypot(_bx - last[0], _by - last[1]) > ROLE_BIGJUMP_PX:
-                continue
+            # 帧间跳变速度闸(用户2026-09-22根治:忙档提到30fps后固定px阈值相对变松,改为按帧间隔dt归一化的速度判据):
+            # 任何定位源、任何帧(局部/全图)、无论分多高,相对上一可信基点的位移速度超ROLE_MAX_SPEED_PX_S一律不采信、continue转黑框ROI重搜。
+            # 30fps下真实跑步/下落/爬梯是连续小步(<60px/帧),误匹配到同名文本是瞬时跳到另一固定文本(实测70~236px=2100~7000px/s)必被拦;
+            # 阈值夹[FLOOR60,CAP150]:高帧战斗≈60px、低帧卡顿≤150px(超大跳变不直接放行);真瞬移(≥250)同样被拦后由_research_anchor_around_dot
+            # 借黑框光点(独立第二源)在新位置ROI重捕,硬拦不影响真瞬移。V_MAX=1800px/s是旧120px@约67ms反推的保守初值,真机按[跳变拦截]日志复核再标定。
+            if last is not None:
+                _dtm = now - tr.get("last_t", 0.0)
+                if _dtm <= 0.0:
+                    _dtm = 1000.0 / 30.0   # 无上一帧时间戳/同帧重入:按忙档30fps标称间隔,阈值落到FLOOR附近
+                _disp_lim = min(ROLE_BIGJUMP_CAP_PX,
+                                max(ROLE_BIGJUMP_FLOOR_PX, ROLE_MAX_SPEED_PX_S * _dtm / 1000.0))
+                _jd = float(np.hypot(_bx - last[0], _by - last[1]))
+                if _jd > _disp_lim:
+                    if now - getattr(self, '_bigjump_log_t', 0.0) > 500.0:
+                        self._bigjump_log_t = now
+                        _debug_log("[角色跟踪] 跳变拦截 d=%.0fpx 限%.0fpx dt=%.0fms v=%.0fpx/s 源=%s(超速度闸转黑框重捕)" % (
+                            _jd, _disp_lim, _dtm, _jd / max(_dtm, 1.0) * 1000.0, _pk))
+                    continue
             # 大跳变以内:保留原弱匹配小跳变过滤(人名局部窗>maxmove且弱匹配<0.75丢;兜底锚点>80且弱匹配<0.75丢)
             if last is not None and _pv[0] < 0.75:
                 _move_lim = maxmove if _pk == "name" else AUX_ANCHOR_MAX_MOVE
@@ -14178,7 +14201,7 @@ class MinimapRouteRecorder:
             ax, ay = int(round(axf)), int(round(ayf))  # 实际基点(三源已统一到人名那条线)
             tr["last"] = (ax, ay)
             tr["foot"] = (ax, ay)  # 单平台只看X,不做到脚补偿
-            tr["miss"] = 0; tr["score"] = ps
+            tr["miss"] = 0; tr["score"] = ps; tr["last_t"] = now
             if need_full:
                 tr["last_full"] = now
             _fv = got.get("face_r")  # 朝向优先由面部锚点判;面部没中就保持上一次朝向、不乱翻
@@ -14197,7 +14220,7 @@ class MinimapRouteRecorder:
         _r2 = self._research_anchor_around_dot(frame, tr, thr)
         if _r2 is not None:
             _ax2, _ay2, _src2, _sc2 = _r2
-            tr["last"] = (_ax2, _ay2); tr["foot"] = (_ax2, _ay2); tr["miss"] = 0; tr["score"] = _sc2
+            tr["last"] = (_ax2, _ay2); tr["foot"] = (_ax2, _ay2); tr["miss"] = 0; tr["score"] = _sc2; tr["last_t"] = now
             self._role_pos_src = _src2
             self._last_char_match_pos = tr["foot"]; self._last_char_match_time = now
             return tr["foot"]
@@ -15535,7 +15558,16 @@ class MinimapRouteRecorder:
     def _transit_step(self):
         """跨层行进执行：每帧朝目标平台（小地图坐标）移动，ladder段由_climb_state_machine成套动作驱动(唯一tick点),选台同层/水平对齐段用纯水平脚_move_horizontal
         到达后重置探测随机序；失败后不停顿（有怪战斗先打=先清再上，没怪马上重试），达随机上限(2~3)才放弃换目标"""
-        if not self._combat_transit or not self._player_map_pos:
+        if not self._combat_transit:
+            self._combat_transit = False
+            self._transit_target = None
+            self._ladder_precise_mode = False
+            return
+        if not self._player_map_pos:
+            # 光点本帧丢(光门/UI短暂遮挡):爬梯/下跳状态机进行中(_climb_state!=none)只暂停本帧——不终止、不清状态、不松键,
+            # 等光点回来继续(连续长丢由爬梯总超时/录制时长+2s兜底);尚未进梯的walk/平地段才终止回打怪(用户2026-09-22去钉旧值配套)。
+            if getattr(self, '_climb_state', 'none') != 'none':
+                return
             self._combat_transit = False
             self._transit_target = None
             self._ladder_precise_mode = False   # 异常出口也要重开怪扫(用户2026-09-15开关配对)
@@ -15999,11 +16031,32 @@ class MinimapRouteRecorder:
             else:
                 self._precise_adapt_p = None  # 离开高帧:自适应档位清空,下次进按核数目标重新起步
                 self._precise_ov_n = self._precise_rx_n = 0
-                # 人物地基帧率保底(用户2026-09-17):人物识别是永不停的地基线程、吃这里的帧,不能被闲时省电拖到3fps(333ms延迟);
-                # 截图(mss BitBlt释放GIL)很便宜,YOLO/模板在B线程另按时间节流、帧多也不会多跑。忙(锁怪/0.4s内见怪)保底60ms≈16fps,闲保底100ms≈10fps;上梯高帧档(_precise_now)不变。
-                _PERSON_BUSY_MAX_MS, _PERSON_IDLE_MAX_MS = 60, 100
-                _period = (min(self._perf_val('detect_busy_ms'), _PERSON_BUSY_MAX_MS) if _busy
-                           else min(self._perf_val('detect_idle_ms'), _PERSON_IDLE_MAX_MS))
+                # 忙档(锁怪/0.4s内见怪)目标30fps(用户2026-09-22根因:16fps下窗口人名基点帧间跳变把平层怪误判cross,提帧让真实移动成连续小步、
+                # 误匹配暴露为单帧大跳变被速度闸拦);截图(mss BitBlt释放GIL)很便宜,YOLO/模板/血条在B线程另按秒节流、帧多不多跑。
+                # 忙档照搬上梯高帧自适应退避(跑不完每档+3ms、封顶60ms=旧16fps最坏退回现状);闲档仍100ms≈10fps省电。
+                _PERSON_IDLE_MAX_MS = 100
+                if _busy:
+                    _btgt = min(self._perf_val('detect_busy_ms'), float(PERSON_BUSY_TARGET_MS))
+                    _ap = getattr(self, '_busy_adapt_p', None)
+                    if _ap is None:
+                        _ap = _btgt; self._busy_adapt_p = _ap; self._busy_ov_n = 0; self._busy_rx_n = 0
+                    if _elapse > _ap - PERSON_BUSY_MIN_SLEEP_MS:
+                        self._busy_ov_n += 1; self._busy_rx_n = 0
+                        if self._busy_ov_n >= PERSON_BUSY_OVERLOAD_N and _ap < PERSON_BUSY_PERIOD_MAX:
+                            _ap = min(PERSON_BUSY_PERIOD_MAX, _ap + PERSON_BUSY_STEP_MS)
+                            self._busy_adapt_p, self._busy_ov_n = _ap, 0
+                            _debug_log("[忙帧监管] 单轮%.0fms跑不完%.0fms档,退避到%.0fms防CPU卡死" % (
+                                _elapse, _ap - PERSON_BUSY_STEP_MS, _ap))
+                    else:
+                        self._busy_rx_n += 1; self._busy_ov_n = 0
+                        if self._busy_rx_n >= PERSON_BUSY_RELAX_N and _ap > _btgt:
+                            _ap = max(_btgt, _ap - PERSON_BUSY_STEP_MS)
+                            self._busy_adapt_p, self._busy_rx_n = _ap, 0
+                    _period = _ap
+                else:
+                    self._busy_adapt_p = None  # 离忙档重置自适应,下次进战斗从目标周期起步
+                    self._busy_ov_n = self._busy_rx_n = 0
+                    _period = min(self._perf_val('detect_idle_ms'), _PERSON_IDLE_MAX_MS)
             # [CPU诊断2026-09-07] 每约1秒汇总检测线程各阶段耗时(毫秒)，定位检测侧CPU大头
             _dt_rounds += 1
             _dt_now = time.time()
@@ -16017,8 +16070,8 @@ class MinimapRouteRecorder:
                 _dt_rounds = 0
                 _dt_last_report = _dt_now
             _slack = _period - _elapse
-            if _precise_now and _slack < LADDER_PRECISE_MIN_SLEEP_MS:
-                _slack = LADDER_PRECISE_MIN_SLEEP_MS   # 高帧CPU监管兜底:哪怕本轮跑超时也强制让出3ms给GIL/主线UI,绝不吃满一个核
+            if (_precise_now or _busy) and _slack < PERSON_BUSY_MIN_SLEEP_MS:
+                _slack = PERSON_BUSY_MIN_SLEEP_MS   # 高帧/忙档CPU监管兜底:哪怕本轮跑超时也强制让出3ms给GIL/主线UI,绝不吃满一个核
             if _slack > 0:
                 time.sleep(_slack / 1000.0)
 
@@ -16075,11 +16128,11 @@ class MinimapRouteRecorder:
                     _pdot = self.find_player_dot(_frame)
                     if _pdot is not None:
                         self._player_map_pos = _pdot
-                        self._last_smooth_dot = _pdot
                         self._map_dot_lost = 0
                     else:
-                        if getattr(self, '_last_smooth_dot', None) is not None:
-                            self._player_map_pos = self._last_smooth_dot
+                        # 本帧丢点:绝不钉旧值(用户2026-09-22),光点置None,下游本帧跳过、下帧重检;
+                        # 爬梯/下跳进行中由_transit_step入口对climb状态容忍本帧None(不终止整套动作、不松键)。
+                        self._player_map_pos = None
                         if getattr(self, '_auto_refresh', True) and self.hwnd:
                             self._map_dot_lost = getattr(self, '_map_dot_lost', 0) + 1
                             _now_force = time.time()
