@@ -52,9 +52,9 @@ ck('底差=11排除', C._pick_ladder_minimap([ld(100, 40, 111)], 100, 100, +1, N
 ck('X差60在带内', C._pick_ladder_minimap([ld(160, 40, 100)], 100, 100, +1, None) is not None)
 ck('X差61出带排除', C._pick_ladder_minimap([ld(161, 40, 100)], 100, 100, +1, None) is None)
 
-# ---------- 分带 rj=7 vl=1 ----------
-expect = {0: 'vert', 1: 'vert', 2: 'fine', 3: 'fine', 4: 'near', 5: 'near',
-          6: 'run', 7: 'run', 8: 'far', 12: 'far'}
+# ---------- 分带 rj=7 vl=1 (新三档:vert/fine/walk;带速跑跳不再由band判,移到goto跨线下降沿,见_test_mm_goto) ----------
+expect = {0: 'vert', 1: 'vert', 2: 'fine', 3: 'fine', 4: 'walk', 5: 'walk',
+          6: 'walk', 7: 'walk', 8: 'walk', 12: 'walk'}
 for ad, want in expect.items():
     got = C._ladder_mm_band(ad, 7, 1)
     ck('分带ad=%d->%s' % (ad, want), got == want, 'got=%s' % got)

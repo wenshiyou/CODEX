@@ -63,6 +63,17 @@ o = make(ld_up, px=100.0)
 o._desc_mm_ladder_tick(100.0, 100.0, 1000)
 ck('D4 上通梯不当下行梯(不抓)', not o.grabbed)
 
+# D5 回归(22:09真机207次TypeError): _pick_climb_boxes 必须是实例方法;被误加@staticmethod时
+#    self._pick_climb_boxes(ppos,fh,fw) 三实参按位填(self,ppos,fh)缺fw,方式一落地三背景点每帧抛错
+o5 = object.__new__(C)
+o5._monsters = []
+try:
+    _boxes = o5._pick_climb_boxes((640, 400), 800, 1280)
+    _ok5 = isinstance(_boxes, list) and len(_boxes) == 3
+except TypeError as _e:
+    _boxes, _ok5 = str(_e), False
+ck('D5 _pick_climb_boxes实例调用返回3点(非staticmethod缺fw)', _ok5, _boxes)
+
 print()
 if fails:
     print('==== %d FAILED: %s' % (len(fails), fails)); raise SystemExit(1)
