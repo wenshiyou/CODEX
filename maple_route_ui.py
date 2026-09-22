@@ -662,6 +662,8 @@ LADDER_END_MATCH_TOL = 1    # [小地图巡路模式预留]梯子连接端(上�
 LADDER_MM_X_HALF = 60       # 选梯X带:光点左右各60小地图px内找录制梯(白框旧值屏幕±300作废)
 LADDER_MM_Y_HALF = 25       # 选梯Y带:光点上/下各25小地图px(粗筛,最终高度门用梯端容差)
 LADDER_MM_END_TOL = 10      # 合格高度门:上行梯底y_bottom与光点Y差<=10(人跳起够得到底端)/下行梯顶y_top与光点Y差<=10
+LADDER_MM_SAME_COL_X = 15      # 同列判定:小地图X差<=15视为可能是同一竖梯的上下分段(实测同列段录制中心偏移<=12,如id8/x144与id1/x156差12首尾相接)
+LADDER_MM_SAME_COL_OV = 2      # 同列上下段Y区间重叠<=2(首尾相接/小间隙);重叠更大=同层并列两把梯(Y区间大面积重合),不并入同列
 LADDER_MM_MIN_LEN = 5       # 录制梯最小梯身长度(y_bottom-y_top):数据里0/2/3px=起终点重合的误录噪点直接判否,真机可爬梯>=7(2026-09-22锁解永振根因之一)
 LADDER_MM_BAD_COOLDOWN_MS = 2000  # 锁后Y复核否决的梯拉黑时长ms:本次上梯不再选它,逼改选别的合格梯或选空走NOPICK超时回主线,治锁-解永振呆住(2026-09-22)
 LADDER_MM_GOTO_UNLOCK_FRAMES = 2  # 锁后连续几帧Y不合格才解锁重选(与锁梯2帧对称,防光点单帧抖动误解锁)
@@ -4947,7 +4949,26 @@ class MinimapRouteRecorder:
             side = [t for t in cand if (float(t['x']) - dx) * float(side_sign) > 0]
             if side:
                 cand = side
-        return min(cand, key=lambda t: abs(float(t['x']) - dx))
+        # 定唯一一把(用户2026-09-23:光点够得着梯底端且X近才是正确梯;治同列竖梯录成上下几段时误选悬在头顶的上段):
+        # 1)先按X最近定"人该去的那一列竖梯";2)同一条竖梯的上下分段(X极近、Y首尾相接/小间隙)并入同列,
+        #   同层并列两把梯Y区间大面积重叠则不算同列;3)起步段:上行取同列梯底端最靠下(y_bottom最大=人当前层够得着
+        #   起跳的那段),下行取梯顶端最靠上(y_top最小=往下接的第一段),端并列再取X近。单段列结果与旧"X最近"完全一致。
+        best_x = min(cand, key=lambda t: abs(float(t['x']) - dx))
+        _bx = float(best_x['x'])
+
+        def _same_col(t):
+            if t is best_x:
+                return True
+            if abs(float(t['x']) - _bx) > LADDER_MM_SAME_COL_X:
+                return False
+            _ov = (min(float(t['y_bottom']), float(best_x['y_bottom']))
+                   - max(float(t['y_top']), float(best_x['y_top'])))
+            return _ov <= LADDER_MM_SAME_COL_OV
+
+        col = [t for t in cand if _same_col(t)] or [best_x]
+        if cdir is not None and cdir < 0:
+            return min(col, key=lambda t: (float(t['y_top']), abs(float(t['x']) - dx)))
+        return max(col, key=lambda t: (float(t['y_bottom']), -abs(float(t['x']) - dx)))
 
     @staticmethod
     def _ladder_mm_band(ad, rj, vl):
