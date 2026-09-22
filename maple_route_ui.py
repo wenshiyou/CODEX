@@ -467,6 +467,14 @@ PERSON_BUSY_MIN_SLEEP_MS = 3     # 忙档每轮至少让出的空闲ms(保GIL/�
 PERSON_BUSY_OVERLOAD_N = 3       # 连续几轮留不出最小空闲=过载,降帧一档
 PERSON_BUSY_RELAX_N = 15         # 连续约15轮很轻松(≈0.4s)=性能够,升回一档直到目标周期
 PERSON_BUSY_STEP_MS = 3          # 忙档自适应每档退避/回升步长ms
+# 忙档自适应最高准则(用户2026-09-22治"打着打着不动"):主循环=战斗/发键唯一司机,帧率必须优先。
+# 截图线程自检只防自己吃满核,感知不到人物匹配/YOLO/绘制的总CPU压力;故再用主循环实测1秒帧率闭环——
+# 主循环连续挨饿就强制放慢截图总闸(人物/B都由截图帧seq驱动,放慢它=后台整体降帧让路),富余再谨慎升回。
+PERSON_BUSY_MAIN_FLOOR_FPS = 27.0  # 主循环实测帧率低于此=后台抢CPU,忙档降帧让路
+PERSON_BUSY_MAIN_OK_FPS    = 29.5  # 连续高于此才认定有余量、可升回目标帧
+PERSON_BUSY_MAIN_OV_N      = 2     # 连续2个1秒样本(约2s)低于floor即降一档
+PERSON_BUSY_MAIN_RX_N      = 3     # 连续3个1秒样本(约3s)高于ok才升一档(防震荡)
+PERSON_BUSY_MAIN_DOWN_STEP = 6     # 主循环挨饿时降档步长ms(比自检+3更快让出CPU,2~4s退到45~50ms)
 # === CPU性能三档(用户2026-09-11定稿:慢/普通/快,默认普通;控制面板"性能档"弹窗三选一) ===
 # 集中收拢原本分散的检测/YOLO/血条/怪模板/上梯高帧/UI帧/边界轮询周期。档定基准,原"按核数自适应+
 # 高帧过载退避+每轮最少留3ms"安全网继续兜底,四核弱机误选快也会被退避兜住不会硬吃满一个核。
@@ -16049,13 +16057,33 @@ class MinimapRouteRecorder:
                                 _elapse, _ap - PERSON_BUSY_STEP_MS, _ap))
                     else:
                         self._busy_rx_n += 1; self._busy_ov_n = 0
-                        if self._busy_rx_n >= PERSON_BUSY_RELAX_N and _ap > _btgt:
+                        # 主循环(战斗司机)正挨饿时禁止截图线程凭"自己轻松"升帧——它感知不到人物/YOLO/绘制的总CPU压力
+                        if self._busy_rx_n >= PERSON_BUSY_RELAX_N and _ap > _btgt and getattr(self, '_busy_main_ov', 0) == 0:
                             _ap = max(_btgt, _ap - PERSON_BUSY_STEP_MS)
                             self._busy_adapt_p, self._busy_rx_n = _ap, 0
+                    # === 主循环帧率闭环(最高准则):按1秒新样本裁决,主循环连续挨饿就放慢截图总闸给战斗司机让路 ===
+                    _mft = getattr(self, '_main_fps_t', 0.0)
+                    if _mft and _mft != getattr(self, '_busy_main_last_t', 0.0):
+                        self._busy_main_last_t = _mft
+                        _mfps = getattr(self, '_main_fps', 0.0)
+                        if _mfps and _mfps < PERSON_BUSY_MAIN_FLOOR_FPS:
+                            self._busy_main_ov = getattr(self, '_busy_main_ov', 0) + 1; self._busy_main_rx = 0
+                            if self._busy_main_ov >= PERSON_BUSY_MAIN_OV_N and _ap < PERSON_BUSY_PERIOD_MAX:
+                                _ap = min(PERSON_BUSY_PERIOD_MAX, _ap + PERSON_BUSY_MAIN_DOWN_STEP)
+                                self._busy_adapt_p, self._busy_ov_n = _ap, 0
+                                _debug_log("[忙帧监管] 主循环%.1ffps<%.0f战斗挨饿,后台让路到%.0fms保司机" % (
+                                    _mfps, PERSON_BUSY_MAIN_FLOOR_FPS, _ap))
+                        elif _mfps and _mfps > PERSON_BUSY_MAIN_OK_FPS:
+                            self._busy_main_rx = getattr(self, '_busy_main_rx', 0) + 1; self._busy_main_ov = 0
+                            if self._busy_main_rx >= PERSON_BUSY_MAIN_RX_N and _ap > _btgt:
+                                _ap = max(_btgt, _ap - PERSON_BUSY_STEP_MS)
+                                self._busy_adapt_p, self._busy_main_rx = _ap, 0
                     _period = _ap
                 else:
                     self._busy_adapt_p = None  # 离忙档重置自适应,下次进战斗从目标周期起步
                     self._busy_ov_n = self._busy_rx_n = 0
+                    self._busy_main_ov = self._busy_main_rx = 0  # 离忙档清主循环闭环计数
+                    self._busy_main_last_t = 0.0
                     _period = min(self._perf_val('detect_idle_ms'), _PERSON_IDLE_MAX_MS)
             # [CPU诊断2026-09-07] 每约1秒汇总检测线程各阶段耗时(毫秒)，定位检测侧CPU大头
             _dt_rounds += 1
@@ -17681,6 +17709,8 @@ class MinimapRouteRecorder:
             _now_fps = time.time()
             if _now_fps - self._fps_last_time >= 1.0:
                 _fps = self._fps_count / (_now_fps - self._fps_last_time)
+                self._main_fps = float(_fps)    # 主循环(战斗司机)实测帧率1秒样本,供截图忙档自适应闭环让路
+                self._main_fps_t = _now_fps
                 _fps_msg = "[FPS统计] 帧率=%.1f 截图=%dms 人物匹配=%dms 怪物匹配=%dms YOLO=%dms 绘制=%dms 上屏=%dms" % (_fps, self._fps_capture_time*1000, self._fps_char_time*1000, self._fps_monster_time*1000, self._fps_yolo_time*1000, self._fps_draw_time*1000, self._fps_imshow_time*1000)
                 print(_fps_msg)
                 _debug_log(_fps_msg)  # 2026-09-07 同时写debug.log，提权进程stdout不可见时仍可定位CPU大头
@@ -17689,6 +17719,7 @@ class MinimapRouteRecorder:
                                       for k, v in sorted(self._seg_sum.items(), key=lambda x: -x[1]) if v > 0.0005)
                     if _seg_s:
                         print("[draw分段] " + _seg_s)
+                        _debug_log("[draw分段] 画帧%d/秒 %s" % (getattr(self, '_fps_draw_n', 0), _seg_s))
                     self._seg_sum = {}
                 if getattr(self, '_seg_loop', None):  # [诊断]主循环非draw各段每秒耗时,定位帧慢大头
                     _loop_s = " ".join("%s=%dms" % (k, v * 1000)
@@ -17705,16 +17736,19 @@ class MinimapRouteRecorder:
                 self._fps_draw_time = 0
                 self._fps_imshow_time = 0
                 self._fps_match_time = 0
-            if self._auto_refresh and self.frame_count % 30 == 0:
-                # [健壮性2026-09-07] 三模板重定位内部截图失败/匹配异常都不得冒泡到主入口导致闪退
-                try:
-                    self._detect_minimap(debug=False)
-                except Exception as _e:
-                    _debug_log("[小地图] 定时重定位异常已跳过: %s" % _e)
-            # 窗口大小固定：每30帧检测一次，变动则拉回
-            if self.frame_count % 30 == 0:
+                self._fps_draw_n = 0
+            # 周期性维护改时间闸(用户2026-09-22):战斗主画面降帧后帧率升高,"每30帧"会被意外加速、重定位反而拖慢战斗;
+            # 统一1.5秒一次(=原20fps*30帧节奏),与帧率解耦。三模板重定位内部异常不冒泡到主入口。
+            _maint_now = time.time()
+            if _maint_now - getattr(self, '_maint_periodic_t', 0.0) >= 1.5:
+                self._maint_periodic_t = _maint_now
+                if self._auto_refresh:
+                    try:
+                        self._detect_minimap(debug=False)
+                    except Exception as _e:
+                        _debug_log("[小地图] 定时重定位异常已跳过: %s" % _e)
                 self._ensure_game_hwnd()   # 句柄看门狗:游戏重启/换频道句柄变更时自动重绑(仅自动绑定),先于尺寸校正
-                self._ensure_window_size()
+                self._ensure_window_size()  # 窗口大小固定:变动则拉回
             _lkd = time.time()
             # 2026-09-16:光点检测已挪到人物高频线程_person_loop(每新截图帧就更新,不再等主循环300ms节奏→黑框跟手),
             # 主循环只读全局self._player_map_pos,这里不再重复跑find_player_dot/map_area只作"有画面"门控
@@ -18183,18 +18217,33 @@ class MinimapRouteRecorder:
                     self._destroy_crosshair_window()
 
             self._seg_loop['7e'] = self._seg_loop.get('7e', 0) + time.time() - self._lk.get('cross_t', time.time())
-            try:
-                _td0 = time.time()
-                frame = self.draw(map_area, self._player_map_pos)
-                self._fps_draw_time += time.time() - _td0
-                _ti0 = time.time()
-                cv2.imshow(win, frame)
-                self._fps_imshow_time += time.time() - _ti0
-            except Exception as e:
-                print("draw error:", e)
-                cv2.imshow(win, self._ui_bg)
-
-            key = cv2.waitKey(int(self._perf_val('ui_wait_ms'))) & 0xFF  # UI帧间隔按CPU性能档(快15/普通25/慢40ms);挂机面板无需高刷,战斗按键靠内部时间戳节流不受影响
+            # 战斗运行中主画面降帧(用户2026-09-22治"打着打着不动":cv2控制面板draw≈17ms/帧+waitKey25ms把战斗主循环压到20fps):
+            # 自动打怪且非录制/校准/输入框/下拉/准星拖拽时,控制面板每250ms才重画一次(4fps):draw单帧~43ms(日志PIL中文重绘)是主线程最大自耗,
+            # 战斗中用户看游戏画面+独立GDI红绿框、不看cv2面板,4fps看状态足够、把主线程自耗让给战斗tick;其余帧只waitKey(5)泵事件保窗口响应;
+            # 真正打怪看的红/绿框在独立GDI蒙板窗口、不受影响;录制/校准/编辑面板时恢复全帧跟手。
+            _ui_throttle = bool(getattr(self, '_running', False)) and not (
+                getattr(self, 'recording_platform', False) or getattr(self, 'recording_ladder', False)
+                or getattr(self, '_auto_calib_stage', 0) or (getattr(self, '_focused_field', None) is not None)
+                or getattr(self, '_drag_crosshair', False) or getattr(self, '_dropdown', None)
+                or getattr(self, '_bound_dropdown', False))
+            _ui_now = time.time()
+            _need_ui_draw = (not _ui_throttle) or (_ui_now - getattr(self, '_last_ui_draw_t', 0.0) >= 0.25)
+            if _need_ui_draw:
+                try:
+                    _td0 = _ui_now
+                    frame = self.draw(map_area, self._player_map_pos)
+                    self._fps_draw_time += time.time() - _td0
+                    _ti0 = time.time()
+                    cv2.imshow(win, frame)
+                    self._fps_imshow_time += time.time() - _ti0
+                    self._last_ui_draw_t = _ui_now
+                    self._fps_draw_n = getattr(self, '_fps_draw_n', 0) + 1
+                except Exception as e:
+                    print("draw error:", e)
+                    cv2.imshow(win, self._ui_bg)
+            # 战斗降帧且本帧不重画:waitKey(5)只泵事件不节流,主循环(战斗tick)跑到高帧率;重画帧/非战斗仍按CPU档UI间隔
+            _ui_wait_ms = 5 if (_ui_throttle and not _need_ui_draw) else int(self._perf_val('ui_wait_ms'))
+            key = cv2.waitKey(_ui_wait_ms) & 0xFF  # 战斗中降帧帧waitKey(5)不拖战斗;按键靠内部时间戳节流、不受帧率影响
             if self.frame_count <= 3: print("[冷启动] %.2fs 第%d帧waitKey完成 key=%d" % (time.time()-self._boot_t, self.frame_count, key))
             # 输入框自动失焦：3秒无变化（全局轮询输入不依赖UI前台，故不检查前台窗口）
             if self._focused_field is not None:
