@@ -661,7 +661,7 @@ LADDER_END_MATCH_TOL = 1    # [小地图巡路模式预留]梯子连接端(上�
 # === 小地图光点+录制梯选梯/对位(用户2026-09-21最终定稿,物理替换游戏窗口白框特征一套;坐标全部=小地图块像素,与find_player_dot/self.ladders同空间)===
 LADDER_MM_X_HALF = 60       # 选梯X带:光点左右各60小地图px内找录制梯(白框旧值屏幕±300作废)
 LADDER_MM_Y_HALF = 25       # 选梯Y带:光点上/下各25小地图px(粗筛,最终高度门用梯端容差)
-LADDER_MM_END_TOL = 10      # 合格高度门:上行梯底y_bottom与光点Y差<=10(人跳起够得到底端)/下行梯顶y_top与光点Y差<=10
+LADDER_MM_END_TOL = 1       # 合格高度门=光点与梯连接端重合±1(用户2026-09-23定稿"直接选光点和梯底重合的,容差都不用"):上行|y_bottom-光点Y|<=1且梯身在人上方/下行|y_top-光点Y|<=1且梯身下通;差>=2即非本层梯排除(旧值10会选到悬在头顶的上段)
 LADDER_MM_SAME_COL_X = 15      # 同列判定:小地图X差<=15视为可能是同一竖梯的上下分段(实测同列段录制中心偏移<=12,如id8/x144与id1/x156差12首尾相接)
 LADDER_MM_SAME_COL_OV = 2      # 同列上下段Y区间重叠<=2(首尾相接/小间隙);重叠更大=同层并列两把梯(Y区间大面积重合),不并入同列
 LADDER_REC_SAME_COL_X = 8      # 录制覆盖:新录梯与旧录梯|X差|<8视为同一列竖梯,整条覆盖、删除同列旧碎段(二点式端到端重录);实测本图同列碎段对中心差<=7、并排梯最小差9
@@ -683,9 +683,9 @@ LADDER_MM_STILL_FRAMES = 2       # 直跳需连续几拍停稳才原地跳(不�
 LADDER_MM_APPROACH_FRAMES = 2    # 跑跳需连续几拍朝梯移动才认(防单帧光点抖动误触发)
 LADDER_DIR_X_HALF = 300    # 方向带选梯X左右半宽(屏幕px,用户2026-09-18):只在人左右各300内选梯(原寻怪far_range=500太宽、梯子多会认错);有怪只留怪那侧,怪侧空才放宽两侧
 LADDER_DOT_X_TOL = 2        # 上梯后光点X直配录制梯容差(用户2026-09-15:人抓住梯后光点与梯共用X,|录制梯x-光点x|≤此值=同一把;与录梯覆盖规则"X差<2同一把"一致,真机配不到再议放到3)
-LADDER_TOP_ARRIVE_TOL = 1  # 爬梯到顶验证(用户2026-09-11晚)：光点与梯顶重合或高于梯顶即到,容差只留1px当检测误差；
-# 且用"到达/越过"单向判定(上行 py<=y_top+2),人还在顶端下方(差>2)绝不判到顶——旧版abs≤8会提前8px松手导致没翻上平台就掉下
-LADDER_TOP_HOLD_MS = 200    # 到顶多按(用户2026-09-15):光点与录制梯端完全重合后,继续按住↑/↓200ms再松,确保整个人翻上台/踩稳
+LADDER_TOP_ARRIVE_TOL = 1  # 爬梯到顶位置门(用户2026-09-23定稿):光点与录制梯顶【重合】|光点y-梯顶y|<=1(差0/1到、差>=2还在梯中继续按↑);录的是最高点不越过,废弃旧"到达/越过py<=y_top+2"
+# 到顶双判:位置重合±1只是前提,还要【当下后脑不可见】(已翻出梯)才判到顶;位置没到(差>=2)后脑丢失按漏检处理继续爬(用户2026-09-23)
+LADDER_TOP_HOLD_MS = 150    # 到顶多按(用户2026-09-23:200->150):重合±1且后脑当下不可见后继续按住↑/↓150ms再松,立即开主线开打,不干等450ms
 LADDER_GRAB_UP_TOL = 2       # 抓梯成功阈值(镜头滚动原理·用户2026-09-09)：光点Y相对【起跳前站地基准Y】变小≥此值=抓住；只比动作前稳态,不做相邻帧比较
 LADDER_GRAB_WINDOW_MS = 1000  # 直跳抓梯硬上限(用户2026-09-10:按住↑给足1秒再判成败,450→1000提高上梯成功率);成功靠Y变小实时触发、不用等满
 LADDER_GRAB_FAIL_MIN_MS = 1000 # 直跳起跳后至少这么久才允许"Y落回起跳=没抓住"判失败(用户2026-09-10:一直按住超过1秒再判,220→1000,避免上升/贴梯途中误判)
@@ -713,12 +713,12 @@ LADDER_DEBUG_DIFF_PX = 200        # 诊断(用户2026-09-15):人梯屏幕|X差|�
 LADDER_DEBUG_DIFF_MS = 1000       # 诊断:"人X-梯X"打印节流1秒1条
 LADDER_REALIGN_NO_TPL_MS = 1200   # 校准直跳里连续多久拿不到梯子屏幕X(无模板/匹配不到)=回主线,不死等
 # === 后脑勺抓梯/到顶/卡住监管(用户2026-09-18定稿:人在梯子上(上爬/下爬)才看得到后脑勺,自由落体/下平台/地面看不到;
-#   抓住=起跳后连续2帧看到后脑;到顶=climbing中连续450ms看不到后脑(已翻出台子,再补按↑LADDER_TOP_HOLD_MS翻稳;光点没到顶=漏检不判顶),
+#   抓住=起跳后连续2帧看到后脑;好梯到顶=光点与梯顶重合±1且当下后脑不可见(补按↑LADDER_TOP_HOLD_MS=150ms翻稳,不干等450);坏梯(没录到梯端)才用连续450ms看不到后脑;光点没到顶=漏检不判顶,
 #   小地图光点重合梯端+录梯时长超时仅作兜底;卡住=后脑在梯但小地图光点Y连续2s不动→监管线程只置令、主线climbing非阻塞横跳解卡)。仅上梯direction>0生效 ===
 BACK_ON_LADDER_THR = 0.52       # 后脑勺"在梯子上"分数阈(定位thr约0.62,在梯判定单独0.52;用户2026-09-22:0.55→0.52调低一点点少漏检;真机看[爬梯·后脑]日志分数再微调)
 NAME_ONLY_AFTER_CLIMB_MS = 800  # 跨层结束(到顶/落地/失败回主线)后多少ms内人物定位只认人名(用户2026-09-20):翻台瞬间脸/后脑/宠物最易误匹配把坐标拽飞,短窗只认最稳的人名
 BACK_GRAB_FRAMES = 2            # 起跳后连续几帧看到后脑=抓住梯子(抗单帧误检)
-BACK_TOP_LOST_MS = 450          # climbing中连续多久看不到后脑=翻出平台到顶(用户2026-09-22:333→450调长抗低帧漏检;新逻辑光点没到顶=梯中漏检不判顶继续爬,仅光点到顶后才用此时长确认翻台,坏梯纯后脑+总超时兜底)
+BACK_TOP_LOST_MS = 450          # 仅【坏梯(没录到梯端)】用:climbing连续多久看不到后脑=翻出平台到顶;好梯到顶走光点重合±1+当下后脑不可见快判(用户2026-09-23),不用此时长;好梯若后脑误检恒可见则总超时保命
 LADDER_STUCK_MS = 2000          # 卡住:后脑在梯且光点Y连续多久不动(小地图系)
 LADDER_STUCK_DOT_DY = 2.0       # 光点Y(小地图px)变化小于此=没动(卡住静止/解卡后恢复移动判据共用)
 LADDER_STUCK_SIDE_MS = 120      # 解卡:固定按右方向键时长
@@ -6212,8 +6212,8 @@ class MinimapRouteRecorder:
                     self._key_up(VK_UP)
                 if VK_DOWN not in self._random_move_keys:
                     self._key_down(VK_DOWN)
-            # === 到顶主判据(用户2026-09-18,仅上行):后脑勺连续BACK_TOP_LOST_MS看不到=人已翻出台子到顶。
-            # 小地图光点重合梯端仅作兜底(后脑漏检/没录到梯端时);下行不接后脑,仍只认光点对y_bottom。总超时保命不变。 ===
+            # === 到顶判据(用户2026-09-23定稿,仅上行):好梯=光点与梯顶重合±1 且 当下后脑不可见(已翻台)即到顶,补按150ms开打,不干等450ms;
+            # 梯中(光点距梯顶差>=2)以光点距离为主、后脑丢失按漏检继续按↑;坏梯(没录到梯端)才用纯后脑连续BACK_TOP_LOST_MS+总超时兜底。下行不接后脑,仍只认光点对y_bottom。 ===
             _bv, _bs = (self._back_head_visible() if _up else (False, 0.0))
             if _up:
                 if _bv:
@@ -6236,21 +6236,21 @@ class MinimapRouteRecorder:
                 _end_y = self._climb_ladder_y_top if _up else self._climb_ladder_y_bottom
             _arrived = False
             _arrive_why = ""
-            # === 到顶判据(用户2026-09-22定稿:后脑为主、光点在梯子上的距离为辅;下行仍只认光点对梯底;总超时录制duration+2s保命)===
-            _dot_at_top = bool(_end_y) and py <= _end_y + LADDER_TOP_ARRIVE_TOL
+            # === 到顶判据(用户2026-09-23定稿:好梯=光点与梯顶重合±1且当下后脑不可见即到顶补按150ms;坏梯=纯后脑连续450;下行只认光点对梯底;总超时duration+2s保命)===
+            _dot_at_top = bool(_end_y) and abs(py - _end_y) <= LADDER_TOP_ARRIVE_TOL  # 上行位置门=光点与梯顶重合±1(差0/1);差>=2还在梯中不判顶(用户2026-09-23,废弃单向越过py<=top+1)
             _lost_enough = bool(self._ladder_back_lost_since and now_ms - self._ladder_back_lost_since >= BACK_TOP_LOST_MS)
             if _up:
                 if _end_y:
-                    # 好梯(录到梯端):光点没到顶(还在梯中/梯底)时后脑丢失=漏检,绝不判顶、继续按↑;
-                    # 光点到顶后,后脑连续丢满BACK_TOP_LOST_MS才确认翻台(_top_by_back)
-                    self._ladder_back_top = bool(_lost_enough and _dot_at_top)
+                    # 好梯(录到梯端,用户2026-09-23):到顶交下面_map_ok_up快判(光点与梯顶重合±1且当下后脑不可见),不再要求后脑连续丢满450ms;
+                    # 梯中(差>=2)_dot_at_top=False,后脑丢失=漏检绝不判顶、继续按↑。此慢标志好梯恒False,仅坏梯用
+                    self._ladder_back_top = False
                 else:
-                    # 坏梯(没录到梯端):无光点判据,纯后脑连续丢满=到顶,总超时(录制时长+2s)保命
+                    # 坏梯(没录到梯端):无光点位置判据,才用纯后脑连续丢满BACK_TOP_LOST_MS=到顶,总超时(录制时长+2s)保命
                     self._ladder_back_top = bool(_lost_enough)
             _top_by_back = bool(_up and self._ladder_back_top)
-            # 上行快判:光点已到梯顶且后脑刚开始消失(lost已起算,哪怕1帧)=立即到顶,不干等BACK_TOP_LOST_MS;
-            # 光点没到顶不成立(梯中漏检不误判);坏梯(_end_y=0)不走快判,退回纯后脑/总超时
-            _map_ok_up = bool(_up and bool(_end_y) and self._ladder_back_lost_since > 0 and _dot_at_top)
+            # 上行快判(用户2026-09-23定稿):光点与梯顶重合±1(_dot_at_top)且【当下后脑不可见】(_bv=False)=已翻台到顶,立即hold补按150ms开打,不干等450ms;
+            # 梯中(差>=2)_dot_at_top=False不成立(后脑漏检不误判);重合但后脑仍可见=还没翻出去,不成立继续按↑;坏梯(_end_y=0)不走快判退回纯后脑/总超时
+            _map_ok_up = bool(_up and bool(_end_y) and _dot_at_top and not _bv)
             _map_ok_down = bool((not _up) and bool(_end_y) and py >= _end_y - LADDER_TOP_ARRIVE_TOL)
             if _top_by_back or _map_ok_up or _map_ok_down:
                 # 触发到顶那一刻不立刻松,继续按住↑多走LADDER_TOP_HOLD_MS确保整个人翻上台/踩稳(本段每帧补按方向键,hold期天然保持)
@@ -6260,14 +6260,14 @@ class MinimapRouteRecorder:
                     if _top_by_back:
                         _why0 = "后脑连续%dms看不到=翻台到顶,补按%dms" % (BACK_TOP_LOST_MS, LADDER_TOP_HOLD_MS)
                     elif _map_ok_up:
-                        _why0 = "光点到梯顶且后脑已消失=快判到顶,补按%dms" % LADDER_TOP_HOLD_MS
+                        _why0 = "光点与梯顶重合±1且后脑当下不可见=到顶,补按%dms开打" % LADDER_TOP_HOLD_MS
                     else:
                         _why0 = "光点重合梯底后多按%dms翻稳" % LADDER_TOP_HOLD_MS
                     self._climb_top_hold_why = _why0
                 elif now_ms - self._climb_top_hold_t >= LADDER_TOP_HOLD_MS:
                     _arrived = True
                     _arrive_why = self._climb_top_hold_why
-            # 总超时保命(没录到梯端/后脑误判防永久卡梯);已进hold(200ms内必收尾)不再被超时打断
+            # 总超时保命(没录到梯端/后脑误判防永久卡梯);已进hold(150ms内必收尾)不再被超时打断
             # 阈值=这把梯录制爬升耗时+2s(用户2026-09-17);取不到有效录制耗时(旧梯/录坏<1s)才回退写死12s
             _cdur = getattr(self, '_climb_ladder_duration', None)
             _climb_to = int((float(_cdur) + 2.0) * 1000) if isinstance(_cdur, (int, float)) and float(_cdur) >= 1.0 else CLIMB_TOTAL_TIMEOUT_MS
