@@ -28,11 +28,7 @@
   "far_range_x": "500",
   "far_range_y_up": "350",
   "far_range_y_down": "350",
-  "slope_jump_y_min": "-25",
+  "slope_jump_y_min": "-50",
   "slope_jump_y_max": "-200",
-  "hp_value": "35",
-  "match_sim": {
-    "char": "0.70",
-    "monster": "0.70"
-  }
+  "hp_value": "35"
 }
