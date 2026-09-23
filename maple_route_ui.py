@@ -2920,7 +2920,9 @@ class MinimapRouteRecorder:
                     self._blue_box = bb
                     print("[切换] 方案%d 已加载绿框 %dx%d" % (route_id, bb["width"], bb["height"]))
                 else:
-                    self._blue_box = None
+                    # 方案未存独立镜头框(历史null/合并冲突标记):回退全局blue_box_config.json,不置None
+                    # 用户2026-09-24:全局文件被合并冲突标记弄坏/方案blue_box=null会把镜头绿框清空不显示
+                    self._load_blue_box()
             except Exception as e:
                 print("[切换] 方案配置加载失败:", e)
         self._save_plans()
@@ -7605,6 +7607,18 @@ class MinimapRouteRecorder:
                 ok, buf = cv2.imencode(".png", tpl["img"])
                 if ok:
                     char_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+            # 镜头框:内存为空时保留磁盘原值,严禁把null写回覆盖(用户2026-09-24:某次保存写null致绿框永久消失)
+            _bb_to_save = self._blue_box
+            if not _bb_to_save:
+                try:
+                    if os.path.exists(calib_file):
+                        with open(calib_file, "r", encoding="utf-8") as _bf:
+                            _old_cd = json.load(_bf)
+                        _ob = _old_cd.get("blue_box")
+                        if _ob and _ob.get("width", 0) > 0:
+                            _bb_to_save = _ob
+                except Exception:
+                    _bb_to_save = None
             with open(calib_file, "w", encoding="utf-8") as f:
                 json.dump({
                     "calib_left": self._calib_left_pt,
@@ -7614,7 +7628,7 @@ class MinimapRouteRecorder:
                     "calibrated_scale_y": getattr(self, '_calibrated_scale_y', 0),
                     "char_template_b64": char_b64,
                     "yolo_model_path": getattr(self, '_yolo_model_path', None),
-                    "blue_box": self._blue_box,
+                    "blue_box": _bb_to_save,
                 }, f, indent=2)
         except Exception as e:
             print("[保存] 方案配置保存失败:", e)
