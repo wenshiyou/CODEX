@@ -664,6 +664,7 @@ LADDER_MM_Y_HALF = 25       # 选梯Y带:光点上/下各25小地图px(粗筛,�
 LADDER_MM_END_TOL = 10      # 合格高度门:上行梯底y_bottom与光点Y差<=10(人跳起够得到底端)/下行梯顶y_top与光点Y差<=10
 LADDER_MM_SAME_COL_X = 15      # 同列判定:小地图X差<=15视为可能是同一竖梯的上下分段(实测同列段录制中心偏移<=12,如id8/x144与id1/x156差12首尾相接)
 LADDER_MM_SAME_COL_OV = 2      # 同列上下段Y区间重叠<=2(首尾相接/小间隙);重叠更大=同层并列两把梯(Y区间大面积重合),不并入同列
+LADDER_REC_SAME_COL_X = 8      # 录制覆盖:新录梯与旧录梯|X差|<8视为同一列竖梯,整条覆盖、删除同列旧碎段(二点式端到端重录);实测本图同列碎段对中心差<=7、并排梯最小差9
 LADDER_MM_MIN_LEN = 5       # 录制梯最小梯身长度(y_bottom-y_top):数据里0/2/3px=起终点重合的误录噪点直接判否,真机可爬梯>=7(2026-09-22锁解永振根因之一)
 LADDER_MM_BAD_COOLDOWN_MS = 2000  # 锁后Y复核否决的梯拉黑时长ms:本次上梯不再选它,逼改选别的合格梯或选空走NOPICK超时回主线,治锁-解永振呆住(2026-09-22)
 LADDER_MM_GOTO_UNLOCK_FRAMES = 2  # 锁后连续几帧Y不合格才解锁重选(与锁梯2帧对称,防光点单帧抖动误解锁)
@@ -7739,21 +7740,22 @@ class MinimapRouteRecorder:
 
     def extract_ladder(self, points):
         if len(points) < 2:
-            _debug_log("[梯录B] extract失败：点数=%d < 2" % len(points))  # 调试日志：点数不足
+            _debug_log("[梯录B] extract失败：点数=%d < 2(二点式需F6在梯底开始、爬到梯顶再F6,留下首尾两点)" % len(points))
             return []
-        xs = [p[0] for p in points]
-        ys = [p[1] for p in points]
+        # 二点式(用户2026-09-23):只用首点(梯底端)、末点(梯顶端)连成竖直线,中间轨迹点全弃用;
+        # x=首尾X均值(不再取一长串晃动轨迹点的中位数,避免爬梯横向晃动把x带偏、同列长梯碎成上下多段)。
+        p0, p1 = points[0], points[-1]
+        _x = (float(p0[0]) + float(p1[0])) / 2.0
+        _yt = min(float(p0[1]), float(p1[1]))
+        _yb = max(float(p0[1]), float(p1[1]))
         result = [{
             "id": len(self.ladders),
-            "x": float(sorted(xs)[len(xs) // 2]),
-            "y_top": float(min(ys)),
-            "y_bottom": float(max(ys))
+            "x": _x,
+            "y_top": _yt,
+            "y_bottom": _yb
         }]
-        # 超详细日志：确认点收集是否完整(第一个点/最后一个点/Y的min-max/点数)
-        _debug_log("[梯录B] extract详细：点数=%d 首点=%s 末点=%s Ymin=%.1f Ymax=%.1f Yrange=%.1f x=%.1f" % (
-            len(points), str(points[0]), str(points[-1]), min(ys), max(ys), max(ys)-min(ys), result[0]["x"]))
-        _debug_log("[梯录B] extract成功：原始点数=%d x=%.1f y_top=%.1f y_bottom=%.1f ladders总数将=%d" % (
-            len(points), result[0]["x"], result[0]["y_top"], result[0]["y_bottom"], len(self.ladders) + len(result)))  # 调试日志：验证extract_ladder是否返回非空结果
+        _debug_log("[梯录B] 二点式成功:底端=%s 顶端=%s x=%.1f y_top=%.1f y_bottom=%.1f 梯长=%.1f ladders总数将=%d" % (
+            str(p0), str(p1), _x, _yt, _yb, _yb - _yt, len(self.ladders) + len(result)))
         return result
 
     def _check_hotkeys(self):
@@ -7808,23 +7810,30 @@ class MinimapRouteRecorder:
             elif self.recording_ladder:
                 nl = self.extract_ladder(self.ladder_points)
                 if nl:
-                    # 梯子覆盖规则：同一梯子=X基本一样(差值<2) 且 Y范围有交叠，新录制覆盖旧记录(不管保没保存)；X差≥2 或 Y范围完全不重叠=不同梯子不覆盖
+                    # 梯子覆盖规则(二点式,用户2026-09-23):同一列竖梯只留一条——新录梯与任一旧录梯|X差|<LADDER_REC_SAME_COL_X即判同一把
+                    # (不再要求Y重叠:二点式端到端重录本就覆盖上下各碎段);把同列旧碎段全部删除、用新整条替换(id继承同列最小号);
+                    # 不同列(|X差|>=容差,如并排两把梯)不动,按新增。
                     new_ld = nl[0]
                     # 记录本把梯子录制爬升耗时(首末光点时间差),供爬梯总超时=耗时+2s兜底(用户2026-09-17)
                     if getattr(self, '_ladder_seg_t0', None) is not None and getattr(self, '_ladder_seg_t1', None) is not None and self._ladder_seg_t1 >= self._ladder_seg_t0:
                         new_ld['duration_sec'] = round(self._ladder_seg_t1 - self._ladder_seg_t0, 2)
+                    same_idx = [i for i, old in enumerate(self.ladders)
+                                if abs(float(old.get("x", 0.0)) - float(new_ld["x"])) < LADDER_REC_SAME_COL_X]
                     replaced = False
-                    for i, old in enumerate(self.ladders):
-                        y_overlap = not (new_ld["y_bottom"] < old["y_top"] or new_ld["y_top"] > old["y_bottom"])  # Y范围有交叠
-                        if abs(old["x"] - new_ld["x"]) < 2 and y_overlap:
-                            new_ld["id"] = old["id"]  # 保持原编号
-                            self.ladders[i] = new_ld
-                            replaced = True
-                            _debug_log("[梯录D] 覆盖旧梯子 id=%s 旧x=%.1f 新x=%.1f y_top=%.1f y_bottom=%.1f" % (old["id"], old["x"], new_ld["x"], new_ld["y_top"], new_ld["y_bottom"]))
-                            break
+                    if same_idx:
+                        keep_id = min(self.ladders[i].get("id", len(self.ladders)) for i in same_idx)
+                        _first_pos = min(same_idx)
+                        for i in sorted(same_idx, reverse=True):
+                            _cov = self.ladders.pop(i)
+                            _debug_log("[梯录D] 同列覆盖删除旧梯 id=%s x=%.1f top=%.1f bot=%.1f" % (
+                                _cov.get("id"), _cov.get("x", 0.0), _cov.get("y_top", 0.0), _cov.get("y_bottom", 0.0)))
+                        new_ld["id"] = keep_id  # 继承同列最小编号,不产生重复号
+                        self.ladders.insert(_first_pos, new_ld)  # 插回该列原最上位置,保持列表物理顺序(UI编号显示不错位)
+                        replaced = True
                     if not replaced:
+                        new_ld["id"] = len(self.ladders)
                         self.ladders.append(new_ld)
-                    print("Extracted 1 ladder,", len(self.ladder_points), "points,", "覆盖旧梯" if replaced else "新增", "ladders总数=", len(self.ladders))
+                    print("Extracted 1 ladder(二点式),", ("同列覆盖%d条" % len(same_idx)) if replaced else "新增", "ladders总数=", len(self.ladders))
                     self._rlog("梯子录制结束(F6):%s,共%d把%s" % (
                         "覆盖旧梯" if replaced else "新增", len(self.ladders),
                         (" 爬升%.1fs" % new_ld['duration_sec']) if new_ld.get('duration_sec') else ""), log='behavior')
@@ -17918,12 +17927,14 @@ class MinimapRouteRecorder:
                     self.platform_points.append(player_pos)
                     _debug_log("[录制C] 新增点 pos=%s 总点数=%d" % (str(player_pos), len(self.platform_points)))
             if self.recording_ladder and player_pos:
-                # 【统一坐标空间】梯子与平台、旧梯子完全同一空间=小地图画面原始像素坐标：
-                # 直接收集光点画面坐标，不做任何背景滚动/相对位移修正(此前scroll_y修正造出第二坐标空间导致梯子分层,已废弃)
-                self.ladder_points.append(player_pos)
-                _lseg_t = time.time()  # 本段首/末光点时间,算这把梯子从下到上爬升耗时(用户2026-09-17)
-                if getattr(self, '_ladder_seg_t0', None) is None:
+                # 【二点式录制(用户2026-09-23)】梯子只留首尾两个光点=梯底端/梯顶端,两点连成竖直线,中间爬梯轨迹点一帧都不存;
+                # 坐标仍=小地图画面原始像素(不做滚动修正)。首点=F6开始时梯底光点(固定),末点随爬刷新为梯顶光点。
+                _lseg_t = time.time()  # 首/末光点时间,算这把梯子从下到上爬升耗时(用户2026-09-17)
+                if not self.ladder_points:
+                    self.ladder_points = [player_pos]        # 首点=梯底端,固定
                     self._ladder_seg_t0 = _lseg_t
+                else:
+                    self.ladder_points = [self.ladder_points[0], player_pos]  # 末点=梯顶端,随爬刷新,中间点不留
                 self._ladder_seg_t1 = _lseg_t
 
             # 掉台归位独占线(用户2026-09-09)：辅助线独占期间主线(_random_step/_combat_tick)一律暂停,
