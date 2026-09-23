@@ -410,8 +410,8 @@ ROLE_TRACK_DEFAULT = {
     "lock_dead_y": 70,     # 死区 y
     "lock_idle_x": 0,      # 站立不动 x
     "lock_idle_y": 0,      # 站立不动 y
-    "lock_box_rx": 40,     # 黑框X半径
-    "lock_box_ry": 40,     # 黑框Y半径
+    "lock_box_rx": 500,    # 黑框X半径(用户2026-09-23:放大到500)
+    "lock_box_ry": 500,    # 黑框Y半径(用户2026-09-23:放大到500)
 }
 ROLE_TRACK_FIELDS = [  # (参数key,中文标签,是否小数)
     ("fps", "跟踪FPS", False), ("thr", "匹配阈值", True),
@@ -660,7 +660,7 @@ LADDER_END_MATCH_TOL = 1    # [小地图巡路模式预留]梯子连接端(上�
 # === 小地图光点+录制梯选梯/对位(用户2026-09-21最终定稿,物理替换游戏窗口白框特征一套;坐标全部=小地图块像素,与find_player_dot/self.ladders同空间)===
 LADDER_MM_X_HALF = 60       # 选梯X带:光点左右各60小地图px内找录制梯(白框旧值屏幕±300作废)
 LADDER_MM_Y_HALF = 25       # 选梯Y带:光点上/下各25小地图px(粗筛,最终高度门用梯端容差)
-LADDER_MM_END_TOL = 1       # 合格高度门=光点与梯连接端重合±1(用户2026-09-23定稿"直接选光点和梯底重合的,容差都不用"):上行|y_bottom-光点Y|<=1且梯身在人上方/下行|y_top-光点Y|<=1且梯身下通;差>=2即非本层梯排除(旧值10会选到悬在头顶的上段)
+LADDER_MM_END_TOL = 3       # 合格高度门=光点与梯连接端重合±3(真机小地图光点像素块与录制梯底固有2px系统偏差,±1把正确梯id2底104/光点106差2误杀;±3只放系统偏差,id0底98差8/id3底87差19仍被排除)
 LADDER_MM_SAME_COL_X = 15      # 同列判定:小地图X差<=15视为可能是同一竖梯的上下分段(实测同列段录制中心偏移<=12,如id8/x144与id1/x156差12首尾相接)
 LADDER_MM_SAME_COL_OV = 2      # 同列上下段Y区间重叠<=2(首尾相接/小间隙);重叠更大=同层并列两把梯(Y区间大面积重合),不并入同列
 LADDER_REC_SAME_COL_X = 8      # 录制覆盖:新录梯与旧录梯|X差|<8视为同一列竖梯,整条覆盖、删除同列旧碎段(二点式端到端重录);实测本图同列碎段对中心差<=7、并排梯最小差9
@@ -4248,7 +4248,7 @@ class MinimapRouteRecorder:
             tk.Label(f, text=label, width=9, anchor="w", font=("微软雅黑", 9)).pack(side="left")
             v = tk.IntVar(value=int(cur))
             self._lock_off_vars[key] = v
-            tk.Scale(f, from_=0, to=150, orient="horizontal", variable=v, length=110, showvalue=False,
+            tk.Scale(f, from_=0, to=500, orient="horizontal", variable=v, length=110, showvalue=False,
                      command=lambda val, k=key: self._apply_lock_offset(k, self._lock_off_vars[k].get())).pack(side="left")
             tk.Label(f, textvariable=v, width=4, font=("微软雅黑", 9)).pack(side="left")
         _mk_off(0, 0, "follow_left_x", "跟随左x", self.FOLLOW_LEFT_X)
@@ -6642,6 +6642,28 @@ class MinimapRouteRecorder:
             _cyh = _st[_k, cv2.CC_STAT_TOP] + _st[_k, cv2.CC_STAT_HEIGHT] / 2.0
             cands.append((_a, float(_cxh), float(_cyh)))
         if not cands:
+            # 用户2026-09-23:光门(蓝色覆盖层)把黄色光点盖住时,在上次光点位置±15内放宽阈值找透出的黄色像素
+            try:
+                _lp = getattr(self, '_player_map_pos', None)
+                if _lp is not None:
+                    _lx, _ly = int(_lp[0]), int(_lp[1])
+                    _h, _w = bgr.shape[:2]
+                    _x0, _y0 = max(0, _lx-15), max(0, _ly-15)
+                    _x1, _y1 = min(_w, _lx+15), min(_h, _ly+15)
+                    _sub = bgr[_y0:_y1, _x0:_x1]
+                    if _sub.size > 0:
+                        # 放宽黄色阈值B≤230(原205):光门下透出的黄色也能识别
+                        _mask2 = cv2.inRange(_sub, np.array([0, 200, 200]), np.array([230, 255, 255]))
+                        _ys, _xs = np.where(_mask2 > 0)
+                        if len(_ys) >= 3:  # 至少3个黄色像素才算
+                            _cx2 = int(round(_xs.mean())) + _x0
+                            _cy2 = int(round(_ys.mean())) + _y0
+                            if getattr(self, 'frame_count', 0) % 10 == 0:
+                                _debug_log("[光点] 光门模糊重捕=(%d,%d) 上次=(%d,%d) 黄像素=%d" % (_cx2, _cy2, _lx, _ly, len(_ys)))
+                            return (_cx2 + int(getattr(self, '_dot_center_off_x', 0) or 0),
+                                    _cy2 + int(getattr(self, '_dot_center_off_y', 0) or 0))
+            except Exception:
+                pass
             # 本帧无合格团:返回None交主循环丢点逻辑(不钉旧值、不冻结,用户2026-09-22)
             return None
         # 用户2026-09-16:去掉"优先选离上一帧最近的团"的最近邻逻辑,直接取最大团(黄芒星=自己,不靠历史锚点,防止串点后甩不掉)
@@ -11123,7 +11145,7 @@ class MinimapRouteRecorder:
                             _rsb = data.get('role_search_box')
                             if _rsb:
                                 _bx0, _by0, _bx1, _by1 = _rsb
-                                rpen = gdi32.CreatePen(0, 1, 0xFFFFFF)  # 白色1px=rx/ry局部搜索范围
+                                rpen = gdi32.CreatePen(0, 1, 0x000000)  # 黑色1px=黑框ROI(光点±500)
                                 if rpen:
                                     gdi_objs.append(rpen)
                                 old_rpen = gdi32.SelectObject(hdc, rpen)
@@ -14068,10 +14090,45 @@ class MinimapRouteRecorder:
         # 失配时miss每帧+1、≥faststep就全图=几乎每帧全图(脸还镜像=每帧4次全图匹配),吃满CPU/GIL把主循环绘制拖到
         # 400ms、帧率掉到10~15、动作中更抓不到锚点=死循环。给"miss触发的全图"加350ms最小间隔,期间只跑便宜局部窗,把帧率让回来。
         _FULL_GAP_MS = 350.0
+        # 用户2026-09-23:局部连续找不到1秒->进全图不停扫模式(人物发呆不动,全图扫不抢CPU,扫到为止)
+        if tr["miss"] >= faststep:
+            if not tr.get("_full_persistent"):
+                if tr.get("_miss_t", 0) == 0:
+                    tr["_miss_t"] = now
+                elif now - tr["_miss_t"] > 1000:
+                    tr["_full_persistent"] = True
+                    _debug_log("[角色跟踪] 局部1秒找不到->全图不停扫到为止")
+        else:
+            tr["_miss_t"] = 0
+            tr["_full_persistent"] = False
         need_full = (last is None) or (now - tr["last_full"] > research) \
+            or tr.get("_full_persistent", False) \
             or ((tr["miss"] >= faststep) and (now - tr["last_full"] > _FULL_GAP_MS))
-        box = None if need_full else (last[0] - rx, last[1] - ry, last[0] + rx, last[1] + ry)
-        self._role_search_box = box  # 局部跟踪搜索范围框(全图重搜时=None不画),供蒙板可视化"在哪片区域找锚点"
+        if need_full:
+            box = None
+        elif tr["miss"] > 0:
+            # 用户2026-09-23:miss后不用白框(瞬移后人不在last附近),直接黑框ROI(小地图光点跟人走)
+            _dot0 = self._dot_fallback_pos()
+            if _dot0 is not None:
+                _brx0 = int(getattr(self, 'LOCK_BOX_RX', 40) or 40)
+                _bry0 = int(getattr(self, 'LOCK_BOX_RY', 40) or 40)
+                _H0, _W0 = frame.shape[:2]
+                box = (max(0, int(_dot0[0])-_brx0), max(0, int(_dot0[1])-_bry0),
+                       min(_W0, int(_dot0[0])+_brx0), min(_H0, int(_dot0[1])+_bry0))
+            else:
+                box = None  # 光点也没了(卡住)→全图不停扫
+        else:
+            box = (last[0] - rx, last[1] - ry, last[0] + rx, last[1] + ry)
+        # 用户2026-09-23:蒙板只画黑框ROI(光点±500),不画白框(last±rx/ry)
+        _dot_for_roi = self._dot_fallback_pos()
+        if _dot_for_roi is not None:
+            _brx_d = int(getattr(self, 'LOCK_BOX_RX', 40) or 40)
+            _bry_d = int(getattr(self, 'LOCK_BOX_RY', 40) or 40)
+            _Hd, _Wd = frame.shape[:2]
+            self._role_search_box = (max(0, int(_dot_for_roi[0])-_brx_d), max(0, int(_dot_for_roi[1])-_bry_d),
+                                     min(_Wd, int(_dot_for_roi[0])+_brx_d), min(_Hd, int(_dot_for_roi[1])+_bry_d))
+        else:
+            self._role_search_box = None
         # 人名永远第一;其余=冗余兜底(脸/后脑/宠物名1-3),人名丢时谁分高用谁、各带"→人名线"偏移,只显示分高那个。
         # 宠物始终跟人、位置绑定,人名/脸/后脑全被特效挡住时用宠物名兜底定位(用户:采了就要参与定位,不是只在管理窗看分)。
         got = {}
@@ -14218,6 +14275,7 @@ class MinimapRouteRecorder:
             tr["last"] = (ax, ay)
             tr["foot"] = (ax, ay)  # 单平台只看X,不做到脚补偿
             tr["miss"] = 0; tr["score"] = ps; tr["last_t"] = now
+            tr["_miss_t"] = 0; tr["_full_persistent"] = False
             if need_full:
                 tr["last_full"] = now
             _fv = got.get("face_r")  # 朝向优先由面部锚点判;面部没中就保持上一次朝向、不乱翻

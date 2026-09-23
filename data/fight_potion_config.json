@@ -26,8 +26,8 @@
   "aoe_y_up": "-100",
   "aoe_y_down": "25",
   "far_range_x": "500",
-  "far_range_y_up": "350",
-  "far_range_y_down": "350",
+  "far_range_y_up": "320",
+  "far_range_y_down": "320",
   "slope_jump_y_min": "-50",
   "slope_jump_y_max": "-200",
   "hp_value": "35"

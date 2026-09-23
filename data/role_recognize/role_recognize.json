@@ -1,7 +1,7 @@
 {
   "params": {
     "fps": 24,
-    "thr": 0.55,
+    "thr": 0.52,
     "rx": 180,
     "ry": 120,
     "maxmove": 250,
@@ -15,8 +15,8 @@
     "lock_dead_y": 60,
     "lock_idle_x": 4,
     "lock_idle_y": 75,
-    "lock_box_rx": 150,
-    "lock_box_ry": 150
+    "lock_box_rx": 199,
+    "lock_box_ry": 200
   },
   "blocklist": [
     [
