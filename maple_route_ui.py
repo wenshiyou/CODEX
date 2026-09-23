@@ -1498,7 +1498,7 @@ class MinimapRouteRecorder:
         self._unblock_state = None      # None=未在解卡；dict{dir,jump,tries,dot0,act_t,phase}=解卡进行中(主线暂停)
         # === 辅助线隔离排查开关(用户2026-09-09)：只留主线_combat_tick排查"哪条辅助线抢行动/导致不锁不打"。
         # 排查期先全False=纯主线；确认主线正常后逐个置True打开验证，定位抢占者；排查结束恢复全True。
-        self._aux_enable_fall = False      # 掉台归位线(_fall_return_tick)
+        self._aux_enable_fall = True       # 掉台归位线(_fall_return_tick) 用户2026-09-23选A启用同层回台
         self._aux_enable_unblock = False   # 卡住解卡线(_unblock_tick)；同时门控主线内_check_move_blocked登记,避免主线自我挂起
         self._aux_enable_retreat = False   # 主线内"平台边界回退"段(到绿线边缘往回走+小跳并整帧return,会抢占锁怪打怪)
         self._aux_enable_rest = False      # 主线内"拟人周期小休"段(5~8分钟停5~10秒,期间完全不动不打)
@@ -15461,6 +15461,10 @@ class MinimapRouteRecorder:
         if getattr(self, '_combat_transit', False):
             self._fall_off_since = 0
             return False
+        if getattr(self, '_slope_high_mode', False):
+            # 跳高打(怪在上方连续跳-攻-跳)原地/贴坡腾空,光点会短暂离开home折线,性质同上坡跳,不算掉台(用户2026-09-23)
+            self._fall_off_since = 0
+            return False
         if mmp is None:
             # 光点暂时丢失：不冤枉，维持当前状态(归位中继续,正常则等待)
             return self._fall_returning
@@ -18039,8 +18043,7 @@ class MinimapRouteRecorder:
             # 辅助线结束(光点回台)才恢复主线——辅助线与主线同一时间只跑一个,不并行抢键
             # 【用户2026-09-15】掉台归位先关闭·注释(排查主线不进战斗;总开关_aux_enable_fall本就默认False,这里代码层再硬断;
             # 逻辑整段保留不删,要恢复=删掉下面False、取消注释下一行即可)
-            # _fall_returning = self._fall_return_tick() if getattr(self, '_aux_enable_fall', True) else False
-            _fall_returning = False
+            _fall_returning = self._fall_return_tick() if getattr(self, '_aux_enable_fall', True) else False
             # 卡住解卡独占线(用户2026-09-09)：仅在没有更高优先级辅助线(掉台归位)时运行
             # 【用户2026-09-15】卡住解卡先关闭·注释(同上代码层硬断,恢复=取消注释下一行)
             # _unblocking = (self._unblock_tick() if not _fall_returning else False) if getattr(self, '_aux_enable_unblock', False) else False
