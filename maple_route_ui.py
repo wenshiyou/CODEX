@@ -1551,6 +1551,8 @@ class MinimapRouteRecorder:
         self._dbg_probe = {'atk':0,'aoe':0,'win':0,'probe_dmg':0,'gate_dmg':0,'hpframe':0,'abhit':0,'misalign':0,'early':0,'notskill':0,'t0':0}  # 判活检测端探针计数(只观测不改决策,2026-09-20)
         self._slope_high_mode = False              # 跳高打动作状态机(留主线);打空=普通空怪换一只,绝不降级cross(能不能打到只看面板跳高带)
         self._slope_high_last_jump = 0             # 跳高打最后一次起跳时刻ms(余温窗内禁向下跳,治腾空误判;用户2026-09-18)
+        self._slope_anchor_y = None                # 跳高打起跳落地锚点Y:腾空窗内B锁怪/分档用它,防空中Y污染(用户2026-09-23)
+        self._slope_air_until = 0                  # 腾空窗截止时刻ms=起跳时刻+SLOPE_AIR_MS
         # === 打怪分层探测状态（350近距→500同平台一边随机→跨层）===
         self._probe_side = random.choice([-1, 1])   # 当前探测方向 1=右 -1=左（每轮随机，先看哪边随机）
         self._probe_switched = False                 # 本轮是否已换边探测过（两边都空才跨层）
@@ -15397,6 +15399,8 @@ class MinimapRouteRecorder:
         self._slope_high_mode = False
         self._release_combat_move()
         self._slope_high_last_jump = 0
+        self._slope_anchor_y = None
+        self._slope_air_until = 0
         _debug_log("[防卡死] 连续移动受阻(%s)，判定目标(%d,%d)打不到→放弃，下帧纯最近重选" % (why or "卡住", cx, cy))
 
     def _single_home_platform(self):
@@ -16645,6 +16649,10 @@ class MinimapRouteRecorder:
             self._combat_decision_packet = None
             return
         px, py = ch
+        # 跳高腾空窗(起跳后SLOPE_AIR_MS):B用起跳落地锚点Y算分档/距离/血条B区,不拿空中Y重算换锁(治腾空时同层/上层分类错乱、刚起跳就换锁)
+        _slope_air = now_ms < getattr(self, '_slope_air_until', 0)
+        if _slope_air and getattr(self, '_slope_anchor_y', None) is not None:
+            py = self._slope_anchor_y
         _skr = int(fc.get("atk1_distance", 150) or 150)
         _stop = max(1, int(_skr * 4 // 5))
         _aoe = int(fc.get("aoe_distance", 200) or 200)
@@ -16660,7 +16668,6 @@ class MinimapRouteRecorder:
         except (TypeError, ValueError):
             _sjmin = _sjmax = None
         _slope_on = (_sjmin is not None and _sjmax is not None and _sjmax >= _sjmin)
-        _eff_up = _sjmax if _slope_on else _yup   # 面板跳高带内=cand可跳高打;永不因打空收回(删旧slope_blocked降级)
         _far_x = max(50, int(fc.get("far_range_x", COMBAT_FAR_RANGE) or COMBAT_FAR_RANGE))
         _gp = bool(fc.get("group_priority"))
         _dual = bool(fc.get("aoe_dual"))
@@ -16757,11 +16764,12 @@ class MinimapRouteRecorder:
             self._b_probe_side, self._b_probe_switched,
             self._is_monster_on_platform, self._get_monster_platform,
             self._b_lock_time, self._b_hp_confirmed, self._b_gone, None,  # cur_cross同层传None:脱检不续cross(此前错传当前锁_bl致续命条件恒真→漏帧误cross呆住);未来跨层才传真cross目标
-            _attacked, _eff_up, _ydn, True, freeze_lock=False,  # 跨层已开allow_cross=True(用户2026-09-21):超跳高带怪产cross走上梯/下跳;cur_cross仍传None防续命恒真漏帧误cross呆住
+            _attacked, _yup, _ydn, True, freeze_lock=False,  # attack_y_up传主攻同层上沿(跳高段改走slope_y_up分档,不再抬到跳高上限致同层/跳高混池);allow_cross=True超跳高带产cross
             group_priority=_gp, group_radius=_aoe,
             aoe_y_up=_ayup, aoe_y_down=_aydn, aoe_dual=_dual,
             can_strike=_in_skill, lock_tier=self._b_lock_tier,
-            same_platform_fn=None, metric=metric)
+            same_platform_fn=None, metric=(None if _slope_air else metric),  # 腾空窗:用空中Y算的metric作废,改以锚点Y现算
+            slope_y_up=(_sjmax if _slope_on else None))  # 跳高上限:主攻带之上~此高度=slope跳高档,同层档清空才选
         # B锁生命周期回存
         self._b_hp_confirmed = _dl['hp_confirmed']
         self._b_gone = _dl['gone_frames']
@@ -17191,7 +17199,7 @@ class MinimapRouteRecorder:
             self._key_up(VK_RIGHT)
         # 非transit平地:移动权在战斗手里,继续 cast/pursue(打/追) 或 cross(首次启动跨层),互不重叠
 
-        if _dl['state'] in ('cast', 'pursue') and _dl['target']:
+        if _dl['state'] in ('cast', 'pursue', 'slope') and _dl['target']:
             # 有同平台怪:锁谁/判死/换锁全由B决策包定,这里只进入打/追执行(target已在上面解出)
             self._combat_active = True
 
@@ -17280,7 +17288,7 @@ class MinimapRouteRecorder:
         # 【用户2026-09-10】一直按住方向走到停步线(技能射程4/5)才站定;(stop_range,skill_range]这段也要持续走,
         # 旧用满技能距离当停步线→这段被判cast站定、只靠转身短按蹭=碎步不走
         effective_range = stop_range
-        if not in_attack_range:   # 架构B:走近还是站定统一听仲裁(实控=R-50进/R+25出迟滞;关时in_attack_range=t_dist<=stop_range,等价原t_dist>stop_range走近)
+        if not in_attack_range and _dl.get('state') != 'slope':   # state=slope(X进射程)跳过通用pursue/瞬移,落high_slope自管走近+跳打;slope走近段(state=pursue/tier=slope,X250~300)仍由此走近
             move_dir = "right" if t_cx > px else "left"
             # 平台硬边界(用户2026-09-07锁单平台)：勾了平台就按勾选绿线X范围,到边缘停住不走下去(半空/斜坡也稳)；没勾按当前所在平台
             if self._combat_at_locked_edge(move_dir):
@@ -17298,6 +17306,7 @@ class MinimapRouteRecorder:
             # 否则会朝锁梯方向战斗空闪(真机cross/pursue抖动中向左瞬移又闪不动,添乱)。
             _tp_ready = (bool(_tp_key) and self._climb_state == 'none'
                          and getattr(self, '_locked_ladder', None) is None
+                         and _dl.get('tier') != 'slope'   # 跳高slope流程(含X250~300走近段)不瞬移插队,防白闪打断跳-打-跳(用户2026-09-23)
                          and not _tp_blk and now - self._combat_last_h_teleport > TP_COOLDOWN_MS)
             _dyv = t_cy - py_layer                                        # 正=怪在人物下方,负=在上方(实时Y)
             # 打怪区域:刚从某侧越线被拉回后的冷却内,禁再朝那一侧水平瞬移(瞬移落点不可控会一步闪回竖线→再越线→再拉回死循环);
@@ -17367,42 +17376,17 @@ class MinimapRouteRecorder:
             move_dir = None
         else:
             move_dir = "right" if t_cx > px else "left"
-        # 跳高打判定(用户2026-09-10晚简化)：两框都填(_slope_on)即开启,【不分群攻优先/就近,统一一套就近机制】;
-        # 怪比人高落在[_sj_min,_sj_max]且X差≤技能射程才"走-跳-打"。群攻模式锁定点是怪群窗中心、Y差会被平均到区间外
-        # →永不触发(用户实锤),故锁定点高度不在区间时,就近在X射程内另找一只Y差正好落在区间的高处怪做跳高打参照(主锁定不变)。
-        # 高处参照怪sticky钉住(用户2026-09-11):上层一排怪Y都在跳打区间时,旧逻辑每帧选"X最近"那只当参照,
-        # 人物一动参照就在左右怪间跳→_hmove/出手方向左右碎步、还每帧"换新目标"清跳打节奏。改为:钉住上一只参照,
-        # 只要它本帧仍被检测到(±30X/±40Y容差)、Y仍在跳打区间、X仍≤技能射程就沿用;脱检/离开区间/走远才重选X最近。
-        _sref = getattr(self, '_slope_ref', None)
-        _sref_ok = False
-        if _sref is not None:
-            for _m in (self._monsters or []):
-                _mcx = (_m[0] + _m[2]) // 2
-                _mcy = _m[3]
-                if abs(_mcx - _sref[0]) <= 30 and abs(_mcy - _sref[1]) <= 40 \
-                        and _sj_min <= (py_layer - _mcy) <= _sj_max and abs(_mcx - px) <= skill_range:
-                    _sref, _sref_ok = (_mcx, _mcy), True
-                    break
-        if _sref_ok:
-            _ref_x, _ref_y = _sref
-            self._slope_ref = _sref
+        # 跳高打唯一由B决策state='slope'驱动(B是锁怪唯一脑子,用户2026-09-23):B已保证同层档清空、怪Y在跳高带、
+        # X≤技能射程。参照怪=B锁定点本身;物理删旧sticky/就近另找/platforms门控这个"第二脑子"——它曾和B锁不是同一只、
+        # 又每帧被new_target重置起跳节奏,致跳-打-跳从没做完、钉地空打(08:47日志实锤)。state非slope一律不自行起跳。
+        if _dl.get('state') == 'slope':
+            _ref_x, _ref_y = t_cx, t_cy
+            self._slope_ref = (t_cx, t_cy)
+            high_slope = True
         else:
             _ref_x, _ref_y = t_cx, t_cy
-            if not (_sj_min <= (py_layer - t_cy) <= _sj_max) or abs(t_cx - px) > skill_range:
-                _best_hi = None
-                for _m in (self._monsters or []):
-                    _mcx = (_m[0] + _m[2]) // 2
-                    _mcy = _m[3]
-                    if _sj_min <= (py_layer - _mcy) <= _sj_max and abs(_mcx - px) <= skill_range:
-                        if _best_hi is None or abs(_mcx - px) < abs(_best_hi[0] - px):
-                            _best_hi = (_mcx, _mcy)
-                if _best_hi is not None:
-                    _ref_x, _ref_y = _best_hi
-            self._slope_ref = (_ref_x, _ref_y)
-        _above2 = py_layer - _ref_y   # 怪在人物实时Y上方多少px(正=怪上方;跳高打只在high_slope分支,人腾空走该分支return,不落到此)
-        high_slope = bool(_slope_on) and bool(self.platforms) and not getattr(self, '_combat_transit', False) \
-            and now >= getattr(self, '_slope_resume_at', 0) \
-            and _above2 > 0 and (_sj_min <= _above2 <= _sj_max) and abs(_ref_x - px) <= skill_range  # 硬校验只打上方(_above2>0,用户2026-09-18:跳高永不打下方);X差须<技能范围
+            high_slope = False
+        _above2 = py_layer - _ref_y   # 怪在人物实时Y上方多少px(正=上方;仅high_slope分支用)
         # 下方够不着：怪脚Y-人脚Y 超出下方攻击范围(_atk_y_down,默认30)。用户2026-09-07：下方差100+还站着打=bug,要走下去靠近而不是空打
         _below2 = (t_cy - py_layer) > _atk_y_down   # 实时Y;正下方够不着不再原地按↓跳(旁路已删),由B判cross走完整下跳,腾空误判由跳高腾空窗2秒拦
         if not _below2:
@@ -17455,6 +17439,8 @@ class MinimapRouteRecorder:
                 if jump_key:
                     self._press_game_key(jump_key, duration=120)
                     self._combat_last_jump = now
+                    self._slope_anchor_y = py_layer      # 起跳落地锚点Y:腾空SLOPE_AIR_MS窗内B用它分档/算距,不被空中Y污染
+                    self._slope_air_until = now + SLOPE_AIR_MS
                     self._slope_phase = 'wait_attack'
                     self._slope_high_last_jump = now   # 记跳高打起跳时刻:起跳起3秒窗(SLOPE_HIGH_DOWN_BLOCK_MS)内禁向下cross(用户2026-09-19)
                     # 跳后延时(到攻击):战士80~100ms空中打;法师1000±50ms(已落地)才打
