@@ -537,6 +537,12 @@ BOUND_PULL_MIN_MS = 1000    # 左右越线后朝画面内拉回的持续时长·
 BOUND_PULL_MAX_MS = 1500    # 上限:走够这一段才恢复打怪,天然不会在边上来回碎步
 BOUND_RELEASE_MS = 50       # 拉回前清场间隙:停主线后先把左右/攻击键全松这么久,再压朝内键(防松/压同帧被游戏吞=相抵碎步)
 BOUND_TP_COOLDOWN_MS = 2000 # 拉回结束后,禁止再朝"刚越线那一侧"水平瞬移的冷却:这期间改走路靠近(走路在R-50站定不会越线;瞬移落点不可控会一步闪回线上→再拉回死循环,用户2026-09-12实锤)
+PLATFORM_EDGE_MARGIN = 3         # 手动选台·光点距绿线端点≤此值(小地图px)即触线回退(预留检测+消费+人物惯性,到线就回、不等越过;用户2026-09-24)
+PLATFORM_GUARD_POLL_MS = 20      # 平台边界守护线程轮询(与光点线程同频50fps,实时盯线)
+PLATFORM_RETREAT_RELEASE_MS = 30  # 回退前清场:先全松左右键这么久再压朝内键(防松/压同帧被游戏吞;台子窄,比打怪区50更短)
+PLATFORM_RETREAT_TIMEOUT_MS = 1500  # 闭环回退总超时:压键这么久仍没回到目标=卡住/方向错,松键交主线并记异常
+PLATFORM_RETREAT_DOT_LOST_MS = 300  # 回退中光点丢失最多保持这么久,超时松键安全停(不盲走)
+PLATFORM_RETREAT_STUCK_MS = 600    # 回退中朝目标连续这么久无位移=卡住,松键放弃并记异常
 BOUND_DRAG_HIT = 12         # 编辑态鼠标点中左右竖线的命中半径(小地图块像素,放大好按中、治时灵时不灵)
 BOUND_PICK_TOL = 8          # 编辑态点选平台绿线的命中容差(点到折线最近距离≤此值=选中该平台,小地图块像素)
 BOUND_LINE_W = 3            # 左右竖线粗细基准(px,用户:线粗一点点);UI小地图常态2/编辑3
@@ -1486,6 +1492,12 @@ class MinimapRouteRecorder:
         self._bound_tp_block_until = 0  # 朝_bound_last_side水平瞬移的冷却截止ms(拉回结束起BOUND_TP_COOLDOWN_MS)
         self._bound_thread = None       # 边界守护线程句柄
         self._bound_running = False     # 边界守护线程运行标志
+        # === 手动选台·平台边界独立守护(用户2026-09-24:另起线程20ms实时盯光点,到绿线端点立即回退,不等主循环半秒) ===
+        self._platform_guard_thread = None    # 平台边界守护线程句柄
+        self._platform_guard_running = False  # 守护线程运行标志
+        self._platform_edge_cmd = None        # 守护线程→主线·触线令{side,dir,target,ts};守护只置令、绝不发物理键
+        self._platform_retreat = None         # 主线回退状态机(帧首消费,物理键只在主线发,不抢键)
+        self._platform_retreat_active = False # 回退进行中(停滞观测据此豁免发呆)
         self._btn_bound_area = None     # UI小地图区"打怪区域"切换按钮矩形(每帧draw更新供点击命中)
         self._bound_clear_menu = None   # 右键Y界线→"清除"气泡 {'which':'A'/'B','mx','my'(块坐标),'rect'(显示空间命中框,每帧刷新)}
         # === 掉台归位·独占辅助线(用户2026-09-09)：单平台(只勾一个台)时持续监测光点是否还在该台折线上,
@@ -7045,27 +7057,6 @@ class MinimapRouteRecorder:
                 best_pf = pf
         if best_pf and best_dist <= 15:
             return best_pf
-        return None
-
-    def _check_platform_boundary(self):
-        """【模块B·用户2026-09-23定稿】检测人物是否超出选中台子的X总边界(最左~最右);随机全图模式直接放行
-        用途：人物到了平台边缘自动回去，只打平台X范围内的怪
-        原理：
-          1. 获取人物当前所在的手动录制平台
-          2. 获取平台X范围（x_min, x_max）
-          3. 人物X < x_min → 需要往右走回去
-          4. 人物X > x_max → 需要往左走回去
-          5. 在范围内 → 返回None（不需要调整）
-        返回：'right'=需要往右走, 'left'=需要往左走, None=在范围内"""
-        xr = self._locked_platform_x_range()
-        if xr is None or not self._player_map_pos:
-            return None
-        x_min, x_max = xr
-        px = self._player_map_pos[0]
-        if px < x_min + 2:  # 超出左边界2px
-            return 'right'
-        elif px > x_max - 2:  # 超出右边界2px
-            return 'left'
         return None
 
     def _active_platforms(self):
@@ -15109,6 +15100,167 @@ class MinimapRouteRecorder:
         except Exception:
             pass
 
+    # ==================== 手动选台·平台边缘独立守护回退(用户2026-09-24定稿) ====================
+    def _start_platform_guard(self):
+        if self._platform_guard_thread and self._platform_guard_thread.is_alive():
+            return
+        self._platform_guard_running = True
+        self._platform_guard_thread = threading.Thread(target=self._platform_guard_loop, daemon=True, name="guard_platform_edge")
+        self._platform_guard_thread.start()
+        _debug_log("[平台边界] 守护线程已启动")
+
+    def _stop_platform_guard(self):
+        self._platform_guard_running = False
+        _th = self._platform_guard_thread
+        if _th and _th.is_alive():
+            _th.join(timeout=1.0)
+        self._platform_guard_thread = None
+        self._platform_edge_cmd = None
+        self._platform_retreat = None
+        self._platform_retreat_active = False
+        try:
+            self._release_combat_move()   # 停守护时松开回退按住的朝内键,不留键
+        except Exception:
+            pass
+
+    def _platform_guard_loop(self):
+        """独立线程:每20ms(50fps,与光点线程同频)用最新光点对照选中台绿线端点判触线,只置令、绝不直接发物理键
+        (物理方向键统一由主线帧首消费,避免两个脑子抢键;用户2026-09-24:到线立即回退,不等主循环半秒)。全程try自保护。"""
+        while self._platform_guard_running:
+            try:
+                if getattr(self, '_running', False) or getattr(self, '_random_running', False):
+                    self._platform_edge_check_once()
+            except Exception as e:
+                try:
+                    _debug_log("[平台边界] 守护循环异常: %s" % e)
+                except Exception:
+                    pass
+            time.sleep(PLATFORM_GUARD_POLL_MS / 1000.0)
+
+    def _platform_edge_check_once(self):
+        """守护线程·单次检测:手动+勾选台、非垂直动作时,光点距选中台绿线左/右端点≤MARGIN即置触线令。
+        端点取选中台绿线点X的min/max(单台=该台两端;多台=总并集),与光点同为小地图块坐标(绿线本就是光点轨迹录制)。"""
+        try:
+            # 编辑打怪区界线时不守护;爬梯/下跳/直跳抓梯等垂直动作中水平回退无意义,不置令
+            if getattr(self, '_bound_edit', False):
+                return
+            if self._in_vertical_motion() or getattr(self, '_climb_state', 'none') != 'none':
+                return
+            if not self._active_platforms():
+                # 随机(全图)模式或零勾选:不守护,顺手清掉残留令
+                if self._platform_edge_cmd is not None:
+                    self._platform_edge_cmd = None
+                return
+            if self._platform_edge_cmd is not None:
+                return  # 已置令、主线尚未消费完,不翻转
+            dot = self._player_map_pos
+            if not dot:
+                return  # 本帧丢点不置令(不盲动),下帧重检
+            xr = self._locked_platform_x_range()
+            if not xr:
+                return  # 选中编号没命中任何已加载台(数据/编号问题),不令
+            x_min, x_max = xr
+            px = float(dot[0])
+            if px >= x_max - PLATFORM_EDGE_MARGIN:
+                side, dirn = 'right', 'left'      # 越右端→朝左回
+            elif px <= x_min + PLATFORM_EDGE_MARGIN:
+                side, dirn = 'left', 'right'      # 越左端→朝右回
+            else:
+                return
+            pf = self._get_current_manual_platform()
+            if pf:
+                _pmin, _pmax = self._platform_x_range(pf)
+                base_w = _pmax - _pmin
+            else:
+                base_w = x_max - x_min
+            _dist = max(15.0, base_w * random.uniform(0.15, 0.28))   # 回到界内15~28%台宽(不到中点)
+            target = (x_max - _dist) if side == 'right' else (x_min + _dist)
+            self._platform_edge_cmd = {'side': side, 'dir': dirn, 'target': float(target), 'ts': time.time() * 1000}
+            _debug_log("[平台边界] 守护触线 光点x=%.0f 端点[%.0f~%.0f] 越%s→朝%s回 目标=%.0f"
+                       % (px, x_min, x_max, side, '左' if dirn == 'left' else '右', target))
+        except Exception as e:
+            try:
+                _debug_log("[平台边界] 守护检测异常: %s" % e)
+            except Exception:
+                pass
+
+    def _finish_platform_retreat(self, msg=None, exception=False):
+        try:
+            self._release_combat_move()
+        except Exception:
+            pass
+        self._platform_edge_cmd = None
+        self._platform_retreat = None
+        self._platform_retreat_active = False
+        if msg:
+            _debug_log(msg)
+            if exception:
+                try:
+                    self._rlog(msg.replace("[平台边界] ", ""), log='exception', color=LOG_RED)
+                except Exception:
+                    pass
+
+    def _platform_retreat_tick(self, now):
+        """主线帧首·消费平台触线令并独占执行回退(物理键只在主线发)。
+        返回True=回退中,占_aux_busy暂停巡路/打怪(主权唯一、不抢键);False=无回退,主线正常。
+        闭环:松键清场30ms→压朝内键,光点回到界内目标立即松键(台子窄,不固定时长);丢点/卡死/超时安全中止。"""
+        # 垂直动作中不水平回退:清令清状态放行(把主权还给跨层状态机)
+        if self._in_vertical_motion() or getattr(self, '_climb_state', 'none') != 'none':
+            if self._platform_retreat is not None or self._platform_edge_cmd is not None:
+                self._finish_platform_retreat()
+            return False
+        st = self._platform_retreat
+        cmd = self._platform_edge_cmd
+        if st is None:
+            if cmd is None:
+                self._platform_retreat_active = False
+                return False
+            # 阶段0·新令:建状态机,先松战斗/巡路左右键清场(此帧先不压,防松/压同帧被游戏吞)
+            st = {'dir': cmd['dir'], 'target': cmd['target'],
+                  'release_until': now + PLATFORM_RETREAT_RELEASE_MS,
+                  'until': now + PLATFORM_RETREAT_TIMEOUT_MS,
+                  'last_px': None, 'last_progress_ts': now}
+            self._platform_retreat = st
+            self._platform_retreat_active = True
+            try:
+                self._release_combat_move()
+                self._key_up(VK_LEFT)
+                self._key_up(VK_RIGHT)
+            except Exception:
+                pass
+            _dx = self._player_map_pos[0] if self._player_map_pos else -1
+            self._rlog("平台边缘越线·朝%s回退(光点x=%s)" % ('左' if st['dir'] == 'left' else '右', _dx), log='behavior')
+            return True
+        self._platform_retreat_active = True
+        if now >= st['until']:
+            self._finish_platform_retreat("[平台边界] 异常 回退超时%dms未到目标,松键交主线" % PLATFORM_RETREAT_TIMEOUT_MS, exception=True)
+            return False
+        if now < st['release_until']:
+            return True  # 清场间隙:键保持全松(_aux_busy已停主线,没人会重新按)
+        dot = self._player_map_pos
+        if not dot:
+            if now - st['last_progress_ts'] > PLATFORM_RETREAT_DOT_LOST_MS:
+                self._finish_platform_retreat("[平台边界] 异常 回退中光点丢失,松键安全停", exception=True)
+                return False
+            return True  # 短暂丢点:保持当前状态等下帧,不盲走
+        px = float(dot[0]); dirn = st['dir']; target = st['target']
+        if (dirn == 'left' and px <= target) or (dirn == 'right' and px >= target):
+            self._finish_platform_retreat("[平台边界] 回退完成 光点x=%.0f 目标=%.0f" % (px, target))
+            return False
+        last = st['last_px']
+        if last is None:
+            st['last_px'] = px; st['last_progress_ts'] = now
+        else:
+            prog = (last - px) if dirn == 'left' else (px - last)   # 朝目标位移,正=在靠近
+            if prog > 0.5:
+                st['last_px'] = px; st['last_progress_ts'] = now
+            elif now - st['last_progress_ts'] > PLATFORM_RETREAT_STUCK_MS:
+                self._finish_platform_retreat("[平台边界] 异常 朝内%dms无位移疑似卡住,松键交主线" % PLATFORM_RETREAT_STUCK_MS, exception=True)
+                return False
+        self._hold_combat_key(VK_LEFT if dirn == 'left' else VK_RIGHT)   # 幂等压朝内键
+        self._combat_move_dir = dirn
+        return True
+
     def _bound_blocked_vertical(self, direction):
         """Y上下闸门(用户2026-09-11改认平台绿线):direction='up'且人正站在选定上限平台=禁再向上返回True;
         'down'且人站在选定下限平台=禁向下。未选该向上下限/编辑态/判不到当前台=放行(详见_bound_block_up/down)。"""
@@ -16753,6 +16905,7 @@ class MinimapRouteRecorder:
             print("[识别线程] 运行层启动: 怪物(模板+YOLO+血条)")
         self._start_move_watchdog()  # 移动监管线(独立线程)
         self._start_bound_guard()    # 打怪区域边界守护(独立线程)
+        self._start_platform_guard()  # 手动选台·平台边缘守护(独立线程,20ms实时)
 
     def _stop_runtime_detection(self):
         # 停运行层(怪物+监管+边界),保留常开层截图+人物(角色识别框/识别率继续显示)
@@ -16767,6 +16920,7 @@ class MinimapRouteRecorder:
         self._b_hp_confirmed = False; self._b_gone = 0; self._b_lock_time = 0
         self._stop_move_watchdog()
         self._stop_bound_guard()
+        self._stop_platform_guard()
 
     def _stop_detection_thread(self):
         # 全停(解绑窗口/彻底关闭用):先停运行层,再停常开层截图+人物
@@ -16993,50 +17147,6 @@ class MinimapRouteRecorder:
                     (self._rest_until - now) / 1000.0, (self._rest_next_at - now) / 60000.0))
                 return
 
-
-        # === 【模块B】选中台子X总边界检测 + 回退（用户2026-09-23定稿·两套模式分干净）===
-        # 只在"手动模式且勾选了台子"时生效；随机(全图)模式 _active_platforms()=[] → 整段旁路,绝不回退。
-        # 越界=超出选中台子最左/最右2px→按住方向键往界内走15~28%(不到中点),不攻击;不另起线程,主线串行不抢键。
-        if self._active_platforms():
-            boundary_dir = self._check_platform_boundary()
-        else:
-            self._platform_retreat_active = False
-            boundary_dir = None
-        if boundary_dir and not getattr(self, '_platform_retreat_active', False):
-            # 触发回退：目标=界内15~28%台宽处(往回走一点,不到中点);基准=当前所在台宽度,找不到用总宽度
-            xr = self._locked_platform_x_range()
-            if xr and self._player_map_pos:
-                x_min, x_max = xr
-                pf = self._get_current_manual_platform()
-                if pf:
-                    _pmin, _pmax = self._platform_x_range(pf)
-                    base_w = _pmax - _pmin
-                else:
-                    base_w = x_max - x_min
-                retreat_dist = max(15.0, base_w * random.uniform(0.15, 0.28))
-                if boundary_dir == 'right':
-                    self._platform_retreat_target_x = x_min + retreat_dist
-                    self._platform_retreat_dir = 'right'
-                else:
-                    self._platform_retreat_target_x = x_max - retreat_dist
-                    self._platform_retreat_dir = 'left'
-                self._platform_retreat_active = True
-                self._release_combat_move()
-                _debug_log("[平台边界] 触发回退 方向=%s 目标X=%.1f 回退距离=%.1f" % (
-                    boundary_dir, self._platform_retreat_target_x, retreat_dist))
-        # 回退过程：直接按住方向键往界内走,不攻击(已删除滑/顿/小跳等拟人化动作)
-        if self._active_platforms() and getattr(self, '_platform_retreat_active', False) and self._player_map_pos:
-            px = self._player_map_pos[0]
-            target = self._platform_retreat_target_x
-            rdir = self._platform_retreat_dir
-            reached = (rdir == 'right' and px >= target) or (rdir == 'left' and px <= target)
-            if reached:
-                self._platform_retreat_active = False
-                self._release_combat_move()
-                _debug_log("[平台边界] 回退完成 到达X=%.1f" % px)
-            else:
-                self._set_combat_move(rdir)
-            return  # 回退过程中不攻击
 
         # === 释放到期的定时按键（走位用，不阻塞主循环）===
         if self._combat_timed_keys:
@@ -18047,14 +18157,21 @@ class MinimapRouteRecorder:
             # 打怪区域·左右越线强制拉回(用户2026-09-11):独立守护线程实时检测,主循环帧首第一时间消费=朝内固定走1000~1500ms再松手恢复主线;
             # 掉台归位/解卡优先级更高(它们进行时本帧不拉,并清掉进行中的拉回、松朝内键,避免两套辅助线抢键)。
             # 拉回中并入_aux_busy=暂停巡路_random_step与打怪_combat_tick,不并行抢键。Y上下限是发起动作处的同步平台闸门,不在主循环占线
-            if _fall_returning or _unblocking:
+            # 手动选台·平台边缘回退(独立守护线程20ms置令,帧首最高优先级独占执行;掉台是硬失败,优先于打怪区拉回)
+            _platform_retreating = self._platform_retreat_tick(time.time() * 1000)
+            if _platform_retreating:
+                if self._bound_pull is not None:
+                    self._bound_pull = None
+                    self._release_combat_move()
+                _bound_pulling = False
+            elif _fall_returning or _unblocking:
                 if self._bound_pull is not None:
                     self._bound_pull = None
                     self._release_combat_move()
                 _bound_pulling = False
             else:
                 _bound_pulling = self._bound_pull_tick(time.time() * 1000)
-            _aux_busy = _fall_returning or _unblocking or _bound_pulling
+            _aux_busy = _platform_retreating or _fall_returning or _unblocking or _bound_pulling
             self._seg_loop['3misc'] = self._seg_loop.get('3misc', 0) + time.time() - self._lk.get('before_scale', time.time())
             self._lk['before_route'] = time.time()
             if not _aux_busy:
