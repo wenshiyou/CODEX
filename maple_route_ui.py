@@ -4815,13 +4815,13 @@ class MinimapRouteRecorder:
     def _handle_dropdown_item(self, menu, item_idx):
         """处理下拉菜单项点击（仅mode下拉保留，save/route/clear_route改为独立窗口）"""
         if menu == "mode":
+            # 【用户2026-09-23定稿】模式只定义打怪范围,不再负责启停(F10启动/F12停止):
+            # 随机=自由全图打怪(不看录制台子);手动=在选中的录制台子上打。切换即时生效,不打断当前运行。
             self.route_mode = "手动" if item_idx == 0 else "随机"
             self._save_route_config()
-            if self.route_mode == "随机":
-                self._start_random()
-            else:
-                self._stop_random()
-            print("[模式] 切换为: %s" % self.route_mode)
+            _mode_txt = "全图自由打怪" if self.route_mode == "随机" else "定平台打怪(看台子选择)"
+            print("[模式] 切换为: %s（%s, F10启动/F12停止）" % (self.route_mode, _mode_txt))
+            self._add_log("打怪模式:%s" % _mode_txt)
 
     # ===== 随机模式运行逻辑 =====
 
@@ -4875,11 +4875,12 @@ class MinimapRouteRecorder:
         self._idle_combat_turn_interval = 0
         self._return_fail_count = 0
         self._return_attempt_mode = None
-        # 同时启动战斗逻辑和透明蒙板（与F10一致）
+        # 同时启动战斗逻辑和透明蒙板（F10/运行按钮统一入口;随机=全图,手动=定平台）
         self._running = True
-        print("[随机] 模式已启动，将自动选方案打平台")
-        self._add_log("随机模式已启动（含战斗+蒙板）")
-        _debug_log("[随机] 运行按钮已触发, _running=True, _random_running=True")
+        _mode_txt = "全图自由" if self.route_mode == "随机" else ("定平台(选中%d台)" % len(self._selected_platforms))
+        print("[启动] 战斗已启动（%s）" % _mode_txt)
+        self._add_log("战斗已启动（%s）" % _mode_txt)
+        _debug_log("[启动] 运行已触发, _running=True, _random_running=True, mode=%s" % self.route_mode)
 
     def _stop_random(self):
         """停止随机模式：松开所有按键"""
@@ -7039,7 +7040,7 @@ class MinimapRouteRecorder:
         return None
 
     def _check_platform_boundary(self):
-        """【模块B】检测人物是否超出手动录制平台的X边界，超出则返回往回走的方向
+        """【模块B·用户2026-09-23定稿】检测人物是否超出选中台子的X总边界(最左~最右);随机全图模式直接放行
         用途：人物到了平台边缘自动回去，只打平台X范围内的怪
         原理：
           1. 获取人物当前所在的手动录制平台
@@ -7048,10 +7049,10 @@ class MinimapRouteRecorder:
           4. 人物X > x_max → 需要往左走回去
           5. 在范围内 → 返回None（不需要调整）
         返回：'right'=需要往右走, 'left'=需要往左走, None=在范围内"""
-        pf = self._get_current_manual_platform()
-        if pf is None or not self._player_map_pos:
+        xr = self._locked_platform_x_range()
+        if xr is None or not self._player_map_pos:
             return None
-        x_min, x_max = self._platform_x_range(pf)
+        x_min, x_max = xr
         px = self._player_map_pos[0]
         if px < x_min + 2:  # 超出左边界2px
             return 'right'
@@ -7059,15 +7060,25 @@ class MinimapRouteRecorder:
             return 'left'
         return None
 
+    def _active_platforms(self):
+        """【用户2026-09-23定稿】当前生效的选中台子编号列表:
+        - 随机模式=自由全图打怪,不看录制台子→返回[]
+        - 手动模式=在选中的录制台子上打→返回 _selected_platforms 的拷贝
+        打怪/边界/跨层选台/掉台归位一律用本方法;_selected_platforms 只承载UI勾选,不直接参与决策。"""
+        if getattr(self, 'route_mode', '手动') == '随机':
+            return []
+        return list(getattr(self, '_selected_platforms', []))
+
     def _locked_platform_x_range(self):
         """【锁平台·冒险岛世界2026-09-07】勾选了平台编号时，返回这些平台绿线在【小地图】上的X范围并集(min,max)，
         作为人物移动的硬边界——只勾1个就是那条绿线的左右端点。未勾选任何平台(全图模式)返回None=不限制。
         编号口径与combat_logic一致：平台显示编号 = pf['id']+1。"""
-        if not self._selected_platforms or not self.platforms:
+        _sel = self._active_platforms()
+        if not _sel or not self.platforms:
             return None
         xs = []
         for pf in self.platforms:
-            if (pf.get('id', 0) + 1) in self._selected_platforms:
+            if (pf.get('id', 0) + 1) in _sel:
                 _xmn, _xmx = self._platform_x_range(pf)
                 xs.append(_xmn)
                 xs.append(_xmx)
@@ -7844,10 +7855,9 @@ class MinimapRouteRecorder:
                 print("[启动] 未绑定游戏窗口，请先绑定")
                 self._add_log("未绑定窗口，无法启动")
             else:
-                self._running = True
-                print("[启动] 脚本已启动 (F10)")
-                self._add_log("脚本已启动 F10")
-                _debug_log("[启动] F10 已触发, _running=True, hwnd=%s" % self.hwnd)
+                # 【用户2026-09-23】F10统一走启动入口(随机/手动都从这起),标志/初始化/监管线一次性置齐
+                self._start_random()
+                _debug_log("[启动] F10 已触发, hwnd=%s, mode=%s" % (self.hwnd, self.route_mode))
                 try:
                     self._rlog("战斗已启动(F10)", LOG_OK, log='behavior')
                 except Exception:
@@ -8201,7 +8211,7 @@ class MinimapRouteRecorder:
                     self._selecting = False
                     self._select_rect = None
                     self._select_dragging = False
-                    if getattr(self, '_was_random_running', False) and self.route_mode == "随机":
+                    if getattr(self, '_was_random_running', False):
                         self._start_random()
             else:
                 if event == cv2.EVENT_LBUTTONDOWN:
@@ -8475,23 +8485,10 @@ class MinimapRouteRecorder:
                 _debug_log("[方案窗口] 清除窗口异常: %s" % e)
             return
 
-        # 7. 运行/停止
+        # 7. 运行/停止（随机/手动统一走启动入口,模式只决定打怪范围）
         if _in(BTN_RUN, x, y):
             print("[鼠标] 运行")
-            if self.route_mode == "随机":
-                self._start_random()
-            elif self.hwnd is not None:
-                # 手动模式：有录制路线就启动路线跟随（用当前方案），没路线只启动战斗
-                if self._route_has_file(self.current_route):
-                    self._start_random()
-                    self._add_log("路线%d已启动（手动）" % self.current_route)
-                else:
-                    self._running = True
-                    self._add_log("战斗已启动（无路线）")
-                    _debug_log("[运行] 手动模式无路线，仅启动战斗")
-            else:
-                self._add_log("未绑定窗口，无法启动")
-                _debug_log("[运行] 未绑定窗口")
+            self._start_random()
             return
         if _in(BTN_STOP, x, y):
             print("[鼠标] 停止")
@@ -9467,7 +9464,7 @@ class MinimapRouteRecorder:
                 _debug_log("[F9] 蒙板已重新定位置顶: %dx%d +%d+%d" % (wr['width'], wr['height'], wr['left'], wr['top']))
             except Exception as _e:
                 _debug_log("[F9] 蒙板重新定位失败: %s" % _e)
-        if getattr(self, '_was_random_running', False) and self.route_mode == "随机":
+        if getattr(self, '_was_random_running', False):
             self._start_random()
 
     def _dedup_whole_frames(self, frames):
@@ -9620,7 +9617,7 @@ class MinimapRouteRecorder:
         self._select_dragging = False
         if hasattr(self, '_win_name'):
             cv2.setWindowProperty(self._win_name, cv2.WND_PROP_TOPMOST, 0)
-        if getattr(self, '_was_random_running', False) and self.route_mode == "随机":
+        if getattr(self, '_was_random_running', False):
             self._start_random()
         print("已应用: (%d,%d) %dx%d（自动刷新已关闭，点刷新可重新开启）" % (gx, gy, gw, gh))
 
@@ -15412,9 +15409,10 @@ class MinimapRouteRecorder:
     def _single_home_platform(self):
         """掉台归位只在【只勾选一个平台=单台锁定】时启用，返回该home平台对象；
         未勾选(全图)/勾选多个/找不到对应台 → 返回None(不判掉台,多台正常跨层不被归位打断)。编号口径=pf['id']+1。"""
-        if not self.platforms or len(self._selected_platforms) != 1:
+        _sel = self._active_platforms()
+        if not self.platforms or len(_sel) != 1:
             return None
-        num = self._selected_platforms[0]
+        num = _sel[0]
         for pf in self.platforms:
             if pf.get('id', 0) + 1 == num:
                 return pf
@@ -15905,19 +15903,20 @@ class MinimapRouteRecorder:
                 _debug_log("[跨层] 怪在绿线但人不在/绿线不相连,走梯/跳段")
         else:
             # 无cross怪:选台模式→下一选中台(录制台点真实小地图坐标);全图未选台→原地等刷
-            if self._selected_platforms:
+            _sel = self._active_platforms()
+            if _sel:
                 cur_pf = self._get_current_manual_platform()
                 cur_num = (cur_pf.get('id', 0) + 1) if (cur_pf and isinstance(cur_pf, dict)) else None
                 next_pf = None
                 for pf in self.platforms:
                     pm = pf.get('id', 0) + 1
-                    if pm not in self._selected_platforms or pm == cur_num:
+                    if pm not in _sel or pm == cur_num:
                         continue
                     if next_pf is None or pm < next_pf.get('id', 0) + 1:
                         next_pf = pf
                 if next_pf is None:
                     self._trans_stall_diag('no_next_platform(只选当前台/无下一台)', now,
-                                           selected=self._selected_platforms, cur=cur_num)
+                                           selected=_sel, cur=cur_num)
                     return False
                 pts = self._platform_points(next_pf)
                 target_mid = (float(pts[len(pts) // 2][0]), float(pts[len(pts) // 2][1]))
@@ -16758,7 +16757,7 @@ class MinimapRouteRecorder:
         except Exception as _pe:
             _debug_log("[判活探针] 异常: %s" % _pe)
         _dl = combat_logic.combat_step(
-            now_ms, px, py, _cand, self._selected_platforms, _skr, _aoe, _far_x,
+            now_ms, px, py, _cand, self._active_platforms(), _skr, _aoe, _far_x,
             _judge_pos, bars, _has_dmg, True, True,   # 判活窗内lock=出手怪(钉保锁),窗外_judge_pos=_bl等价原逻辑
             self._b_probe_side, self._b_probe_switched,
             self._is_monster_on_platform, self._get_monster_platform,
@@ -16848,40 +16847,38 @@ class MinimapRouteRecorder:
                 return
 
 
-        # === 【模块B】手动录制平台边界检测 + 回退（拟人化2026-09-07）===
-        # 人物到了平台边缘触发回退：随机回退15~28%、先松键借惯性滑、回退中偶尔顿/小跳
-        # 【用户2026-09-09定稿】平台边界回退只在"勾选了单个/几个台子"(锁平台打)时才生效；
-        # 全图/全屏模式(_selected_platforms为空)永不回退——全屏打时回退会抢锁怪打怪主线。
-        # 不另起真线程(会和主线抢方向键,正是之前抖键根因)，用条件门控在主线内串行，等效且不抢键。
-        # _aux_enable_retreat=排查期总开关(默认关)。
-        if getattr(self, '_aux_enable_retreat', True) and getattr(self, '_selected_platforms', None):
+        # === 【模块B】选中台子X总边界检测 + 回退（用户2026-09-23定稿·两套模式分干净）===
+        # 只在"手动模式且勾选了台子"时生效；随机(全图)模式 _active_platforms()=[] → 整段旁路,绝不回退。
+        # 越界=超出选中台子最左/最右2px→按住方向键往界内走15~28%(不到中点),不攻击;不另起线程,主线串行不抢键。
+        if getattr(self, '_aux_enable_retreat', True) and self._active_platforms():
             boundary_dir = self._check_platform_boundary()
         else:
             self._platform_retreat_active = False
             boundary_dir = None
         if boundary_dir and not getattr(self, '_platform_retreat_active', False):
-            # 触发回退：计算回退目标（拟人：随机15~28%，不固定20%）
-            pf = self._get_current_manual_platform()
-            if pf and self._player_map_pos:
-                x_min, x_max = self._platform_x_range(pf)
-                platform_width = x_max - x_min
-                retreat_dist = platform_width * random.uniform(0.15, 0.28)
-                px = self._player_map_pos[0]
+            # 触发回退：目标=界内15~28%台宽处(往回走一点,不到中点);基准=当前所在台宽度,找不到用总宽度
+            xr = self._locked_platform_x_range()
+            if xr and self._player_map_pos:
+                x_min, x_max = xr
+                pf = self._get_current_manual_platform()
+                if pf:
+                    _pmin, _pmax = self._platform_x_range(pf)
+                    base_w = _pmax - _pmin
+                else:
+                    base_w = x_max - x_min
+                retreat_dist = max(15.0, base_w * random.uniform(0.15, 0.28))
                 if boundary_dir == 'right':
-                    self._platform_retreat_target_x = px + retreat_dist
+                    self._platform_retreat_target_x = x_min + retreat_dist
                     self._platform_retreat_dir = 'right'
                 else:
-                    self._platform_retreat_target_x = px - retreat_dist
+                    self._platform_retreat_target_x = x_max - retreat_dist
                     self._platform_retreat_dir = 'left'
                 self._platform_retreat_active = True
-                self._platform_retreat_slide_until = now + random.randint(100, 200)  # 先松键借惯性滑一点点
-                self._platform_retreat_pause_until = 0   # 回退中偶尔顿一下的截止时间
-                self._platform_retreat_next_jump = now + random.randint(800, 1500)  # 下次小跳时间
-                self._release_combat_move()  # 释放当前移动键（借惯性滑，不是像素级急停）
-                _debug_log("[平台边界] 触发回退 方向=%s 目标X=%.1f 回退距离=%.1f(%.0f%%)" % (
-                    boundary_dir, self._platform_retreat_target_x, retreat_dist, retreat_dist / platform_width * 100))
-        # 回退过程中：按住方向键往回走，不攻击（拟人：滑→走→偶尔顿/小跳）
-        if getattr(self, '_aux_enable_retreat', True) and getattr(self, '_selected_platforms', None) and getattr(self, '_platform_retreat_active', False) and self._player_map_pos:
+                self._release_combat_move()
+                _debug_log("[平台边界] 触发回退 方向=%s 目标X=%.1f 回退距离=%.1f" % (
+                    boundary_dir, self._platform_retreat_target_x, retreat_dist))
+        # 回退过程：直接按住方向键往界内走,不攻击(已删除滑/顿/小跳等拟人化动作)
+        if getattr(self, '_aux_enable_retreat', True) and self._active_platforms() and getattr(self, '_platform_retreat_active', False) and self._player_map_pos:
             px = self._player_map_pos[0]
             target = self._platform_retreat_target_x
             rdir = self._platform_retreat_dir
@@ -16890,23 +16887,9 @@ class MinimapRouteRecorder:
                 self._platform_retreat_active = False
                 self._release_combat_move()
                 _debug_log("[平台边界] 回退完成 到达X=%.1f" % px)
-            elif now < getattr(self, '_platform_retreat_slide_until', 0):
-                return  # 拟人：先松键借惯性滑一点点，不按方向键
-            elif now < getattr(self, '_platform_retreat_pause_until', 0):
-                self._release_combat_move()
-                return  # 拟人：回退中偶尔顿一下（像人调整站位）
             else:
                 self._set_combat_move(rdir)
-                # 拟人：回退中偶尔带个小跳（像人在调整站位）
-                if now >= getattr(self, '_platform_retreat_next_jump', 0):
-                    _jump_key = fight_cfg.get("jump_key", "")
-                    if _jump_key:
-                        self._press_game_key(_jump_key, duration=120)
-                    self._platform_retreat_next_jump = now + random.randint(1200, 2500)
-                # 拟人：2%概率触发下一次停顿（0.1~0.25秒）
-                if random.random() < 0.02:
-                    self._platform_retreat_pause_until = now + random.randint(100, 250)
-                return  # 回退过程中不攻击，直接返回
+            return  # 回退过程中不攻击
 
         # === 释放到期的定时按键（走位用，不阻塞主循环）===
         if self._combat_timed_keys:
