@@ -45,3 +45,7 @@ v*_test.png
 
 # 真机抓帧调试图不入版本(本地保留)
 data/real_capture/
+
+# 临时补丁脚本(本地保留,不入版本)
+_patch_*.py
+_check_*.py
