@@ -611,6 +611,12 @@ CLIMB_STILL_MS = 200           # 第二步:确认"真的在爬"后,背景点连�
 CLIMB_TOTAL_TIMEOUT_MS = 12000 # 爬梯总超时兜底(防异常永久卡),到点按到顶收尾
 ARRIVAL_RESET_COOLDOWN_MS = 500 # 到顶/落地/走台"到达新平台"重扫冷却(2026-09-10再提效1200→500:到顶发呆主因之一;两次真实换台必>500ms仍挡得住"到达连发→清空重锁左右横跳",又能更快重锁本层怪)
 ARRIVAL_EMPTY_MAX = 3          # 走台"终点就在身边、根本没真移动却判到达"的连续次数上限:超了强制留本层正常打怪、短时间不再cross空转(用户:每个执行机制都要有次数上限,不许无限循环)
+PLATFORM_GAP_JUMP_MAP_D = 13     # 断开台子:小地图水平空档<=此值一跳可过(用户2026-09-23真机定值,固定不走面板)
+PLATFORM_GAP_TELEPORT_MAP_D = 40 # 断开台子:空档<=此值瞬移可过;同层空档>40跳/瞬移都过不去=当边缘回退不硬走
+PLATFORM_GAP_SAME_FLOOR_DY = 8   # 两台相邻端点Y差<=此值算同层缺口(>8交回梯子/下跳状态机)
+PLATFORM_GAP_TAKEOFF_INSET = 3   # 起跳/闪现点离当前台边缘往内收的小地图px(防站空踩边)
+PLATFORM_GAP_VERIFY_MS = 700    # 跳/瞬移后验证光点是否越过目标台近侧边的窗口ms
+PLATFORM_GAP_MAX_TRIES = 2      # 同一方式失败次数上限;跳失败且空档<=40有瞬移则降级瞬移,否则放弃留本层
 # 【用户2026-09-09定稿】跳高打（怪比人高时，屏幕像素PX）——区间在"技能Y范围"弹窗最下一行两个框自定义：
 #   下限~上限(如25~180)两个都填才启用：怪比人高落在[下限,上限]内 且 X差≤300 → 直接朝怪"走-跳-打"，每500~600ms跳一次(不连跳)，
 #   两次跳之间落地空档能打到就站定攻击，【不去找梯子】；比上限还高(>上限)的怪不跳不打，对接正常锁定流程——锁到别的层就走梯子/瞬移上去打；
@@ -1531,6 +1537,9 @@ class MinimapRouteRecorder:
         self._arrival_empty_streak = 0     # 走台没真移动却判到达的连续次数(上限ARRIVAL_EMPTY_MAX)
         self._transit_walk_from = None     # 本次走台启动时人物小地图坐标(判是否真移动过一段)
         self._no_transit_until = 0         # 空转达上限后强制本层打怪、暂不cross的截止时刻ms
+        # === 断开台子跨越(用户2026-09-23第三步):仅手动多台、台间同层断开时生效,随机/单台不触发 ===
+        self._transit_target_pf_id = None  # 选台分支当前目标台id(跨缺口要算两台边缘端点,不只是中点)
+        self._gap_cross = None             # 跨缺口子状态dict或None(选台分支内串行,不开线程不抢键)
         self._combat_timed_keys = []       # 定时释放的按键 [(vk, release_ms)]（仅用于短按转身）
         self._combat_last_target_pos = None  # 上一次攻击目标位置(x,y)，用于近战挡身体时搜血条
         self._combat_held_keys = set()     # 持续按住的方向键（流畅移动用）
@@ -15618,6 +15627,121 @@ class MinimapRouteRecorder:
                     best = ((float(ax) + float(bx)) / 2.0, (float(ay) + float(by)) / 2.0)
         return best
 
+    def _platform_gap_plan(self, cur_pf, target_pf, dir_sign):
+        """【断开台子跨越·用户2026-09-23第三步】算当前台→目标台沿dir_sign(+1右/-1左)方向的边缘空档并定跨越方式。
+        距离全部用小地图px(真机定值:一跳13、瞬移40,固定常量不走面板)。
+        kind: walk=绿线相连/边缘重合直接走; jump=同层空档<=13一跳过; teleport=空档<=40且配了瞬移键;
+              vertical=两端Y差>8有高差(交回梯子/下跳); blocked=同层空档>40跳/瞬移都过不去(当边缘回退,不硬走防掉台)。
+        返回dict(kind,gap_dx,gap_dy,takeoff_x,far_edge_x);参数缺失返回None。"""
+        if cur_pf is None or target_pf is None or cur_pf is target_pf or not self._player_map_pos:
+            return None
+        cpts = self._platform_points(cur_pf)
+        tpts = self._platform_points(target_pf)
+        if not cpts or not tpts:
+            return None
+        cx0, cx1 = self._platform_x_range(cur_pf)
+        tx0, tx1 = self._platform_x_range(target_pf)
+        if dir_sign > 0:
+            ex, nx = cx1, tx0            # 向右:当前台右端、目标台左端(近端)
+        else:
+            ex, nx = cx0, tx1            # 向左:当前台左端、目标台右端(近端)
+        ey = self._polyline_y_at(cpts, ex)
+        ny = self._polyline_y_at(tpts, nx)
+        if ey is None or ny is None:
+            return None
+        gap_dx = (nx - ex) * dir_sign    # 正=两台边缘之间空档宽度;负=边缘重合/交叉
+        gap_dy = ny - ey
+        if self._find_platform_intersection(cur_pf, target_pf) is not None or gap_dx <= 0:
+            kind = 'walk'
+        elif abs(gap_dy) > PLATFORM_GAP_SAME_FLOOR_DY:
+            kind = 'vertical'
+        elif gap_dx <= PLATFORM_GAP_JUMP_MAP_D:
+            kind = 'jump'
+        elif gap_dx <= PLATFORM_GAP_TELEPORT_MAP_D and self._get_fight_config().get("teleport_key", ""):
+            kind = 'teleport'
+        else:
+            kind = 'blocked'
+        takeoff_x = ex - dir_sign * PLATFORM_GAP_TAKEOFF_INSET
+        return {'kind': kind, 'gap_dx': gap_dx, 'gap_dy': gap_dy,
+                'takeoff_x': takeoff_x, 'far_edge_x': nx + dir_sign * 2}
+
+    def _gap_cross_reset(self, now_ms=0, block_cd=False):
+        """跨缺口子状态统一收尾:松键清状态;block_cd=True时同时退出transit并留本层冷却(过不去)。"""
+        self._gap_cross = None
+        self._release_combat_move()
+        if block_cd:
+            self._no_transit_until = (now_ms or time.time() * 1000) + 2000
+            self._combat_transit = False
+            self._transit_target = None
+            self._transit_target_pf_id = None
+            self._ladder_precise_mode = False
+            self._release_all_keys()
+
+    def _gap_cross_tick(self, plan, mpx, mpy, now_ms):
+        """断开台缺口跨越子状态(选台分支内串行,唯一在主线_tick,不开线程不抢键)。
+        approach=_move_horizontal走到起跳/闪现点; act=按住方向+跳/瞬移; verify=窗口内光点越过目标台近侧边=成功。
+        返回True=本帧正在跨缺口(调用方return); False=缺口已过(交回水平走到台点)或已放弃(已转留本层)。"""
+        g = getattr(self, '_gap_cross', None)
+        _pkey = (round(plan['takeoff_x']), round(plan['far_edge_x']), plan['kind'])
+        if g is None or g.get('plan_key') != _pkey:
+            _dir = 1 if plan['far_edge_x'] > plan['takeoff_x'] else -1
+            g = {'plan_key': _pkey, 'kind': plan['kind'], 'dir': _dir, 'gap': plan['gap_dx'],
+                 'takeoff_x': plan['takeoff_x'], 'far_edge_x': plan['far_edge_x'],
+                 'ey': mpy, 'mode': 'approach', 'tries': 0, 'act_t': 0}
+            self._gap_cross = g
+        d = g['dir']
+        sdir = "right" if d > 0 else "left"
+        jkey = self._get_fight_config().get("jump_key", "")
+        tpkey = self._get_fight_config().get("teleport_key", "")
+        if g['mode'] == 'approach':
+            if self._move_horizontal((mpx, mpy), g['takeoff_x'], mpy):
+                # 到达起跳/闪现点(同层|dx|<=4):按住方向立刻动作
+                self._set_combat_move(sdir, allow_in_transit=True)
+                g['mode'] = 'act'
+                g['act_t'] = now_ms
+                _debug_log("[跨台缺口] 到起跳点%.0f,执行%s(空档%.0f)" % (g['takeoff_x'], g['kind'], g['gap']))
+            return True
+        if g['mode'] == 'act':
+            self._set_combat_move(sdir, allow_in_transit=True)
+            if g['kind'] == 'teleport' and tpkey:
+                self._pre_teleport_release()
+                self._press_game_key(tpkey, duration=120)
+                self._combat_last_h_teleport = now_ms
+                self._combat_tp_post_until = now_ms + TP_POST_MS
+            elif jkey:
+                self._press_game_key(jkey, duration=120)
+            self._combat_last_jump = now_ms
+            g['mode'] = 'verify'
+            g['act_t'] = now_ms
+            return True
+        # verify：越过目标台近侧边=成功(优先判,横跳弧线Y会先升后落);没越过且Y下沉>12=掉落;窗口超时=失败
+        crossed = (mpx - g['far_edge_x']) * d >= 0
+        fell = (mpy - g['ey']) > 12
+        if crossed:
+            _debug_log("[跨台缺口] %s成功越过(光点%.0f 边%.0f)" % (g['kind'], mpx, g['far_edge_x']))
+            self._gap_cross = None
+            self._release_combat_move()
+            return False
+        if fell or now_ms - g['act_t'] > PLATFORM_GAP_VERIFY_MS:
+            g['tries'] += 1
+            if g['tries'] >= PLATFORM_GAP_MAX_TRIES:
+                if g['kind'] == 'jump' and tpkey and g['gap'] <= PLATFORM_GAP_TELEPORT_MAP_D:
+                    _debug_log("[跨台缺口] 跳%d次失败,降级瞬移" % g['tries'])
+                    g['kind'] = 'teleport'; g['tries'] = 0; g['mode'] = 'approach'
+                    g['plan_key'] = (round(g['takeoff_x']), round(g['far_edge_x']), 'teleport')
+                    self._release_combat_move()
+                    return True
+                _debug_log("[跨台缺口] %s%d次仍过不去(空档%.0f),放弃留本层" % (g['kind'], g['tries'], g['gap']))
+                self._rlog_throttle('gap_block', "台间断开%.0fpx跳/瞬移都过不去,留本层" % g['gap'], 1500, log='behavior')
+                self._gap_cross_reset(now_ms, block_cd=True)
+                return False
+            g['mode'] = 'approach'; g['act_t'] = 0
+            self._release_combat_move()
+            return True
+        # 验证窗口内继续按住方向飘落到对面
+        self._set_combat_move(sdir, allow_in_transit=True)
+        return True
+
 
     def _transit_step(self):
         """跨层行进执行：每帧朝目标平台（小地图坐标）移动，ladder段由_climb_state_machine成套动作驱动(唯一tick点),选台同层/水平对齐段用纯水平脚_move_horizontal
@@ -15703,6 +15827,8 @@ class MinimapRouteRecorder:
                 # 到达最终目标平台：和梯子到达一样的收尾
                 self._combat_transit = False
                 self._transit_target = None
+                self._transit_target_pf_id = None
+                self._gap_cross = None
                 self._ladder_precise_mode = False   # 到达收尾:重开怪扫回打怪段
                 self._probe_side = random.choice([-1, 1])
                 self._probe_switched = False
@@ -15790,7 +15916,23 @@ class MinimapRouteRecorder:
             _SEL_SAME_FLOOR_DY = 8    # 同层Y阈值(与旧移动脚一致)
             _SEL_ALIGN_DX = 25        # 跨层前水平对齐阈值(与旧垂直兜底一致)
             if abs(_sel_mdy) <= _SEL_SAME_FLOOR_DY:
-                # 1) 同层:纯水平脚走到台点,到点_reset_lock_after_arrival后落下方公共收尾重锁
+                # 1) 同层(用户2026-09-23第三步):先判当前台→目标台是否断开——
+                #    相连直接走;同层断开按空档 跳<=13/瞬移<=40;两端高差交下面梯子分支;>40过不去留本层不硬走防掉台。
+                _cur_pf = self._get_current_manual_platform()
+                _tid = getattr(self, '_transit_target_pf_id', None)
+                _tgt_pf = next((p for p in (self.platforms or []) if p.get('id') == _tid), None)
+                _gap_plan = self._platform_gap_plan(_cur_pf, _tgt_pf, 1 if _sel_mdx > 0 else -1)
+                if _gap_plan is not None and _gap_plan['kind'] in ('jump', 'teleport'):
+                    if self._gap_cross_tick(_gap_plan, mpx, mpy, now_ms):
+                        return
+                    # 缺口已过:落回水平脚走到台点(下帧_cur_pf会切到目标台,plan变walk)
+                elif _gap_plan is not None and _gap_plan['kind'] == 'blocked':
+                    _debug_log("[跨台缺口] 同层断开空档%.0f>%d跳/瞬移都过不去,留本层回退" % (
+                        _gap_plan['gap_dx'], PLATFORM_GAP_TELEPORT_MAP_D))
+                    self._rlog_throttle('gap_blocked', "目标台同层断开%.0fpx过不去,留本层" % _gap_plan['gap_dx'], 1500, log='behavior')
+                    self._gap_cross_reset(now_ms, block_cd=True)
+                    return
+                # walk/vertical/取不到台:vertical端点有高差但中点同层,保守先走(卡住停滞会降级梯子);其余纯水平走
                 if not self._move_horizontal((mpx, mpy), _sel_tx, _sel_ty):
                     return
                 self._reset_lock_after_arrival()
@@ -15822,6 +15964,8 @@ class MinimapRouteRecorder:
             arrived = True
         self._combat_transit = False
         self._transit_target = None
+        self._transit_target_pf_id = None
+        self._gap_cross = None
         self._ladder_precise_mode = False   # 段结束:重开怪扫切回打怪段
         self._slope_resume_at = now_ms + 1000
         self._probe_side = random.choice([-1, 1])
@@ -15872,6 +16016,8 @@ class MinimapRouteRecorder:
             return False
         self._transit_walk_path = None
         self._transit_walk_fork_idx = -1
+        self._gap_cross = None              # 新一次跨层决策:清旧跨缺口子状态(用户2026-09-23)
+        self._transit_target_pf_id = None   # 选台分支下面命中下一台时再钉id,cross怪段保持None
         # 最近cross怪(屏幕坐标)=(dist,screen_x,screen_y)
         fx = fy = None
         if cross_candidates:
@@ -15920,6 +16066,7 @@ class MinimapRouteRecorder:
                     return False
                 pts = self._platform_points(next_pf)
                 target_mid = (float(pts[len(pts) // 2][0]), float(pts[len(pts) // 2][1]))
+                self._transit_target_pf_id = next_pf.get('id')   # 钉目标台id供选台分支算断开缺口(用户2026-09-23)
             else:
                 self._trans_stall_diag('idle_no_platform(全图无怪未选台,原地等刷)', now)
                 return False
