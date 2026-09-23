@@ -17095,7 +17095,10 @@ class MinimapRouteRecorder:
         except Exception as _pe:
             _debug_log("[判活探针] 异常: %s" % _pe)
         _dl = combat_logic.combat_step(
-            now_ms, px, py, _cand, self._active_platforms(), _skr, _aoe, _far_x,
+            # 选怪不按录制台过滤(用户2026-09-24定稿):怪→小地图靠倍率换算,calib倍率不准/为0会把怪全判'不在台上'→一只不锁只乱走。
+            # 手动选台的约束只放在走位边界(平台守护线程+_combat_at_locked_edge,小地图光点对绿线、不涉倍率,准):人不出台;
+            # 选怪/打怪与随机模式同口径(最近、技能范围内能打就打),故 selected_platforms 固定传[]。
+            now_ms, px, py, _cand, [], _skr, _aoe, _far_x,
             _judge_pos, bars, _has_dmg, True, True,   # 判活窗内lock=出手怪(钉保锁),窗外_judge_pos=_bl等价原逻辑
             self._b_probe_side, self._b_probe_switched,
             self._is_monster_on_platform, self._get_monster_platform,
