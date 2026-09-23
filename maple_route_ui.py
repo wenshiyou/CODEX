@@ -1498,6 +1498,7 @@ class MinimapRouteRecorder:
         self._platform_edge_cmd = None        # 守护线程→主线·触线令{side,dir,target,ts};守护只置令、绝不发物理键
         self._platform_retreat = None         # 主线回退状态机(帧首消费,物理键只在主线发,不抢键)
         self._platform_retreat_active = False # 回退进行中(停滞观测据此豁免发呆)
+        self._platform_guard_warned = False   # 手动模式零勾选提醒只发一次
         self._btn_bound_area = None     # UI小地图区"打怪区域"切换按钮矩形(每帧draw更新供点击命中)
         self._bound_clear_menu = None   # 右键Y界线→"清除"气泡 {'which':'A'/'B','mx','my'(块坐标),'rect'(显示空间命中框,每帧刷新)}
         # === 掉台归位·独占辅助线(用户2026-09-09)：单平台(只勾一个台)时持续监测光点是否还在该台折线上,
@@ -2430,13 +2431,17 @@ class MinimapRouteRecorder:
                 with open(ROUTE_CONFIG_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 self.route_mode = data.get("route_mode", "手动")
+                _sel_pf = data.get("selected_platforms", [])
+                if isinstance(_sel_pf, list):
+                    self._selected_platforms = [int(v) for v in _sel_pf if isinstance(v, (int, float))]
             except Exception:
                 pass
 
     def _save_route_config(self):
         """保存运行方式（手动/随机）"""
         with open(ROUTE_CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump({"route_mode": self.route_mode}, f, indent=2)
+            json.dump({"route_mode": self.route_mode,
+                       "selected_platforms": list(getattr(self, '_selected_platforms', []))}, f, indent=2)
 
     def _save_plans(self):
         """保存plans.json方案索引"""
@@ -6398,13 +6403,17 @@ class MinimapRouteRecorder:
                 self._move_stuck_inited = True
             elif now_ms - self._move_stuck_last_time > 1500:
                 if abs(px - self._move_stuck_last_x) < 5:
+                    on_manual_pf = self._player_on_manual_platform(px)  # 手动选台且光点在台上:台内是录制平地无障,卡住也不跳(跳必掉台)
                     fight_cfg = self._get_fight_config()
                     jump_key = fight_cfg.get("jump_key", "")
-                    if jump_key and now_ms - getattr(self, '_move_stuck_jump_time', 0) > 1200:
+                    if (not on_manual_pf) and jump_key and now_ms - getattr(self, '_move_stuck_jump_time', 0) > 1200:
                         self._press_game_key(jump_key, duration=150)
                         self._move_stuck_jump_time = now_ms
                         _debug_log("[移动] 卡住：方向=%s X=%.0f 1.5秒未变化，跳跃脱困" % (
                             "右" if dx > 0 else "左", px))
+                    elif on_manual_pf:
+                        self._move_stuck_jump_time = now_ms
+                        _debug_log("[移动] 台内卡住不跳(手动选台) 方向=%s X=%.0f" % ("右" if dx > 0 else "左", px))
                 self._move_stuck_last_x = px
                 self._move_stuck_last_time = now_ms
 
@@ -7084,6 +7093,24 @@ class MinimapRouteRecorder:
         if not xs:
             return None
         return min(xs), max(xs)
+
+    def _player_on_manual_platform(self, px, margin=None):
+        """光点X是否落在【任意一个手动选中台】的绿线X区间内(含容差)。手动选台在台上时据此禁用'卡住跳跃脱困'
+        (台内是录制平地、没有要跳的障碍,跳只会掉台);随机/零勾选返回False(全图自由保留跳跃脱困),
+        光点在两台之间的缺口或台范围外(跨台缺口、跨层找梯路上)也返回False,保留跳跃/坡跳。
+        注意:逐台判定而非并集min/max,避免把多台之间的缺口误当成台上。"""
+        if margin is None:
+            margin = PLATFORM_EDGE_MARGIN
+        _sel = self._active_platforms()
+        if not _sel or not self.platforms:
+            return False
+        _px = float(px)
+        for _pf in self.platforms:
+            if (_pf.get('id', 0) + 1) in _sel:
+                _xmn, _xmx = self._platform_x_range(_pf)
+                if (_xmn - margin) <= _px <= (_xmx + margin):
+                    return True
+        return False
 
     def _combat_at_locked_edge(self, move_dir):
         """【锁平台·拟人化2026-09-07】战斗移动方向是否已到平台X边缘。
@@ -7966,6 +7993,7 @@ class MinimapRouteRecorder:
                     else:
                         self._selected_platforms.append(_pn)
                         print("[台子选择] 选择平台%d" % _pn)
+                    self._save_route_config()  # 勾选/取消即时持久化,重启不丢(用户2026-09-24)
                     return
             return  # 模态:面板开着时面板外点击也不穿透到下层按钮
 
@@ -15146,11 +15174,20 @@ class MinimapRouteRecorder:
                 return
             if self._in_vertical_motion() or getattr(self, '_climb_state', 'none') != 'none':
                 return
-            if not self._active_platforms():
+            active = self._active_platforms()
+            if not active:
                 # 随机(全图)模式或零勾选:不守护,顺手清掉残留令
                 if self._platform_edge_cmd is not None:
                     self._platform_edge_cmd = None
+                # 手动模式却零勾选=守护没生效(重启后易忘勾台),行为栏提醒一次
+                if getattr(self, 'route_mode', '手动') != '随机' and not getattr(self, '_platform_guard_warned', False):
+                    self._platform_guard_warned = True
+                    try:
+                        self._rlog("手动模式未勾选任何台子,平台边界守护不生效;请在台子选择勾选要守的台", log='behavior')
+                    except Exception:
+                        pass
                 return
+            self._platform_guard_warned = False  # 有勾选:复位,下次再零勾选可再提醒
             if self._platform_edge_cmd is not None:
                 return  # 已置令、主线尚未消费完,不翻转
             dot = self._player_map_pos
