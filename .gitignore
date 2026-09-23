@@ -42,6 +42,7 @@ Thumbs.db
 build_*/
 dist_*/
 v*_test.png
+<<<<<<< HEAD
 
 # 真机抓帧调试图不入版本(本地保留)
 data/real_capture/
@@ -49,3 +50,5 @@ data/real_capture/
 # 临时补丁脚本(本地保留,不入版本)
 _patch_*.py
 _check_*.py
+=======
+>>>>>>> 84a286cb85f663983c1d38176abdffae62fdde30

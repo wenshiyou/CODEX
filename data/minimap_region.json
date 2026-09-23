@@ -2,13 +2,23 @@
   "minimap": {
     "left": 14,
     "top": 40,
+<<<<<<< HEAD
     "width": 202,
     "height": 235
+=======
+    "width": 205,
+    "height": 238
+>>>>>>> 84a286cb85f663983c1d38176abdffae62fdde30
   },
   "map": {
     "left": 14,
     "top": 123,
+<<<<<<< HEAD
     "width": 202,
     "height": 152
+=======
+    "width": 205,
+    "height": 155
+>>>>>>> 84a286cb85f663983c1d38176abdffae62fdde30
   }
 }
