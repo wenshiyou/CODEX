@@ -1500,7 +1500,6 @@ class MinimapRouteRecorder:
         # 排查期先全False=纯主线；确认主线正常后逐个置True打开验证，定位抢占者；排查结束恢复全True。
         self._aux_enable_fall = True       # 掉台归位线(_fall_return_tick) 用户2026-09-23选A启用同层回台
         self._aux_enable_unblock = False   # 卡住解卡线(_unblock_tick)；同时门控主线内_check_move_blocked登记,避免主线自我挂起
-        self._aux_enable_retreat = False   # 主线内"平台边界回退"段(到绿线边缘往回走+小跳并整帧return,会抢占锁怪打怪)
         self._aux_enable_rest = False      # 主线内"拟人周期小休"段(5~8分钟停5~10秒,期间完全不动不打)
         # === 移动监管线 watchdog(用户2026-09-09三线模型:主线/监管线/辅助线) ===
         # 独立后台线程,只监测不发键;v1观察版只打行为日志(异常红字),不挂起主线、不执行修复。
@@ -7956,6 +7955,29 @@ class MinimapRouteRecorder:
         if self._current_tab != "route":
             return
 
+        # === 【模块B】选台面板=模态弹窗,置顶优先(用户2026-09-23):面板开着时route页点击只服务面板,
+        # 关闭X/编号圆优先于一切小地图按钮;否则右上X(UI常量系)与下层"打怪区"按钮(map_display系,错位约12px)热区重叠、被先吃掉 ===
+        if self._show_platform_selector and self.platforms and event == cv2.EVENT_LBUTTONDOWN:
+            _pc = self._btn_platform_selector_close
+            if _pc and _pc[0] <= x < _pc[0] + _pc[2] and _pc[1] <= y < _pc[1] + _pc[3]:
+                self._show_platform_selector = False
+                print("[台子选择] 关闭面板")
+                return
+            _ppx, _ppy, _per_row = UI_MAP_X + 10, UI_MAP_Y + 30, 5
+            for _idx in range(len(self.platforms)):
+                _pn = _idx + 1
+                _ix = _ppx + 10 + (_idx % _per_row) * 36
+                _iy = _ppy + 28 + (_idx // _per_row) * 22
+                if _ix <= x < _ix + 18 and _iy <= y < _iy + 18:
+                    if _pn in self._selected_platforms:
+                        self._selected_platforms.remove(_pn)
+                        print("[台子选择] 取消选择平台%d" % _pn)
+                    else:
+                        self._selected_platforms.append(_pn)
+                        print("[台子选择] 选择平台%d" % _pn)
+                    return
+            return  # 模态:面板开着时面板外点击也不穿透到下层按钮
+
         # === 倍率差弹窗点击检测（优先检测，因为弹窗在最上层）===
         if self._show_scale_dialog and event == cv2.EVENT_LBUTTONDOWN:
             # 1. 优先检测右上角关闭按钮X（避免被标题栏拖拽覆盖）
@@ -8428,33 +8450,6 @@ class MinimapRouteRecorder:
             if self._btn_platform_selector and _in(self._btn_platform_selector, x, y):
                 self._show_platform_selector = not self._show_platform_selector
                 print("[台子选择] 打开面板" if self._show_platform_selector else "[台子选择] 关闭面板")
-                return
-            # 【模块B】台子选择面板中的点击
-            if self._show_platform_selector and self.platforms:
-                panel_x, panel_y = UI_MAP_X + 10, UI_MAP_Y + 30
-                panel_w = UI_MAP_W - 20
-                # 关闭按钮X
-                if self._btn_platform_selector_close and _in(self._btn_platform_selector_close, x, y):
-                    self._show_platform_selector = False
-                    print("[台子选择] 关闭面板")
-                    return
-                # 平台编号点击（切换选中状态：点一下选择，再点一下取消）
-                per_row = 5
-                for idx, pf in enumerate(self.platforms):
-                    pf_num = idx + 1
-                    row = idx // per_row
-                    col = idx % per_row
-                    item_x = panel_x + 10 + col * 36
-                    item_y = panel_y + 28 + row * 22
-                    # 点击区域：圆形周围（比圆形稍大一点方便点击）
-                    if item_x <= x < item_x + 18 and item_y <= y < item_y + 18:
-                        if pf_num in self._selected_platforms:
-                            self._selected_platforms.remove(pf_num)
-                            print("[台子选择] 取消选择平台%d" % pf_num)
-                        else:
-                            self._selected_platforms.append(pf_num)
-                            print("[台子选择] 选择平台%d" % pf_num)
-                        return
                 return
             return
         if _in(BTN_PLATFORM, x, y):
@@ -16391,6 +16386,7 @@ class MinimapRouteRecorder:
         FLOW_BOX, FLOW_MATCH, FLOW_TAIL_GAP, FLOW_MIN_GAP, FLOW_MARGIN = 120, 160, 500, 160, 24
         FLOW_LIFT_Y = 150   # 水平移动时田字框在吊身后基础上再上移的像素(斜后方、不平齐人物;用户2026-09-20)
         FLOW_TAIL_GAP_UP_Y = 150  # 垂直【向上】移动时田字框吊在身后(下方)的偏移(用户2026-09-22:原500太靠底改150);向下移动仍吊上方FLOW_TAIL_GAP
+        FLOW_UP_EXTRA_Y = 150    # 垂直【向上】移动时在上面偏移基础上再上移的像素(用户2026-09-23:上移时框仍靠底出界,再抬150至与人物基点平齐)
         FLOW_WIN_MS, FLOW_MIN_ROUNDS, FLOW_MATCH_THR, FLOW_MIN_D = 300, 3, 0.5, 1.0
         _hd = FLOW_BOX // 2; _hm = FLOW_MATCH // 2
         _last_seq = -1
@@ -16420,7 +16416,7 @@ class MinimapRouteRecorder:
                 _px, _py = int(_ch[0]), int(_ch[1])
                 if 'y' in _intents:
                     _axis = 'y'; _d = int(_intents['y'].get('dir', 1) or 1)
-                    _cx = _px; _cy = (_py - FLOW_TAIL_GAP) if _d > 0 else (_py + FLOW_TAIL_GAP_UP_Y)  # 上移(d<0)身后下方只偏150(用户2026-09-22)
+                    _cx = _px; _cy = (_py - FLOW_TAIL_GAP) if _d > 0 else (_py + FLOW_TAIL_GAP_UP_Y - FLOW_UP_EXTRA_Y)  # 上移(d<0)框抬到与人物基点平齐(用户2026-09-23)
                 else:
                     _axis = 'x'; _d = int(_intents['x'].get('dir', 1) or 1)
                     _cx = (_px - FLOW_TAIL_GAP) if _d > 0 else (_px + FLOW_TAIL_GAP); _cy = _py - FLOW_LIFT_Y  # 水平:身后+上移=斜后方
@@ -17001,7 +16997,7 @@ class MinimapRouteRecorder:
         # === 【模块B】选中台子X总边界检测 + 回退（用户2026-09-23定稿·两套模式分干净）===
         # 只在"手动模式且勾选了台子"时生效；随机(全图)模式 _active_platforms()=[] → 整段旁路,绝不回退。
         # 越界=超出选中台子最左/最右2px→按住方向键往界内走15~28%(不到中点),不攻击;不另起线程,主线串行不抢键。
-        if getattr(self, '_aux_enable_retreat', True) and self._active_platforms():
+        if self._active_platforms():
             boundary_dir = self._check_platform_boundary()
         else:
             self._platform_retreat_active = False
@@ -17029,7 +17025,7 @@ class MinimapRouteRecorder:
                 _debug_log("[平台边界] 触发回退 方向=%s 目标X=%.1f 回退距离=%.1f" % (
                     boundary_dir, self._platform_retreat_target_x, retreat_dist))
         # 回退过程：直接按住方向键往界内走,不攻击(已删除滑/顿/小跳等拟人化动作)
-        if getattr(self, '_aux_enable_retreat', True) and self._active_platforms() and getattr(self, '_platform_retreat_active', False) and self._player_map_pos:
+        if self._active_platforms() and getattr(self, '_platform_retreat_active', False) and self._player_map_pos:
             px = self._player_map_pos[0]
             target = self._platform_retreat_target_x
             rdir = self._platform_retreat_dir
