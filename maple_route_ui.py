@@ -16699,10 +16699,10 @@ class MinimapRouteRecorder:
             time.sleep(0.020)
 
     def _flow_loop(self):
-        """田字背景迁移检测线程(常开层):框恒定放人物对角左后上/右后上(水平身后500、垂直上抬500,不平齐),只按水平朝向选侧。
+        """田字背景迁移检测线程(常开层):框放人物斜上对角(水平朝屏幕内侧300、垂直上抬300,不平齐);人在左半屏挂右上、人在右半屏挂左上。
         移动档按有效键轴(x/y)算背景位移、原地档(无有效移动键)二维判静止;静止结论 still 参与主循环原地钉基点。采集匹配区160、显示田字120。"""
         FLOW_BOX, FLOW_MATCH, FLOW_TAIL_GAP, FLOW_MIN_GAP, FLOW_MARGIN = 120, 160, 300, 160, 24
-        FLOW_CORNER_UP = 300  # 田字框对角定位垂直上抬:框恒定放人物左后上/右后上对角(水平身后300、垂直上抬300),不平齐(平齐全是怪/特效);只按水平朝向选侧,上下移动也只放左右上角(用户2026-09-24)
+        FLOW_CORNER_UP = 300  # 田字框对角定位垂直上抬:框放人物斜上对角(水平朝屏幕内侧300、垂直上抬300),不平齐(平齐全是怪/特效);人在左半屏挂右上、人在右半屏挂左上,上下不换侧(用户2026-09-24)
         FLOW_WIN_MS, FLOW_MIN_ROUNDS, FLOW_MATCH_THR, FLOW_MIN_D = 300, 3, 0.5, 1.0
         _hd = FLOW_BOX // 2; _hm = FLOW_MATCH // 2
         _last_seq = -1
@@ -16710,7 +16710,6 @@ class MinimapRouteRecorder:
         _hist = []
         _hist_idle = []      # 原地档(无有效移动键)背景静止窗 [(t,moved)]
         _last_moving = None  # 上一帧移动/原地模式,切换时清两套历史不串判
-        _last_x_dir = None    # 最近水平朝向(+1右/-1左);原地/上下移动时据此把田字框放身后对角,开局默认右(框在左后上)
         _last_frame_ms = 0
         _last_log = 0
         while getattr(self, '_detect_running', False):
@@ -16740,15 +16739,10 @@ class MinimapRouteRecorder:
                 if _last_moving != _moving:
                     _hist = []; _hist_idle = []   # 移动<->原地模式切换,两套历史各自清零不串判
                     _last_moving = _moving
-                # 田字框恒定放人物对角左后上/右后上(用户2026-09-24):水平吊身后FLOW_TAIL_GAP、垂直上抬FLOW_CORNER_UP,不平齐(平齐全是怪/技能);只按水平朝向选侧,上下移动也只放左右上角
-                _xi = _eff.get('x') or _intents.get('x')
-                if _xi is not None:
-                    _xdir = 1 if int(_xi.get('dir', 1) or 1) >= 0 else -1
-                    _last_x_dir = _xdir
-                else:
-                    _xdir = _last_x_dir if _last_x_dir is not None else 1
-                _cx = _px - _xdir * FLOW_TAIL_GAP     # 朝右(_xdir+1)->框在左后;朝左(-1)->框在右后
-                _cy = _py - FLOW_CORNER_UP            # 恒定抬到人物上方=左后上/右后上对角
+                # 田字框选侧只看人物在屏幕左/右(用户2026-09-24):人在左半屏->框挂右上方、人在右半屏->框挂左上方(始终朝屏幕内侧、不吊出屏),与移动朝向无关;垂直恒定上抬,上下不换侧
+                _xdir = -1 if _px < (_fw / 2.0) else 1   # 人在左(_xdir-1)->cx=px+GAP框在右;人在右(+1)->cx=px-GAP框在左
+                _cx = _px - _xdir * FLOW_TAIL_GAP
+                _cy = _py - FLOW_CORNER_UP            # 恒定上抬300=右上方/左上方对角,上下不换侧
                 _cx = max(FLOW_MARGIN + _hm, min(_cx, _fw - FLOW_MARGIN - _hm))
                 _cy = max(FLOW_MARGIN + _hm, min(_cy, _fh - FLOW_MARGIN - _hm))
                 _gap = int(abs(_cx - _px))
