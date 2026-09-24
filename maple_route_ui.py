@@ -16699,12 +16699,10 @@ class MinimapRouteRecorder:
             time.sleep(0.020)
 
     def _flow_loop(self):
-        """田字背景迁移检测线程(常开层):只在有移动意图时算按住的那条轴,吊在运动反方向(身后)500px。
-        采集匹配区160(搜索半径56,吃低帧大位移),显示田字120十字四格。诊断版只发布+打日志,不参与任何动作判定。"""
+        """田字背景迁移检测线程(常开层):框恒定放人物对角左后上/右后上(水平身后500、垂直上抬500,不平齐),只按水平朝向选侧。
+        移动档按有效键轴(x/y)算背景位移、原地档(无有效移动键)二维判静止;静止结论 still 参与主循环原地钉基点。采集匹配区160、显示田字120。"""
         FLOW_BOX, FLOW_MATCH, FLOW_TAIL_GAP, FLOW_MIN_GAP, FLOW_MARGIN = 120, 160, 500, 160, 24
-        FLOW_LIFT_Y = 150   # 水平移动时田字框在吊身后基础上再上移的像素(斜后方、不平齐人物;用户2026-09-20)
-        FLOW_TAIL_GAP_UP_Y = 150  # 垂直【向上】移动时田字框吊在身后(下方)的偏移(用户2026-09-22:原500太靠底改150);向下移动仍吊上方FLOW_TAIL_GAP
-        FLOW_UP_EXTRA_Y = 150    # 垂直【向上】移动时在上面偏移基础上再上移的像素(用户2026-09-23:上移时框仍靠底出界,再抬150至与人物基点平齐)
+        FLOW_CORNER_UP = 300  # 田字框对角定位垂直上抬:框恒定放人物左后上/右后上对角(水平身后FLOW_TAIL_GAP=500、垂直上抬300),不平齐(平齐全是怪/特效);只按水平朝向选侧,上下移动也只放左右上角(用户2026-09-24)
         FLOW_WIN_MS, FLOW_MIN_ROUNDS, FLOW_MATCH_THR, FLOW_MIN_D = 300, 3, 0.5, 1.0
         _hd = FLOW_BOX // 2; _hm = FLOW_MATCH // 2
         _last_seq = -1
@@ -16712,6 +16710,7 @@ class MinimapRouteRecorder:
         _hist = []
         _hist_idle = []      # 原地档(无有效移动键)背景静止窗 [(t,moved)]
         _last_moving = None  # 上一帧移动/原地模式,切换时清两套历史不串判
+        _last_x_dir = None    # 最近水平朝向(+1右/-1左);原地/上下移动时据此把田字框放身后对角,开局默认右(框在左后上)
         _last_frame_ms = 0
         _last_log = 0
         while getattr(self, '_detect_running', False):
@@ -16741,19 +16740,26 @@ class MinimapRouteRecorder:
                 if _last_moving != _moving:
                     _hist = []; _hist_idle = []   # 移动<->原地模式切换,两套历史各自清零不串判
                     _last_moving = _moving
+                # 田字框恒定放人物对角左后上/右后上(用户2026-09-24):水平吊身后FLOW_TAIL_GAP、垂直上抬FLOW_CORNER_UP,不平齐(平齐全是怪/技能);只按水平朝向选侧,上下移动也只放左右上角
+                _xi = _eff.get('x') or _intents.get('x')
+                if _xi is not None:
+                    _xdir = 1 if int(_xi.get('dir', 1) or 1) >= 0 else -1
+                    _last_x_dir = _xdir
+                else:
+                    _xdir = _last_x_dir if _last_x_dir is not None else 1
+                _cx = _px - _xdir * FLOW_TAIL_GAP     # 朝右(_xdir+1)->框在左后;朝左(-1)->框在右后
+                _cy = _py - FLOW_CORNER_UP            # 恒定抬到人物上方=左后上/右后上对角
+                _cx = max(FLOW_MARGIN + _hm, min(_cx, _fw - FLOW_MARGIN - _hm))
+                _cy = max(FLOW_MARGIN + _hm, min(_cy, _fh - FLOW_MARGIN - _hm))
+                _gap = int(abs(_cx - _px))
+                _edge = (abs(_cx - _px) < FLOW_MIN_GAP) or (abs(_py - _cy) < FLOW_MIN_GAP)  # 身后或上方放不下被夹回身边=贴边弃权
+                _mx1, _my1, _mx2, _my2 = _cx - _hm, _cy - _hm, _cx + _hm, _cy + _hm
+                _x1, _y1, _x2, _y2 = _cx - _hd, _cy - _hd, _cx + _hd, _cy + _hd
                 if _moving:
                     if 'y' in _eff:
                         _axis = 'y'; _d = int(_eff['y'].get('dir', 1) or 1)
-                        _cx = _px; _cy = (_py - FLOW_TAIL_GAP) if _d > 0 else (_py + FLOW_TAIL_GAP_UP_Y - FLOW_UP_EXTRA_Y)  # 上移(d<0)框抬到与人物基点平齐(用户2026-09-23)
                     else:
                         _axis = 'x'; _d = int(_eff['x'].get('dir', 1) or 1)
-                        _cx = (_px - FLOW_TAIL_GAP) if _d > 0 else (_px + FLOW_TAIL_GAP); _cy = _py - FLOW_LIFT_Y  # 水平:身后+上移=斜后方
-                    _cx = max(FLOW_MARGIN + _hm, min(_cx, _fw - FLOW_MARGIN - _hm))
-                    _cy = max(FLOW_MARGIN + _hm, min(_cy, _fh - FLOW_MARGIN - _hm))
-                    _gap = abs(_cx - _px) if _axis == 'x' else abs(_cy - _py)
-                    _edge = _gap < FLOW_MIN_GAP
-                    _mx1, _my1, _mx2, _my2 = _cx - _hm, _cy - _hm, _cx + _hm, _cy + _hm
-                    _x1, _y1, _x2, _y2 = _cx - _hd, _cy - _hd, _cx + _hd, _cy + _hd
                     _dd = _score = _half = _pcd = _pcr = _std = 0.0
                     _n_rounds = _n_rev = 0; _sum_eff = 0.0
                     if (not _edge) and _mx1 >= 0 and _my1 >= 0 and _mx2 <= _fw and _my2 <= _fh:
@@ -16791,15 +16797,8 @@ class MinimapRouteRecorder:
                             _dn, _tag, _gap, '(弃权)' if _edge else '', _dd, _score, _pcd, _pcr, _std, _half,
                             _n_rounds, _n_rev, _sum_eff, len(_hist), _frame_dt))
                 else:
-                    # 原地档(完全没按方向键 / 仅<150ms轻点转身):检测区吊人物正上方,二维背景位移;窗内全程无可信位移才判 still=True
+                    # 原地档(完全没按方向键 / 仅<100ms轻点转身):沿用上面公共对角检测区(左后上/右后上),二维背景位移;窗内全程无可信位移才判 still=True
                     _axis = None; _d = 0
-                    _cx = _px; _cy = _py - FLOW_LIFT_Y
-                    _cx = max(FLOW_MARGIN + _hm, min(_cx, _fw - FLOW_MARGIN - _hm))
-                    _cy = max(FLOW_MARGIN + _hm, min(_cy, _fh - FLOW_MARGIN - _hm))
-                    _gap = abs(_cy - _py)
-                    _mx1, _my1, _mx2, _my2 = _cx - _hm, _cy - _hm, _cx + _hm, _cy + _hm
-                    _x1, _y1, _x2, _y2 = _cx - _hd, _cy - _hd, _cx + _hd, _cy + _hd
-                    _edge = not (_mx1 >= 0 and _my1 >= 0 and _mx2 <= _fw and _my2 <= _fh)
                     _idx = _idy = _ipr = _imx = _imy = _msc = _std = 0.0
                     _still = None
                     if not _edge:
