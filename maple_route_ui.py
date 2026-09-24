@@ -1322,6 +1322,7 @@ class MinimapRouteRecorder:
         # 日志区渲染缓存（2026-09-07 CPU优化：日志内容/滚动位置不变时直接贴缓存图，跳过每帧PIL重绘，实测68ms/秒）
         self._log_cache_key = None  # 上次渲染时的缓存键=(滚动位置,日志总数,可见条目内容)，键相同=画面完全相同
         self._log_cache_img = None  # 上次渲染好的日志区整块图（含底板+文字+滚动条）
+        self._log_disp_cache = {}   # [CPU优化] 日志折行排版缓存 view->(条数,末条id,avail_w,display);无新日志帧跳过逐字测宽折行
         # 双日志切换(用户2026-09-09)：打怪日志=_runtime_logs(找怪/锁定/打怪/换锁/空怪)，行为日志=_behavior_logs(爬梯/跨层/走位/退开/吃药等因果动作)
         self._behavior_logs = []       # 行为日志[{t,msg,color}]
         self._behavior_scroll = 0      # 行为日志滚动位置
@@ -8289,7 +8290,7 @@ class MinimapRouteRecorder:
             _entries = self._runtime_logs
         # 滚动单位=折行后的渲染行(最新在上、条内首行在上)，和绘制处保持一致(否则长消息折行后滚动条对不齐)
         _avail_w = UI_LOG_W - 4 - 8 - 2 - 6
-        total = len(self._log_display_lines(_entries, _avail_w))
+        _, total = self._log_visible(_view, _entries, _avail_w, 0, max_lines)
         max_scroll = max(0, total - max_lines)
 
         def _get_scr():
@@ -9214,10 +9215,9 @@ class MinimapRouteRecorder:
         self._log_tab_exception = (_tab_x0 + 2 * (_tab_w + 4), _tab_y, _tab_w, _tab_h)
         max_lines = max(1, log_content_h // line_h)
         _avail_w = lw - 4 - 8 - 2 - 6   # 左留白4 + 右滚动条(8+2) + 余量6
-        display = self._log_display_lines(_logs, _avail_w)  # 从上到下:最新条目在最上,条内首行(带时间)在上
-        total = len(display)
+        # [CPU优化] 折行排版走缓存:无新日志帧不重算逐字测宽(原每帧对最多500条重折行,占绘制70%+)
+        visible, total = self._log_visible(_view, _logs, _avail_w, _scroll, max_lines)
         # scroll=0 停在顶部看最新N行；>0 向下滚动看更旧历史(单位=折行后的渲染行)
-        visible = display[_scroll:_scroll + max_lines]
         # 缓存键=视图+滚动+总行数+可见渲染行，任一变化才重PIL渲染（视图切换/新日志/滚动才耗一次PIL，其余帧零开销）
         _log_key = (_view, _scroll, total, tuple(visible))
         if self._log_cache_img is not None and _log_key == self._log_cache_key:
@@ -9816,6 +9816,21 @@ class MinimapRouteRecorder:
         for grp in reversed(self._log_wrap_lines(entries, avail_w)):
             disp.extend(grp)
         return disp
+
+    def _log_visible(self, view, entries, avail_w, scroll, max_lines):
+        """[CPU优化] 日志折行排版按(视图,条数,末条对象id,宽度)缓存。日志只在新增/trim时变化,
+        无新日志帧直接复用上次折行结果,跳过 _log_wrap_lines 对最多500条逐字 getlength 测宽(实测247~487ms/秒);
+        scroll 只影响切片、不触发重新折行。返回 (visible渲染行, total总行数)。"""
+        last_id = id(entries[-1]) if entries else 0
+        sig = (len(entries), last_id, int(avail_w))
+        hit = self._log_disp_cache.get(view)
+        if hit is not None and (hit[0], hit[1], hit[2]) == sig:
+            display = hit[3]
+        else:
+            display = self._log_display_lines(entries, avail_w)
+            self._log_disp_cache[view] = (len(entries), last_id, int(avail_w), display)
+        total = len(display)
+        return display[scroll:scroll + max_lines], total
 
     def _maint_trim_debug_log(self, keep_minutes=60):
         """只保留最近 keep_minutes 分钟的 debug.log（按物理行序、正确处理午夜跨天）。
