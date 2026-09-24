@@ -529,6 +529,7 @@ WD_BG_MOTION_MIN = 2      # 上+右两块必须同时在动,才判定背景在�
 WD_JUMP_GATE_MS = 1000    # 跳后静默(用户2026-09-09定最简单方案)：起跳后1秒内不做背景帧差(跳跃空中镜头会上下抖,1秒必已落地),落地后再接着对比,不搞离地/落地状态机
 MOVE_KEY_MIN_MS = 100     # 方向键持续按住≥此值才算"有效移动";出手掰脸转身仅60ms,更短轻点不算移动、不解除原地钉基点(用户2026-09-24)
 CHAR_HOLD_MAX_MS = 1500   # 判定原地但人物特征丢失时,屏幕基点最多沿用上一可信点的时长;超时交黑框/全图重搜(短时保持,不是坐标冻结)
+ATTACT_STANCE_MS = 700    # 钉基点"正在攻击"窗:最近主攻/群攻出手在700ms内才算站桩输出中(主攻默认300ms一点,覆盖动作+空怪判定余量);停手走位/追击即解除钉住
 CHAR_STANCE_JUMP_PX = 50  # 站桩输出态屏幕基点单帧最大可信位移;超过=技能特效误匹配错点、丢弃钉上一可信点(实测正常相邻帧<20px、特效误匹配一帧跳171~239px)
 # === 打怪区域·小地图边界(用户2026-09-11定稿:左右=手划竖线,上下=点选平台绿线) ===
 # 原理:左右边界=用户拖两条竖线(l/r),黄光点越竖线→守护线程发令、主线朝内固定拉回一段;
@@ -14805,16 +14806,28 @@ class MinimapRouteRecorder:
             self._wd_clear_intent('y')
 
     def _char_stance_locked(self, now_ms):
-        """站桩输出态(钉基点距离门总开关,用户2026-09-24定稿):①无"有效移动键"(方向键没按,或按住<MOVE_KEY_MIN_MS
-        的掰脸转身轻点不算)②最近GLOBAL_SKILL_HB_MS内放过主攻/群攻(_attack_last心跳)。此态人物物理上原地不动;
-        走路/爬梯/瞬移都按住方向键、瞬移前还松主攻,天然不成立,无需另列状态排除。"""
+        """基点钉在原点的唯一时机(用户2026-09-24收紧):三条同时成立才站桩钉点——
+        ①没有"有效移动键"(方向键没按,或按住<MOVE_KEY_MIN_MS=100ms的掰脸转身轻点不算);
+        ②没有起跳/不在爬梯·瞬移·腾空(_climb_state非none、跳高打腾空窗_slope_air_until、通用跳后静默窗
+        _wd_jump_gate_until,任一在途都不钉——这些时刻坐标本就该快速变化,钉住=点钉原地/坐标拖后);
+        ③正在攻击:最近主攻/群攻出手在ATTACT_STANCE_MS内(主攻默认300ms一点,连续输出恒成立,停手走位即解除)。
+        其余状态(走路/追击/跳跃/爬梯/瞬移/没在打)一律不钉,特征丢失立即交快速重识别、实时跟新坐标。"""
+        # ①有效移动键:方向键按住≥MOVE_KEY_MIN_MS才算真移动,掰脸轻点不算
         with self._wd_lock:
             _eff = [a for a, v in self._mv_intent.items()
                     if now_ms - int(v.get('start_t', 0) or 0) >= MOVE_KEY_MIN_MS]
         if _eff:
             return False
+        # ②起跳/爬梯/瞬移/腾空在途:坐标本该变,绝不钉原点
+        if getattr(self, '_climb_state', 'none') != 'none':
+            return False
+        if now_ms < int(getattr(self, '_slope_air_until', 0) or 0):
+            return False
+        if now_ms < int(getattr(self, '_wd_jump_gate_until', 0) or 0):
+            return False
+        # ③正在攻击节奏窗内(取代旧的2秒GLOBAL_SKILL_HB_MS宽窗)
         _last_atk = max(self._attack_last.values()) if getattr(self, '_attack_last', None) else 0
-        if not _last_atk or now_ms - int(_last_atk) >= GLOBAL_SKILL_HB_MS:
+        if not _last_atk or now_ms - int(_last_atk) >= ATTACT_STANCE_MS:
             return False
         return True
 
@@ -14833,7 +14846,7 @@ class MinimapRouteRecorder:
     def _char_pos_hold_ok(self, now_ms):
         """人物特征基点【丢失,或站桩中出大跳变错点】时,是否把屏幕基点钉在上一可信点(用户2026-09-24定稿,纯距离门)。
         条件:①有上一可信点 ②距最后真实坐标<=CHAR_HOLD_MAX_MS(超时交黑框/全图重搜,防钉死) ③站桩输出态
-        (_char_stance_locked:无有效移动键+最近2秒攻击过)。不再用田字背景静止:田字框本身由基点定位、基点错它跟着错
+        (_char_stance_locked:无有效移动键+没起跳/爬梯/瞬移/腾空+正在攻击窗内)。不再用田字背景静止:田字框本身由基点定位、基点错它跟着错
         =循环论证,已摘除;田字检测本体保留(待搬小地图)。"""
         if not self._player_screen_pos:
             return False

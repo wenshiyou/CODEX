@@ -14,18 +14,21 @@ def ck(name, got, exp):
         fails.append(name)
 
 NOW = 100000
-ATK_RECENT = {'atk1': NOW - 500}                       # 500ms前放过主攻=站桩输出中(< GLOBAL_SKILL_HB_MS)
-ATK_OLD = {'atk1': NOW - (M.GLOBAL_SKILL_HB_MS + 500)}  # 早于心跳窗=非站桩
+ATK_RECENT = {'atk1': NOW - 500}                          # 500ms前放过主攻=站桩输出中(< ATTACT_STANCE_MS=700)
+ATK_OLD = {'atk1': NOW - (M.ATTACT_STANCE_MS + 500)}      # 早于攻击窗(>700ms,已停手走位)=非站桩
 def intent(held_ms, axis='x'):
     return {axis: {'dir': 1, 'start_t': NOW - held_ms}}
 
-def mk(pos=(100, 100), age=100, intents=None, atk=None):
+def mk(pos=(100, 100), age=100, intents=None, atk=None, climb='none', air=0, gate=0):
     s = Cls.__new__(Cls)
     s._player_screen_pos = pos
     s._char_last_real_t = NOW - age
     s._mv_intent = intents if intents is not None else {}
     s._wd_lock = threading.RLock()
     s._attack_last = atk if atk is not None else dict(ATK_RECENT)
+    s._climb_state = climb          # none/to_ladder/climbing/jump_down/jump_up/teleport/descend
+    s._slope_air_until = air        # 跳高打腾空窗截止(ms);>NOW=空中
+    s._wd_jump_gate_until = gate    # 通用跳后静默窗截止(ms);>NOW=刚起跳
     return s
 
 # ---- _char_stance_locked 站桩态 ----
@@ -39,8 +42,15 @@ ck("S6 双轴x轻点/y长按=非站桩",
                                        'y': {'dir': 1, 'start_t': NOW - 1000}}), NOW), False)
 ck("S7 从没攻击过=非站桩", Cls._char_stance_locked(mk(atk={}), NOW), False)
 ck("S8 攻击超过心跳窗=非站桩", Cls._char_stance_locked(mk(atk=ATK_OLD), NOW), False)
-ck("S9 攻击在心跳窗边界内(差%dms)=站桩" % (M.GLOBAL_SKILL_HB_MS - 1),
-   Cls._char_stance_locked(mk(atk={'atk1': NOW - (M.GLOBAL_SKILL_HB_MS - 1)}), NOW), True)
+ck("S9 攻击在攻击窗边界内(差%dms)=站桩" % (M.ATTACT_STANCE_MS - 1),
+   Cls._char_stance_locked(mk(atk={'atk1': NOW - (M.ATTACT_STANCE_MS - 1)}), NOW), True)
+ck("S10 攻击刚出攻击窗(差%dms)=非站桩" % (M.ATTACT_STANCE_MS + 1),
+   Cls._char_stance_locked(mk(atk={'atk1': NOW - (M.ATTACT_STANCE_MS + 1)}), NOW), False)
+# ---- 起跳/爬梯/瞬移/腾空:即使刚攻击也绝不钉原点(用户2026-09-24:没起跳才钉) ----
+ck("J1 刚攻击但爬梯中(climbing)->不钉", Cls._char_stance_locked(mk(climb='climbing'), NOW), False)
+ck("J2 刚攻击但跳高打腾空在途->不钉", Cls._char_stance_locked(mk(air=NOW + 100), NOW), False)
+ck("J3 刚攻击但通用跳后静默在途->不钉", Cls._char_stance_locked(mk(gate=NOW + 100), NOW), False)
+ck("J4 刚攻击+已落地(在地上/腾空窗过)->站桩", Cls._char_stance_locked(mk(air=NOW - 1, gate=NOW - 1), NOW), True)
 
 # ---- _char_pos_hold_ok 钉住(点丢失/错点时) ----
 ck("H1 无上一可信点->不钉", Cls._char_pos_hold_ok(mk(pos=None), NOW), False)
@@ -82,6 +92,6 @@ flat = np.full((160, 160), 128.0, dtype=np.float32)
 m2 = Cls._flow_idle_match(Cls.__new__(Cls), flat, flat.copy())
 ck("F4 纯色低纹理->不可信", m2[8], False)
 
-total = 9 + 6 + 7 + 4
+total = 14 + 6 + 7 + 4   # S1-S10(攻击窗边界)+J1-J4(起跳/爬梯/腾空不钉)=14; H6; T7; F4
 print("\n==== %s: %d/%d 通过 ====" % ("全部通过" if not fails else "有失败", total - len(fails), total))
 raise SystemExit(1 if fails else 0)
