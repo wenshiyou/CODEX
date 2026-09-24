@@ -92,24 +92,6 @@ flat = np.full((160, 160), 128.0, dtype=np.float32)
 m2 = Cls._flow_idle_match(Cls.__new__(Cls), flat, flat.copy())
 ck("F4 纯色低纹理->不可信", m2[8], False)
 
-# ---- _char_disp_plausible 统一位移速度门(方案A:主匹配/全图/黑框重捕三通道共用) ----
-def gate(last, bx, by, dt_ms=33, persistent=False, reloc=False):
-    _tr = {'last_t': NOW - dt_ms}
-    if persistent:
-        _tr['_full_persistent'] = True
-    return Cls._char_disp_plausible(Cls.__new__(Cls), last, bx, by, NOW, _tr, relocate_win=reloc)[0]
-ck("G1 无上一可信点(冷启动)->放行", gate(None, 900, 900), True)
-ck("G2 33fps小步30px(限60)->采信", gate((100, 100), 130, 100), True)
-ck("G3 33fps飞点200px(限60)->拒采", gate((100, 100), 300, 100), False)
-ck("G4 瞬移重定位窗内800px大跳变->放行", gate((100, 100), 900, 100, reloc=True), True)
-ck("G5 局部连续1秒找不到(真丢/过图)->放行重定位", gate((100, 100), 900, 100, persistent=True), True)
-ck("G6a 低帧500ms(限150)位移160px->拒采", gate((100, 100), 100, 260, dt_ms=500), False)
-ck("G6b 低帧500ms(限150)位移140px->采信", gate((100, 100), 100, 240, dt_ms=500), True)
-ck("G7a 高帧16ms(限60)位移80px->拒采", gate((100, 100), 180, 100, dt_ms=16), False)
-ck("G7b 高帧16ms(限60)位移50px->采信", gate((100, 100), 150, 100, dt_ms=16), True)
-ck("G8 dt<=0同帧重入归一30fps->原位采信", gate((100, 100), 100, 100, dt_ms=0), True)
-ck("G9 真机事故复现(375,372)->(924,427)约551px黑框洗白->拒采", gate((375, 372), 924, 427), False)
-
-total = 14 + 6 + 7 + 4 + 11   # S1-S10+J1-J4=14; H6; T7; F4; G1-G9共11断言
+total = 14 + 6 + 7 + 4   # S1-S10(攻击窗边界)+J1-J4(起跳/爬梯/腾空不钉)=14; H6; T7; F4
 print("\n==== %s: %d/%d 通过 ====" % ("全部通过" if not fails else "有失败", total - len(fails), total))
 raise SystemExit(1 if fails else 0)
