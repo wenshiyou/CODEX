@@ -1617,14 +1617,18 @@ class MinimapRouteRecorder:
                 self._calib_left_pt = cd.get("calib_left")
                 self._calib_right_pt = cd.get("calib_right")
                 self._calib_top_pt = cd.get("calib_top")
-                # 加载倍率数据（程序重启后自动恢复，不需要重新校准）
-                saved_sx = cd.get("calibrated_scale_x", 0)
-                saved_sy = cd.get("calibrated_scale_y", 0)
-                if saved_sx > 0 and saved_sy > 0:
-                    self._calibrated_scale_x = saved_sx
-                    self._calibrated_scale_y = saved_sy
-                    self._map_screen_scale = saved_sx
-                    print("[初始化] 已加载方案%d倍率: X=%.4f Y=%.4f" % (self.current_route, saved_sx, saved_sy))
+                # =====【倍率功能·已停用 2026-09-24】屏幕<->小地图倍率(calibrated_scale)先不用:值不准、且与小地图裁剪比例语义冲突。
+                # 不读磁盘倍率、内存恒0;不影响绿框blue_box/光点->屏幕映射(那是FIXED_W/裁剪区/blue_box的独立比例)。恢复:还原下方注释块。
+                self._calibrated_scale_x = 0.0
+                self._calibrated_scale_y = 0.0
+                self._map_screen_scale = 0.0
+                # saved_sx = cd.get("calibrated_scale_x", 0)
+                # saved_sy = cd.get("calibrated_scale_y", 0)
+                # if saved_sx > 0 and saved_sy > 0:
+                #     self._calibrated_scale_x = saved_sx
+                #     self._calibrated_scale_y = saved_sy
+                #     self._map_screen_scale = saved_sx
+                #     print("[初始化] 已加载方案%d倍率: X=%.4f Y=%.4f" % (self.current_route, saved_sx, saved_sy))
             except Exception:
                 pass
 
@@ -2895,14 +2899,17 @@ class MinimapRouteRecorder:
                 self._calib_left_pt = cd.get("calib_left")
                 self._calib_right_pt = cd.get("calib_right")
                 self._calib_top_pt = cd.get("calib_top")
-                # 加载倍率数据
-                saved_sx = cd.get("calibrated_scale_x", 0)
-                saved_sy = cd.get("calibrated_scale_y", 0)
-                if saved_sx > 0 and saved_sy > 0:
-                    self._calibrated_scale_x = saved_sx
-                    self._calibrated_scale_y = saved_sy
-                    self._map_screen_scale = saved_sx
-                    print("[切换] 方案%d 已加载倍率: X=%.4f Y=%.4f" % (route_id, saved_sx, saved_sy))
+                # =====【倍率功能·已停用 2026-09-24】切换方案不再加载磁盘倍率,内存恒0(绿框/光点映射为独立比例,不受影响)。恢复:还原下方注释块。
+                self._calibrated_scale_x = 0.0
+                self._calibrated_scale_y = 0.0
+                self._map_screen_scale = 0.0
+                # saved_sx = cd.get("calibrated_scale_x", 0)
+                # saved_sy = cd.get("calibrated_scale_y", 0)
+                # if saved_sx > 0 and saved_sy > 0:
+                #     self._calibrated_scale_x = saved_sx
+                #     self._calibrated_scale_y = saved_sy
+                #     self._map_screen_scale = saved_sx
+                #     print("[切换] 方案%d 已加载倍率: X=%.4f Y=%.4f" % (route_id, saved_sx, saved_sy))
                 # 人物特征是全局数据（识别自己角色），不随方案切换；权威存储为磁盘 data/char_templates/char_<id>.png，由_load_char_templates加载
                 # 此处不再从方案配置的char_template_b64读取并覆盖内存（旧机制会把10张覆盖成1张，记录005/v94已修复）
                 # 加载YOLO模型路径
@@ -7166,6 +7173,9 @@ class MinimapRouteRecorder:
         手动偏移：倍率差弹窗里用户输入的 scale_x_offset/scale_y_offset。
         总值一旦定下来就被锁定(见 _update_scale_calibration)，不再随人物走动变化。
         注意：换算用的scale不能为0(否则怪物坐标全换算到人物/崩)，未校准用0.10兜底。"""
+        # =====【倍率功能·已停用 2026-09-24】倍率先不用:恒返回(0,0),_screen_to_map据此返回None,怪不再换算到小地图判台。
+        # 不影响绿框/光点->屏幕映射/平台边界守护(均不读本倍率)。恢复:删除下一return行即还原原计算。=====
+        return (0.0, 0.0)
         base_x = getattr(self, '_calibrated_scale_x', 0.10)
         base_y = getattr(self, '_calibrated_scale_y', 0.10)
         try:
@@ -7185,6 +7195,8 @@ class MinimapRouteRecorder:
               怪小地图Y = 人物小地图Y + (怪屏幕Y - 人物屏幕Y) * scale
         参数：screen_x, screen_y = 怪在游戏画面中的屏幕坐标
         返回：(map_x, map_y) 估算的小地图坐标；人物位置未知时返回None"""
+        # =====【倍率功能·已停用 2026-09-24】屏幕<->小地图换算停用,直接None:怪判台/小地图怪紫点/跨层walk选台安全跳过,跨层统一走梯子。恢复:删下一return行。=====
+        return None
         # 人物小地图坐标（黄色光点中心）
         if not self._player_map_pos or not self._player_screen_pos:
             return None
@@ -7225,6 +7237,8 @@ class MinimapRouteRecorder:
           1. 自动记录的左右端点可能不是真正的平台两端（人物没走到边缘）
           2. 如果人物在小地图范围内移动，记录的范围偏小，scale_x不准
           3. 解决：不准时用手动记录（人物停在平台两端点按钮）"""
+        # =====【倍率功能·已停用 2026-09-24】自动记录左右/上端点反算倍率整套停用(调用处本已注释,此为双保险)。恢复:删下一return行。=====
+        return
         # 手动校准已执行时，跳过自动记录（避免覆盖手动值）
         if getattr(self, '_manual_calib_done', False):
             return
@@ -7382,6 +7396,9 @@ class MinimapRouteRecorder:
         """【倍率新方案】分开取样：axis='X' 用绿圈只取X分量，axis='Y' 用蓝圈只取Y分量
         光圈流程：记基点→出光圈(绿/蓝)拖到独特位置→人物走到光圈→记录→算倍率
         每步引导文字(窗口最顶白区红字)；某步失败提示重试，连续失败3次退出整个流程"""
+        # =====【倍率功能·已停用 2026-09-24】X/Y倍率三点校准入口停用(按钮按下不再出光圈/算倍率)。恢复:删下面2行。=====
+        self._add_log("倍率功能已停用，不再校准")
+        return
         if axis not in ('X', 'Y'):  # 非法方向直接忽略
             return
         self._auto_calib_axis = axis  # 当前校准方向
@@ -7481,6 +7498,8 @@ class MinimapRouteRecorder:
 
     def _finish_auto_calibration(self):
         """【倍率新方案】按 _auto_calib_axis 只算对应轴倍率（X用绿圈=右，Y用蓝圈=上），沿用记忆文件除以2"""
+        # =====【倍率功能·已停用 2026-09-24】三点算倍率停用(双保险)。恢复:删下一return行。=====
+        return
         axis = self._auto_calib_axis  # 当前校准方向
         if not self._auto_calib_base:  # 无基点
             self._calib_fail("倍率：无基点")
@@ -7624,8 +7643,9 @@ class MinimapRouteRecorder:
                     "calib_left": self._calib_left_pt,
                     "calib_right": self._calib_right_pt,
                     "calib_top": getattr(self, '_calib_top_pt', None),
-                    "calibrated_scale_x": getattr(self, '_calibrated_scale_x', 0),
-                    "calibrated_scale_y": getattr(self, '_calibrated_scale_y', 0),
+                    # 【倍率功能·已停用 2026-09-24】字段保留(兼容旧json结构),值恒写0,不再落盘脏倍率;恢复倍率后改回 getattr 实时值
+                    "calibrated_scale_x": 0,
+                    "calibrated_scale_y": 0,
                     "char_template_b64": char_b64,
                     "yolo_model_path": getattr(self, '_yolo_model_path', None),
                     "blue_box": _bb_to_save,
@@ -7638,6 +7658,9 @@ class MinimapRouteRecorder:
         原理：scale_x=FIXED_W/小地图宽度，scale_y=MAP_H/小地图高度
         X和Y缩放比率不同，必须分开算，不能默认相等
         用户需求：检测值定下后固定(总值=检测值+偏移)，可被再次检测/手动记录覆盖，但区域初始化只在无检测值时生效"""
+        # =====【倍率功能·已停用 2026-09-24】不再由小地图裁剪区尺寸反算倍率(原 FIXED_W/width 会写出~1.68脏值污染换算)。
+        # map_area_rect 裁剪区本身照常保存/使用,绿框与光点映射不依赖本函数。恢复:删下一return行。=====
+        return
         r = getattr(self, 'map_area_rect', None)
         # 已有检测值(非0) → 保留用户检测/手动记录值，不让区域初始化覆盖（否则总值会变）
         if getattr(self, '_calibrated_scale_x', 0) or getattr(self, '_calibrated_scale_y', 0):
@@ -7656,6 +7679,8 @@ class MinimapRouteRecorder:
         记录格式：左/右端点=(屏幕X, 屏幕Y, 小地图X, 小地图Y)，上端点=(屏幕Y, 小地图Y)
         兼容旧格式：(屏幕X, 小地图X, 小地图Y)没有屏幕Y时跳过Y校准
         手动记录直接覆盖（100%权重）"""
+        # =====【倍率功能·已停用 2026-09-24】手动端点反算倍率停用。恢复:删下一return行。=====
+        return
         left_pt = getattr(self, '_calib_left_pt', None)
         right_pt = getattr(self, '_calib_right_pt', None)
         top_pt = getattr(self, '_calib_top_pt', None)
@@ -8395,8 +8420,8 @@ class MinimapRouteRecorder:
             self._calib_y_pressed = 3  # 按下特效：显示3帧阴影（与X倍率一致）
             self._start_auto_calibration('Y')
             return
-        # 【倍率差弹窗】点击倍率差按钮打开弹窗
-        if self._btn_scale_dialog and _in(self._btn_scale_dialog, x, y):
+        # 【倍率差弹窗】倍率功能已停用(2026-09-24):按钮不再打开弹窗。恢复:把下一行开头的 'False and ' 去掉
+        if False and self._btn_scale_dialog and _in(self._btn_scale_dialog, x, y):
             print("[鼠标] 倍率差调整")
             self._show_scale_dialog = True
             # 打开弹窗时备份原始值（取消/关闭时恢复，确认才保存）
@@ -8852,31 +8877,8 @@ class MinimapRouteRecorder:
         #     cv2.rectangle(map_display, (0, MAP_H - 20), (FIXED_W, MAP_H), (25, 25, 25), -1)
         #     cv2.putText(map_display, status, (6, MAP_H - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 165, 255), 1)
 
-        # 【模块B】自动校准倍率显示（红字 + 浅灰圆角底条，直接显示在小地图底部）始终显示
-        # 各轴单独显示：X设好后先显示X，Y设好后追加显示Y；都不显示"待设置中..."
-        eff_sx, eff_sy = self._effective_scale()
-        if eff_sx <= 0 and eff_sy <= 0:
-            scale_text = "待设置中..."
-        else:
-            _parts = []
-            _parts.append("X %.4f" % eff_sx if eff_sx > 0 else "X 未校准")
-            _parts.append("Y %.4f" % eff_sy if eff_sy > 0 else "Y 未校准")
-            scale_text = "  ".join(_parts)
-        _fs = 0.5   # 字体约为原来的2/3
-        _txt_size = cv2.getTextSize(scale_text, cv2.FONT_HERSHEY_SIMPLEX, _fs, 1)[0]  # 用和绘制一致厚度，宽度更准
-        _left = max(0, (render_w - _txt_size[0]) // 2 + 35)  # 小地图中间再向右35PX（左移15）
-        _baseline = 16  # 显示在小地图窗口顶部中间(用户2026-9-6:从底部移到顶部箭头位置)
-        _txt_org = (_left, _baseline)
-        # 浅灰底条：左右各留1px，刚好包住文字，不突出来
-        _pad = 1
-        _bx1 = _txt_org[0] - _pad
-        _bx2 = _txt_org[0] + _txt_size[0] + _pad
-        _by1 = _baseline - _txt_size[1] - 2
-        _by2 = _baseline + 2
-        cv2.rectangle(map_display, (_bx1, _by1), (_bx2, _by2), (210, 210, 210), -1)  # 浅灰底条
-        cv2.rectangle(map_display, (_bx1, _by1), (_bx2, _by2), (170, 170, 170), 1)   # 细边框，更精致
-        # 红色主体 + 一条细黑边(粗细1)做对比，干净利落
-        self._putcn(map_display, scale_text, _txt_org[0], _txt_org[1], (0, 0, 255))  # PIL中文，位置与cv2基线一致
+        # =====【倍率功能·已停用 2026-09-24】小地图顶部 X/Y 倍率文字(底条+putText)整段不再绘制,避免"待设置中/错误倍率"误导。
+        # 绿框/光点红十字/平台线/梯子等其它小地图绘制一律不受影响。恢复:从git取回本段。=====
 
         # 手动框选拖拽矩形
         if self._selecting and self._select_rect and self._select_dragging:
