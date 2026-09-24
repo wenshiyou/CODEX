@@ -14,8 +14,6 @@
   "scale_x_offset": "0.045",
   "scale_y_offset": "0.07",
   "atk1_interval": "150",
-  "teleport_key": "d",
-  "teleport_distance": "250",
   "aoe_key": "z",
   "aoe_interval": "150",
   "aoe_distance": "250",
@@ -28,7 +26,5 @@
   "far_range_x": "500",
   "far_range_y_up": "320",
   "far_range_y_down": "320",
-  "slope_jump_y_min": "-50",
-  "slope_jump_y_max": "-200",
   "hp_value": "35"
 }
