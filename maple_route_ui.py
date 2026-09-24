@@ -7116,6 +7116,39 @@ class MinimapRouteRecorder:
             return []
         return list(getattr(self, '_selected_platforms', []))
 
+    def _platform_cross_direction(self):
+        """【选怪层·面板模式分流,用户2026-09-24定稿】返回(combat_mode, allow_cross_up, allow_cross_down),
+        作为B锁怪是否跨层/只锁同台的单一事实源,与走位层 _auto_platform_top_block 同口径:
+        编辑态/随机模式/手动零勾选/勾选台在platforms全失效->('random',True,True)全图自由;
+        手动有效选中台恰1个->('single',False,False)只锁屏幕|Y差|<MANUAL_SINGLE_Y_GAP同台怪,不跨层不跳高;
+        手动有效选中台>=2个->('multi',up,dn):以小地图光点Y(越小越高)对各选中台绿线Y均值,
+        还存在更高选中台才放行向上cross、还存在更低台才放行向下cross(人在最顶层up=False,中底层True);
+        光点丢失(爬梯/光门遮挡)->保守('multi',True,True)(爬梯中B锁本就关,恢复后每帧重算)。B线程只读不写,不依赖倍率。"""
+        if getattr(self, '_bound_edit', False):
+            return ('random', True, True)
+        if getattr(self, 'route_mode', '手动') == '随机':
+            return ('random', True, True)
+        _sel_ids = list(getattr(self, '_selected_platforms', []) or [])
+        if not _sel_ids or not getattr(self, 'platforms', None):
+            return ('random', True, True)
+        _sel_pfs = [_pf for _pf in self.platforms if (_pf.get('id', 0) + 1) in _sel_ids]
+        if not _sel_pfs:
+            return ('random', True, True)
+        if len(_sel_pfs) == 1:
+            return ('single', False, False)
+        _mp = getattr(self, '_player_map_pos', None)
+        if not _mp or _mp[1] is None:
+            return ('multi', True, True)
+        _my = float(_mp[1])
+        _up = _dn = False
+        for _pf in _sel_pfs:
+            _ay = float(self._platform_y_avg(_pf))
+            if _ay < _my - AUTO_TOP_LAYER_TOL:
+                _up = True
+            if _ay > _my + AUTO_TOP_LAYER_TOL:
+                _dn = True
+        return ('multi', _up, _dn)
+
     def _locked_platform_x_range(self):
         """【锁平台·冒险岛世界2026-09-07】勾选了平台编号时，返回这些平台绿线在【小地图】上的X范围并集(min,max)，
         作为人物移动的硬边界——只勾1个就是那条绿线的左右端点。未勾选任何平台(全图模式)返回None=不限制。
@@ -17140,6 +17173,7 @@ class MinimapRouteRecorder:
                 P['t0'] = now_ms
         except Exception as _pe:
             _debug_log("[判活探针] 异常: %s" % _pe)
+        _pmode, _pcup, _pcdn = self._platform_cross_direction()
         _dl = combat_logic.combat_step(
             # 选怪不按录制台过滤(用户2026-09-24定稿):怪→小地图靠倍率换算,calib倍率不准/为0会把怪全判'不在台上'→一只不锁只乱走。
             # 手动选台的约束只放在走位边界(平台守护线程+_combat_at_locked_edge,小地图光点对绿线、不涉倍率,准):人不出台;
@@ -17154,7 +17188,8 @@ class MinimapRouteRecorder:
             aoe_y_up=_ayup, aoe_y_down=_aydn, aoe_dual=_dual,
             can_strike=_in_skill, lock_tier=self._b_lock_tier,
             same_platform_fn=None, metric=(None if _slope_air else metric),  # 腾空窗:用空中Y算的metric作废,改以锚点Y现算
-            slope_y_up=(_sjmax if _slope_on else None))  # 跳高上限:主攻带之上~此高度=slope跳高档,同层档清空才选
+            slope_y_up=(_sjmax if _slope_on else None),
+            combat_mode=_pmode, allow_cross_up=_pcup, allow_cross_down=_pcdn)  # 面板模式分流(2026-09-24):随机全图/单台只锁同台Y<50/多台按选中台方向跨层
         # B锁生命周期回存
         self._b_hp_confirmed = _dl['hp_confirmed']
         self._b_gone = _dl['gone_frames']
