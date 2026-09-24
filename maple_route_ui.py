@@ -529,7 +529,7 @@ WD_BG_MOTION_MIN = 2      # 上+右两块必须同时在动,才判定背景在�
 WD_JUMP_GATE_MS = 1000    # 跳后静默(用户2026-09-09定最简单方案)：起跳后1秒内不做背景帧差(跳跃空中镜头会上下抖,1秒必已落地),落地后再接着对比,不搞离地/落地状态机
 MOVE_KEY_MIN_MS = 100     # 方向键持续按住≥此值才算"有效移动";出手掰脸转身仅60ms,更短轻点不算移动、不解除原地钉基点(用户2026-09-24)
 CHAR_HOLD_MAX_MS = 1500   # 判定原地但人物特征丢失时,屏幕基点最多沿用上一可信点的时长;超时交黑框/全图重搜(短时保持,不是坐标冻结)
-FLOW_HOLD_FRESH_MS = 500  # 钉基点要求田字结论新鲜:田字状态超过此ms未更新(线程停/无人物锚点)则不钉、走实时原逻辑
+CHAR_STANCE_JUMP_PX = 50  # 站桩输出态屏幕基点单帧最大可信位移;超过=技能特效误匹配错点、丢弃钉上一可信点(实测正常相邻帧<20px、特效误匹配一帧跳171~239px)
 # === 打怪区域·小地图边界(用户2026-09-11定稿:左右=手划竖线,上下=点选平台绿线) ===
 # 原理:左右边界=用户拖两条竖线(l/r),黄光点越竖线→守护线程发令、主线朝内固定拉回一段;
 #      上下边界=用户点两条录制好的平台绿线(第1次点=上限平台top_pf、第2次点=下限平台bot_pf),
@@ -14762,28 +14762,42 @@ class MinimapRouteRecorder:
         else:
             self._wd_clear_intent('y')
 
-    def _char_pos_hold_ok(self, now_ms):
-        """本帧人物特征丢失(_raw_char_pos=None)时,是否把屏幕基点钉在上一可信点(用户2026-09-24定稿)。
-        充要条件(任一不满足即不钉、坐标实时走原逻辑):①有上一可信点 ②距最后真实坐标<=CHAR_HOLD_MAX_MS
-        ③无"有效移动键"(方向键持续按住>=MOVE_KEY_MIN_MS;出手掰脸转身仅60ms的轻点不算)
-        ④田字明确判定背景静止 still=True 且结论在FLOW_HOLD_FRESH_MS内新鲜。爬梯/下跳/瞬移都持续按方向键、
-        跳高腾空/被击退时背景在滚,天然落不到原地档,无需另列状态排除。"""
-        if not self._player_screen_pos:
-            return False
-        if now_ms - int(getattr(self, '_char_last_real_t', 0) or 0) > CHAR_HOLD_MAX_MS:
-            return False
+    def _char_stance_locked(self, now_ms):
+        """站桩输出态(钉基点距离门总开关,用户2026-09-24定稿):①无"有效移动键"(方向键没按,或按住<MOVE_KEY_MIN_MS
+        的掰脸转身轻点不算)②最近GLOBAL_SKILL_HB_MS内放过主攻/群攻(_attack_last心跳)。此态人物物理上原地不动;
+        走路/爬梯/瞬移都按住方向键、瞬移前还松主攻,天然不成立,无需另列状态排除。"""
         with self._wd_lock:
             _eff = [a for a, v in self._mv_intent.items()
                     if now_ms - int(v.get('start_t', 0) or 0) >= MOVE_KEY_MIN_MS]
         if _eff:
             return False
-        with self._flow_lock:
-            _fs = dict(self._flow_state) if self._flow_state else {}
-        if _fs.get('still') is not True:
-            return False
-        if now_ms - int(_fs.get('t', 0) or 0) > FLOW_HOLD_FRESH_MS:
+        _last_atk = max(self._attack_last.values()) if getattr(self, '_attack_last', None) else 0
+        if not _last_atk or now_ms - int(_last_atk) >= GLOBAL_SKILL_HB_MS:
             return False
         return True
+
+    def _char_anchor_trustable(self, rawp, now_ms):
+        """本帧识别点rawp能否采信进正式屏幕基点。非站桩态恒True(走路/爬梯/瞬移实时跟随、绝不门控);
+        站桩态只接受相对上一可信基点的小幅渐变(<=CHAR_STANCE_JUMP_PX),一帧大跳变=技能特效里误匹配到别处的错点
+        (实测站桩正常相邻帧<20px、特效误匹配一帧跳171~239px),返回False交_char_pos_hold_ok钉住上一可信点。
+        冷启动(还没有上一可信点)直接采信。"""
+        if not self._char_stance_locked(now_ms):
+            return True
+        prev = self._player_screen_pos
+        if not prev:
+            return True
+        return float(np.hypot(rawp[0] - prev[0], rawp[1] - prev[1])) <= CHAR_STANCE_JUMP_PX
+
+    def _char_pos_hold_ok(self, now_ms):
+        """人物特征基点【丢失,或站桩中出大跳变错点】时,是否把屏幕基点钉在上一可信点(用户2026-09-24定稿,纯距离门)。
+        条件:①有上一可信点 ②距最后真实坐标<=CHAR_HOLD_MAX_MS(超时交黑框/全图重搜,防钉死) ③站桩输出态
+        (_char_stance_locked:无有效移动键+最近2秒攻击过)。不再用田字背景静止:田字框本身由基点定位、基点错它跟着错
+        =循环论证,已摘除;田字检测本体保留(待搬小地图)。"""
+        if not self._player_screen_pos:
+            return False
+        if now_ms - int(getattr(self, '_char_last_real_t', 0) or 0) > CHAR_HOLD_MAX_MS:
+            return False
+        return self._char_stance_locked(now_ms)
 
     def _note_freq_event(self, key, limit, win_ms, msg):
         """滑动窗高频事件计数:窗内达limit次往【异常】栏报一条,窗长冷却防刷屏。仅主线程调用。"""
@@ -18239,12 +18253,12 @@ class MinimapRouteRecorder:
                         # 人物/怪/YOLO/血条 都由后台检测线程同一帧算好了，主线程只读结果+过滤假怪（主线程不再做重活）
                         _rawp = self._raw_char_pos
                         _hold_ms = int(time.time() * 1000)
-                        if _rawp is not None:
+                        if _rawp is not None and self._char_anchor_trustable(_rawp, _hold_ms):
                             self._player_screen_pos = _rawp
                             self._player_screen_t = self._raw_char_t   # 透传坐标时间戳,瞬移校验据此判陈旧、坐标陈旧观测据此报警
                             self._char_last_real_t = _hold_ms
                         elif self._char_pos_hold_ok(_hold_ms):
-                            # 原地钉基点(用户2026-09-24):无有效移动键+田字确认背景静止,本帧特征丢失也沿用上一可信点(限时CHAR_HOLD_MAX_MS);pos/t都不刷新
+                            # 原地钉基点(用户2026-09-24纯距离门):站桩输出中特征点丢失、或一帧大跳变(特效误匹配错点),沿用上一可信点(限时CHAR_HOLD_MAX_MS);pos/t都不刷新
                             self._rlog_throttle('char_hold', "人物基点原地保持(%d,%d)" % (int(self._player_screen_pos[0]), int(self._player_screen_pos[1])), 500, log='combat')
                         else:
                             self._player_screen_pos = None
