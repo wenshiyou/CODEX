@@ -26,5 +26,7 @@
   "far_range_x": "500",
   "far_range_y_up": "320",
   "far_range_y_down": "320",
-  "hp_value": "35"
+  "hp_value": "35",
+  "teleport_key": "d",
+  "teleport_distance": "250"
 }

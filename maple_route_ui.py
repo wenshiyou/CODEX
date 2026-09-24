@@ -548,6 +548,7 @@ BOUND_PICK_TOL = 8          # 编辑态点选平台绿线的命中容差(点到�
 BOUND_LINE_W = 3            # 左右竖线粗细基准(px,用户:线粗一点点);UI小地图常态2/编辑3
 BOUND_DEFAULT_INSET = 6     # 默认竖线距小地图左右边的内缩(块px):不贴边、肉眼可见
 BOUND_FILE = os.path.join(DATA_DIR, "bound_lines.json")  # 边界持久化 {l,r,top_pf,bot_pf}(退出编辑时写、启动懒加载)
+AUTO_TOP_LAYER_TOL = 5      # 定平台自动顶层门控:选中台绿线Y均值差≤此值(小地图px)视为并排同层、并入最顶层(route_007实测上下层均值差≈13.7、并排同层差1~2;用户2026-09-24)
 
 # === 战斗瞬移生效校验(用户2026-09-11:台子有距离、有的瞬移不过去;按完键必须核对人物是否真朝该轴位移) ===
 TP_VERIFY_MS = 450        # 瞬移后等450ms(给瞬移动作+人物特征全图重定位时间)再开始校验(2026-09-17:350→450,人物识别约330ms/帧,原350窗内常拿不到瞬移后新坐标)
@@ -6952,6 +6953,8 @@ class MinimapRouteRecorder:
         """Y上闸门:人物当前站的台子属于选定的上限组(该界线合并的任一台)=禁止再向上。未设上限/编辑态/判不到当前台=放行。"""
         if getattr(self, '_bound_edit', False):
             return False
+        if self._auto_platform_top_block():   # 定平台自动门控(用户2026-09-24):单台孤岛/多台站最顶层也禁向上爬梯·上瞬移,与手点上限组取或;向下不拦
+            return True
         _grp = self._valid_pf_group(self._bound_top_grp)
         if not _grp:
             return False
@@ -6965,6 +6968,33 @@ class MinimapRouteRecorder:
         if not _grp:
             return False
         return self._bound_current_pf_id() in _grp
+
+    def _auto_platform_top_block(self):
+        """定平台·自动顶层门控(用户2026-09-24定稿,只拦向上):手动选台无需手点上界线即自动禁止向上跨层。
+        随机模式/零勾选/编辑态/判不到当前台(腾空·梯上)→放行;只勾1台且人正站该台=孤岛拦向上;
+        勾多台→选中台绿线Y均值最小(小地图Y越小越高)为最顶层、AUTO_TOP_LAYER_TOL内并排台并入,人站最顶层拦向上,
+        站中/底层放行(仍可向上爬到更高的选中台)。按台id判身份、不按人当前Y,同台坡度波动不影响。向下跳/下梯不在此限。"""
+        if getattr(self, '_bound_edit', False):
+            return False
+        _sel = self._active_platforms()
+        if not _sel or not self.platforms:
+            return False
+        _cur = self._bound_current_pf_id()   # 当前台id(0基);腾空/梯上=None
+        if _cur is None or (_cur + 1) not in _sel:
+            return False
+        _sel_pfs = [_pf for _pf in self.platforms if (_pf.get('id', 0) + 1) in _sel]
+        if not _sel_pfs:
+            return False
+        if len(_sel_pfs) == 1:
+            self._rlog_throttle('auto_top_single', "定平台:当前唯一选中台,不向上爬梯(只在本台打)", 1500, log='behavior')
+            return True
+        _ymin = min(self._platform_y_avg(_pf) for _pf in _sel_pfs)
+        _top_ids = {_pf.get('id', 0) for _pf in _sel_pfs
+                    if self._platform_y_avg(_pf) <= _ymin + AUTO_TOP_LAYER_TOL}
+        if _cur in _top_ids:
+            self._rlog_throttle('auto_top_layer', "定平台:已在最顶层选中台,不向上爬梯", 1500, log='behavior')
+            return True
+        return False
 
     def _point_to_polyline_dist(self, px, py, points):
         """点到折线的最近距离（小地图坐标）。points为[(x,y),...]列表。"""
