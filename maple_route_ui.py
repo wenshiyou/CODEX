@@ -527,6 +527,9 @@ WD_BG_REGIONS = [
 ]
 WD_BG_MOTION_MIN = 2      # 上+右两块必须同时在动,才判定背景在滚=人物真移动(用户:二处同时变化才算)
 WD_JUMP_GATE_MS = 1000    # 跳后静默(用户2026-09-09定最简单方案)：起跳后1秒内不做背景帧差(跳跃空中镜头会上下抖,1秒必已落地),落地后再接着对比,不搞离地/落地状态机
+MOVE_KEY_MIN_MS = 100     # 方向键持续按住≥此值才算"有效移动";出手掰脸转身仅60ms,更短轻点不算移动、不解除原地钉基点(用户2026-09-24)
+CHAR_HOLD_MAX_MS = 1500   # 判定原地但人物特征丢失时,屏幕基点最多沿用上一可信点的时长;超时交黑框/全图重搜(短时保持,不是坐标冻结)
+FLOW_HOLD_FRESH_MS = 500  # 钉基点要求田字结论新鲜:田字状态超过此ms未更新(线程停/无人物锚点)则不钉、走实时原逻辑
 # === 打怪区域·小地图边界(用户2026-09-11定稿:左右=手划竖线,上下=点选平台绿线) ===
 # 原理:左右边界=用户拖两条竖线(l/r),黄光点越竖线→守护线程发令、主线朝内固定拉回一段;
 #      上下边界=用户点两条录制好的平台绿线(第1次点=上限平台top_pf、第2次点=下限平台bot_pf),
@@ -1426,6 +1429,7 @@ class MinimapRouteRecorder:
         self._attack_last = {}  # atk1/aoe -> 上次释放时间戳
         self._player_screen_pos = None  # (x,y) 人物画面坐标
         self._player_screen_t = 0       # 人物画面坐标最近一次刷新时间戳(ms),判坐标陈旧用(瞬移生效校验/坐标陈旧观测)
+        self._char_last_real_t = 0    # 人物画面坐标最近一次"真实识别到"的时间戳(ms),原地钉基点限时CHAR_HOLD_MAX_MS据此判
         self._role_track = None         # 新多锚点跟踪状态:last锚点/foot脚点/miss失配/last_full全图时间/face朝向/score
         self._role_face = None          # 面部锚点判定的朝向 'L'/'R'(打怪左右决策用)
         self._role_anchor_polys = {}    # 本帧识别到(过阈)的各锚点缩小多边形{key:([(x,y)...],score)},供蒙板画框
@@ -14758,6 +14762,29 @@ class MinimapRouteRecorder:
         else:
             self._wd_clear_intent('y')
 
+    def _char_pos_hold_ok(self, now_ms):
+        """本帧人物特征丢失(_raw_char_pos=None)时,是否把屏幕基点钉在上一可信点(用户2026-09-24定稿)。
+        充要条件(任一不满足即不钉、坐标实时走原逻辑):①有上一可信点 ②距最后真实坐标<=CHAR_HOLD_MAX_MS
+        ③无"有效移动键"(方向键持续按住>=MOVE_KEY_MIN_MS;出手掰脸转身仅60ms的轻点不算)
+        ④田字明确判定背景静止 still=True 且结论在FLOW_HOLD_FRESH_MS内新鲜。爬梯/下跳/瞬移都持续按方向键、
+        跳高腾空/被击退时背景在滚,天然落不到原地档,无需另列状态排除。"""
+        if not self._player_screen_pos:
+            return False
+        if now_ms - int(getattr(self, '_char_last_real_t', 0) or 0) > CHAR_HOLD_MAX_MS:
+            return False
+        with self._wd_lock:
+            _eff = [a for a, v in self._mv_intent.items()
+                    if now_ms - int(v.get('start_t', 0) or 0) >= MOVE_KEY_MIN_MS]
+        if _eff:
+            return False
+        with self._flow_lock:
+            _fs = dict(self._flow_state) if self._flow_state else {}
+        if _fs.get('still') is not True:
+            return False
+        if now_ms - int(_fs.get('t', 0) or 0) > FLOW_HOLD_FRESH_MS:
+            return False
+        return True
+
     def _note_freq_event(self, key, limit, win_ms, msg):
         """滑动窗高频事件计数:窗内达limit次往【异常】栏报一条,窗长冷却防刷屏。仅主线程调用。"""
         now = int(time.time() * 1000)
@@ -16606,6 +16633,29 @@ class MinimapRouteRecorder:
             pass
         return dict(dd=float(_dd), score=float(_mv), half=float(_half), pcd=float(_pcd), pcr=_pcr, std=_std)
 
+    def _flow_idle_match(self, prev, roi):
+        """田字·原地档相邻帧背景位移(检测区锚人物正上方、无有效移动键时用)。phaseCorrelate算二维亚像素位移为主、
+        matchTemplate二维峰值互证。返回(moved,dx,dy,resp,mx,my,mscore,std,trusted):moved=背景可信平移>=1px
+        (=人被动位移/腾空/掉落,不是原地);trusted=本帧纹理/响应足以采信,纯色低响应帧不计入静止样本。"""
+        _M = roi.shape[0]
+        _IDLE_MIN_D, _IDLE_THR, _IDLE_TRUST, _IDLE_MIN_STD = 1.0, 0.5, 0.4, 8.0
+        _std = float(roi.std())
+        _w = np.hanning(_M).astype(np.float32); _win = _w[:, None] * _w[None, :]
+        _px = _py = 0.0; _pr = 0.0
+        try:
+            (_px, _py), _pr = cv2.phaseCorrelate(np.float32(prev) * _win, np.float32(roi) * _win)
+        except Exception:
+            pass
+        _tsz = 48; _t0 = (_M - _tsz) // 2
+        _tpl = prev[_t0:_t0 + _tsz, _t0:_t0 + _tsz]
+        _res = cv2.matchTemplate(roi, _tpl, cv2.TM_CCOEFF_NORMED)
+        _, _mv, _, _ml = cv2.minMaxLoc(_res)
+        _mx = _ml[0] - _t0; _my = _ml[1] - _t0
+        _dm = max(abs(_px), abs(_py), abs(_mx), abs(_my))
+        _moved = _dm >= _IDLE_MIN_D and (_pr >= _IDLE_THR or float(_mv) >= _IDLE_THR)
+        _trusted = (_pr >= _IDLE_TRUST or float(_mv) >= _IDLE_THR) and _std > _IDLE_MIN_STD
+        return bool(_moved), float(_px), float(_py), float(_pr), float(_mx), float(_my), float(_mv), _std, bool(_trusted)
+
     def _minimap_loop(self):
         """小地图单独线程(用户2026-09-21定稿):自己mss只截小地图区域(map_area_rect),高频find_player_dot发布_player_map_pos。
         不被全屏截图60ms周期拖着,光点20ms=50fps零延时更新(和熊猫精灵固定点检测一样)。蒙板/平台录/梯录后续挂这里。"""
@@ -16660,6 +16710,8 @@ class MinimapRouteRecorder:
         _last_seq = -1
         _prev = {}
         _hist = []
+        _hist_idle = []      # 原地档(无有效移动键)背景静止窗 [(t,moved)]
+        _last_moving = None  # 上一帧移动/原地模式,切换时清两套历史不串判
         _last_frame_ms = 0
         _last_log = 0
         while getattr(self, '_detect_running', False):
@@ -16675,61 +16727,106 @@ class MinimapRouteRecorder:
                 _ch = getattr(self, '_raw_char_pos', None)
                 with self._wd_lock:
                     _intents = {a: dict(v) for a, v in self._mv_intent.items()}
-                if _ch is None or not _intents:
-                    _prev.clear(); _hist = []
+                if _ch is None:
+                    _prev.clear(); _hist = []; _hist_idle = []
                     with self._flow_lock:
                         self._flow_boxes = []; self._flow_state = {}
                     time.sleep(0.012); continue
                 _fh, _fw = _frame.shape[:2]
                 _px, _py = int(_ch[0]), int(_ch[1])
-                if 'y' in _intents:
-                    _axis = 'y'; _d = int(_intents['y'].get('dir', 1) or 1)
-                    _cx = _px; _cy = (_py - FLOW_TAIL_GAP) if _d > 0 else (_py + FLOW_TAIL_GAP_UP_Y - FLOW_UP_EXTRA_Y)  # 上移(d<0)框抬到与人物基点平齐(用户2026-09-23)
+                # 有效移动轴:方向键须持续按住>=MOVE_KEY_MIN_MS;更短(出手掰脸转身60ms)是轻点、不算移动(用户2026-09-24)
+                _eff = {a: v for a, v in _intents.items()
+                        if _now_ms - int(v.get('start_t', 0) or 0) >= MOVE_KEY_MIN_MS}
+                _moving = bool(_eff)
+                if _last_moving != _moving:
+                    _hist = []; _hist_idle = []   # 移动<->原地模式切换,两套历史各自清零不串判
+                    _last_moving = _moving
+                if _moving:
+                    if 'y' in _eff:
+                        _axis = 'y'; _d = int(_eff['y'].get('dir', 1) or 1)
+                        _cx = _px; _cy = (_py - FLOW_TAIL_GAP) if _d > 0 else (_py + FLOW_TAIL_GAP_UP_Y - FLOW_UP_EXTRA_Y)  # 上移(d<0)框抬到与人物基点平齐(用户2026-09-23)
+                    else:
+                        _axis = 'x'; _d = int(_eff['x'].get('dir', 1) or 1)
+                        _cx = (_px - FLOW_TAIL_GAP) if _d > 0 else (_px + FLOW_TAIL_GAP); _cy = _py - FLOW_LIFT_Y  # 水平:身后+上移=斜后方
+                    _cx = max(FLOW_MARGIN + _hm, min(_cx, _fw - FLOW_MARGIN - _hm))
+                    _cy = max(FLOW_MARGIN + _hm, min(_cy, _fh - FLOW_MARGIN - _hm))
+                    _gap = abs(_cx - _px) if _axis == 'x' else abs(_cy - _py)
+                    _edge = _gap < FLOW_MIN_GAP
+                    _mx1, _my1, _mx2, _my2 = _cx - _hm, _cy - _hm, _cx + _hm, _cy + _hm
+                    _x1, _y1, _x2, _y2 = _cx - _hd, _cy - _hd, _cx + _hd, _cy + _hd
+                    _dd = _score = _half = _pcd = _pcr = _std = 0.0
+                    _n_rounds = _n_rev = 0; _sum_eff = 0.0
+                    if (not _edge) and _mx1 >= 0 and _my1 >= 0 and _mx2 <= _fw and _my2 <= _fh:
+                        _roi = cv2.cvtColor(_frame[_my1:_my2, _mx1:_mx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
+                        _std = float(_roi.std())
+                        if _axis in _prev:
+                            if _hist and (_hist[-1][1] != _axis or _hist[-1][2] != _d):
+                                _hist = []
+                            _hist = [e for e in _hist if _now_ms - e[0] <= FLOW_WIN_MS]
+                            _r = self._flow_match(_prev[_axis], _roi, _axis, _d)
+                            _dd, _score, _half = _r['dd'], _r['score'], _r['half']
+                            _pcd, _pcr, _std = _r['pcd'], _r['pcr'], _r['std']
+                            _effv = -(_d * _dd)
+                            _hist.append((_now_ms, _axis, _d, _effv, _score, _half))
+                            _n_rounds = sum(1 for e in _hist if e[3] >= FLOW_MIN_D and e[4] >= FLOW_MATCH_THR)
+                            _n_rev = sum(1 for e in _hist if e[3] <= -FLOW_MIN_D and e[4] >= FLOW_MATCH_THR)
+                            _sum_eff = sum(e[3] for e in _hist)
+                        _prev[_axis] = _roi
+                    else:
+                        _edge = True
+                    _dn = ('下' if _d > 0 else '上') if _axis == 'y' else ('右' if _d > 0 else '左')
+                    _real = (_n_rounds >= FLOW_MIN_ROUNDS)
+                    _clr = 0x00FFFF if _edge else (0x00FF00 if _real else 0x00FFFFFF)
+                    _tag = '边' if _edge else ('真动' if _real else '测')
+                    _lab = "田%s%s %d/%d %.2f" % (_dn, _tag, _n_rounds, len(_hist), _score)
+                    with self._flow_lock:
+                        self._flow_boxes = [(_x1, _y1, _x2, _y2, _clr, _lab)]
+                        self._flow_state = dict(axis=_axis, dir=_d, gap=_gap, edge=_edge, dd=_dd, pcd=_pcd,
+                                                score=_score, half=_half, pcr=_pcr, std=_std, rounds=_n_rounds,
+                                                rev=_n_rev, sum_eff=_sum_eff, n=len(_hist),
+                                                frame_dt=_frame_dt, real=_real, moving=True, still=False, t=_now_ms)
+                    if _now_ms - _last_log >= 250:
+                        _last_log = _now_ms
+                        _debug_log("[田字诊断] %s%s gap%d%s mt[d%.1f s%.2f] pc[d%.1f r%.2f] std%.0f 半%.2f | 同向%d 反向%d 累计%.0f 样本%d 周期%dms" % (
+                            _dn, _tag, _gap, '(弃权)' if _edge else '', _dd, _score, _pcd, _pcr, _std, _half,
+                            _n_rounds, _n_rev, _sum_eff, len(_hist), _frame_dt))
                 else:
-                    _axis = 'x'; _d = int(_intents['x'].get('dir', 1) or 1)
-                    _cx = (_px - FLOW_TAIL_GAP) if _d > 0 else (_px + FLOW_TAIL_GAP); _cy = _py - FLOW_LIFT_Y  # 水平:身后+上移=斜后方
-                _cx = max(FLOW_MARGIN + _hm, min(_cx, _fw - FLOW_MARGIN - _hm))
-                _cy = max(FLOW_MARGIN + _hm, min(_cy, _fh - FLOW_MARGIN - _hm))
-                _gap = abs(_cx - _px) if _axis == 'x' else abs(_cy - _py)
-                _edge = _gap < FLOW_MIN_GAP
-                _mx1, _my1, _mx2, _my2 = _cx - _hm, _cy - _hm, _cx + _hm, _cy + _hm
-                _x1, _y1, _x2, _y2 = _cx - _hd, _cy - _hd, _cx + _hd, _cy + _hd
-                _dd = _score = _half = _pcd = _pcr = _std = 0.0
-                _n_rounds = _n_rev = 0; _sum_eff = 0.0
-                if (not _edge) and _mx1 >= 0 and _my1 >= 0 and _mx2 <= _fw and _my2 <= _fh:
-                    _roi = cv2.cvtColor(_frame[_my1:_my2, _mx1:_mx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
-                    _std = float(_roi.std())
-                    if _axis in _prev:
-                        if _hist and (_hist[-1][1] != _axis or _hist[-1][2] != _d):
-                            _hist = []
-                        _hist = [e for e in _hist if _now_ms - e[0] <= FLOW_WIN_MS]
-                        _r = self._flow_match(_prev[_axis], _roi, _axis, _d)
-                        _dd, _score, _half = _r['dd'], _r['score'], _r['half']
-                        _pcd, _pcr, _std = _r['pcd'], _r['pcr'], _r['std']
-                        _eff = -(_d * _dd)
-                        _hist.append((_now_ms, _axis, _d, _eff, _score, _half))
-                        _n_rounds = sum(1 for e in _hist if e[3] >= FLOW_MIN_D and e[4] >= FLOW_MATCH_THR)
-                        _n_rev = sum(1 for e in _hist if e[3] <= -FLOW_MIN_D and e[4] >= FLOW_MATCH_THR)
-                        _sum_eff = sum(e[3] for e in _hist)
-                    _prev[_axis] = _roi
-                else:
-                    _edge = True
-                _dn = ('下' if _d > 0 else '上') if _axis == 'y' else ('右' if _d > 0 else '左')
-                _real = (_n_rounds >= FLOW_MIN_ROUNDS)
-                _clr = 0x00FFFF if _edge else (0x00FF00 if _real else 0x00FFFFFF)
-                _tag = '边' if _edge else ('真动' if _real else '测')
-                _lab = "田%s%s %d/%d %.2f" % (_dn, _tag, _n_rounds, len(_hist), _score)
-                with self._flow_lock:
-                    self._flow_boxes = [(_x1, _y1, _x2, _y2, _clr, _lab)]
-                    self._flow_state = dict(axis=_axis, dir=_d, gap=_gap, edge=_edge, dd=_dd, pcd=_pcd,
-                                            score=_score, half=_half, pcr=_pcr, std=_std, rounds=_n_rounds,
-                                            rev=_n_rev, sum_eff=_sum_eff, n=len(_hist),
-                                            frame_dt=_frame_dt, real=_real, t=_now_ms)
-                if _now_ms - _last_log >= 250:
-                    _last_log = _now_ms
-                    _debug_log("[田字诊断] %s%s gap%d%s mt[d%.1f s%.2f] pc[d%.1f r%.2f] std%.0f 半%.2f | 同向%d 反向%d 累计%.0f 样本%d 周期%dms" % (
-                        _dn, _tag, _gap, '(弃权)' if _edge else '', _dd, _score, _pcd, _pcr, _std, _half,
-                        _n_rounds, _n_rev, _sum_eff, len(_hist), _frame_dt))
+                    # 原地档(完全没按方向键 / 仅<150ms轻点转身):检测区吊人物正上方,二维背景位移;窗内全程无可信位移才判 still=True
+                    _axis = None; _d = 0
+                    _cx = _px; _cy = _py - FLOW_LIFT_Y
+                    _cx = max(FLOW_MARGIN + _hm, min(_cx, _fw - FLOW_MARGIN - _hm))
+                    _cy = max(FLOW_MARGIN + _hm, min(_cy, _fh - FLOW_MARGIN - _hm))
+                    _gap = abs(_cy - _py)
+                    _mx1, _my1, _mx2, _my2 = _cx - _hm, _cy - _hm, _cx + _hm, _cy + _hm
+                    _x1, _y1, _x2, _y2 = _cx - _hd, _cy - _hd, _cx + _hd, _cy + _hd
+                    _edge = not (_mx1 >= 0 and _my1 >= 0 and _mx2 <= _fw and _my2 <= _fh)
+                    _idx = _idy = _ipr = _imx = _imy = _msc = _std = 0.0
+                    _still = None
+                    if not _edge:
+                        _roi = cv2.cvtColor(_frame[_my1:_my2, _mx1:_mx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
+                        _std = float(_roi.std())
+                        if 'idle' in _prev:
+                            _hist_idle = [e for e in _hist_idle if _now_ms - e[0] <= FLOW_WIN_MS]
+                            _imv, _idx, _idy, _ipr, _imx, _imy, _msc, _std, _trusted = self._flow_idle_match(_prev['idle'], _roi)
+                            if _trusted:
+                                _hist_idle.append((_now_ms, _imv))
+                            _ni = len(_hist_idle); _nm = sum(1 for e in _hist_idle if e[1])
+                            if _ni >= FLOW_MIN_ROUNDS:
+                                _still = False if _nm > 0 else True
+                        _prev['idle'] = _roi
+                    _itag = '边' if _edge else ('静' if _still is True else ('动' if _still is False else '?'))
+                    _clr = 0x00FFFF if (_edge or _still is None) else (0xFFFF00 if _still else 0x0000FF)  # 青=确认静止 红=背景在动 黄=弃权/未定
+                    _lab = "田原%s %d" % (_itag, len(_hist_idle))
+                    with self._flow_lock:
+                        self._flow_boxes = [(_x1, _y1, _x2, _y2, _clr, _lab)]
+                        self._flow_state = dict(axis=None, dir=0, gap=_gap, edge=_edge, dd=_idx, pcd=_idy,
+                                                score=_msc, pcr=_ipr, std=_std, rounds=len(_hist_idle),
+                                                rev=0, sum_eff=0.0, n=len(_hist_idle), frame_dt=_frame_dt,
+                                                real=False, moving=False, still=_still, t=_now_ms)
+                    if _now_ms - _last_log >= 250:
+                        _last_log = _now_ms
+                        _debug_log("[田字诊断] 原地%s gap%d pc[d%.1f,%.1f r%.2f] mt[d%.1f,%.1f s%.2f] std%.0f 静样%d 周期%dms" % (
+                            _itag, _gap, _idx, _idy, _ipr, _imx, _imy, _msc, _std, len(_hist_idle), _frame_dt))
             except Exception as _fe:
                 try:
                     _debug_log("[田字诊断] 异常:%s" % (_fe,))
@@ -18147,11 +18244,21 @@ class MinimapRouteRecorder:
                     if _frame is not None:
                         _t2 = time.time()
                         # 人物/怪/YOLO/血条 都由后台检测线程同一帧算好了，主线程只读结果+过滤假怪（主线程不再做重活）
-                        self._player_screen_pos = self._raw_char_pos
-                        self._player_screen_t = self._raw_char_t   # 透传坐标时间戳,瞬移校验据此判陈旧、坐标陈旧观测据此报警
+                        _rawp = self._raw_char_pos
+                        _hold_ms = int(time.time() * 1000)
+                        if _rawp is not None:
+                            self._player_screen_pos = _rawp
+                            self._player_screen_t = self._raw_char_t   # 透传坐标时间戳,瞬移校验据此判陈旧、坐标陈旧观测据此报警
+                            self._char_last_real_t = _hold_ms
+                        elif self._char_pos_hold_ok(_hold_ms):
+                            # 原地钉基点(用户2026-09-24):无有效移动键+田字确认背景静止,本帧特征丢失也沿用上一可信点(限时CHAR_HOLD_MAX_MS);pos/t都不刷新
+                            self._rlog_throttle('char_hold', "人物基点原地保持(%d,%d)" % (int(self._player_screen_pos[0]), int(self._player_screen_pos[1])), 500, log='combat')
+                        else:
+                            self._player_screen_pos = None
+                            self._player_screen_t = self._raw_char_t
                         # 人物坐标常开打印(用户2026-09-18):坐标由检测线程常开生产、不依赖是否点运行,故在主循环透传处节流打到"打怪"日志,待机/运行都能看
-                        if self._raw_char_pos is not None:
-                            self._rlog_throttle('char_pos', "人物坐标=(%d,%d)" % (int(self._raw_char_pos[0]), int(self._raw_char_pos[1])), 500, log='combat')
+                        if self._player_screen_pos is not None:
+                            self._rlog_throttle('char_pos', "人物坐标=(%d,%d)" % (int(self._player_screen_pos[0]), int(self._player_screen_pos[1])), 500, log='combat')
                         self._monster_hp_bars = self._raw_hp_bars
                         self._raw_cached = self._raw_cached_feature_monsters
                         # 2026-09-07 用户定稿：不再做"静止怪"静态过滤(冒险岛大量怪本就站桩,会误剔近身真怪→有怪不锁/空打)。
