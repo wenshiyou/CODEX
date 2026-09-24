@@ -36,6 +36,7 @@ CROSS_X_HYST = 30
 # 上方=跳高打上限slope_jump_y_max(没开跳高/跳高打空降级=主攻上带attack_y_up),下方=attack_y_down;群攻再按aoe_y放宽。
 # 超过该可达带=原地/跳高都够不到=cross走梯子/下跳;X差>=CROSS_X_MAX再高也先水平走近,靠近后仍超可达带才跨层。
 CROSS_X_MAX = 300    # 跨层最大X差:X差>=300先pursue水平走近,靠近后仍超面板可达带才跨层(用户:X差<300)
+LOCK_GRACE_MS = 500   # 同层范围外旧锁连续脱检宽限:此时间内沿用旧锁走近,抗YOLO漏帧全屏横跳
 
 # 手动选台·单台模式同台Y容差(用户2026-09-24):单台就这么点地方,只锁与人物|Y差|<50的同台怪,超50=别的台一律不锁
 MANUAL_SINGLE_Y_GAP = 50
@@ -198,12 +199,25 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
 
 def pick_from_buckets(px, py, cand, cross, cast_range,
                        group_priority=False, group_radius=0, aoe_dual=False, cur_cross=None,
-                       slope_rows=None, skill_range=None):
+                       slope_rows=None, skill_range=None, side_anchor_x=None,
+                       allow_switch=True):
     """无锁定/需要让位时选一只当前最优怪。严格分档优先级(用户2026-09-23):
        同层直打档plane(技能范围内>走近) → 跳高档slope(同层清空才选) → 跨层cross → idle。
     slope_rows: build_buckets 返回的跳高怪(坐标是cand子集);为空=没开跳高/无跳高怪,退化为纯同层逻辑。"""
     _skeys = set((r[1], r[2]) for r in (slope_rows or []))
     plane = [r for r in cand if (r[1], r[2]) not in _skeys] if _skeys else list(cand)
+    def _side(rows):
+        # 方向锚点同侧过滤(治drop/脱检后全局pick无方向横穿):近身cast在外层先选,走到这里的都是要移动
+        # 的out/cross怪。同侧有怪只在同侧延续;同侧当帧空(YOLO漏检/特效遮挡常见、下帧常恢复)且换向宽限
+        # 未满(allow_switch=False)时返回[]->本轮不横穿、站住idle等恢复;只有持续一个宽限窗同侧真空
+        # (allow_switch=True)才全量换向,旧方向真清空,既不左右抢也不呆住。
+        if side_anchor_x is None:
+            return rows
+        _want_right = side_anchor_x > px
+        _ss = [r for r in rows if (r[1] > px) == _want_right]
+        if _ss:
+            return _ss
+        return rows if allow_switch else []
     if plane:
         in_attack_rows = [r for r in plane if r[0] <= cast_range]
         if group_priority and group_radius and group_radius > 0:
@@ -224,8 +238,11 @@ def pick_from_buckets(px, py, cand, cross, cast_range,
             d, cx, cy = in_attack_rows[0]
             return _mk('cast', (cx, cy), _dir_to(cx, px), d, tier='in')
         plane.sort(key=lambda r: (abs(r[2] - py), r[0]))
-        d, cx, cy = plane[0]
-        return _mk('pursue', (cx, cy), _dir_to(cx, px), d, tier='out')
+        _po = _side(plane)
+        if _po:
+            d, cx, cy = _po[0]
+            return _mk('pursue', (cx, cy), _dir_to(cx, px), d, tier='out')
+        # 同侧空且换向宽限未满:不横穿,落到slope/cross(同样门控),都空则idle站住等漏检恢复
     # 同层档清空 → 选跳高档(开跳高且有跳高怪):X<=技能射程原地high_slope跳打,否则先水平走近
     if slope_rows:
         _sl = sorted(slope_rows, key=lambda r: (abs(r[2] - py), r[0]))
@@ -240,8 +257,11 @@ def pick_from_buckets(px, py, cand, cross, cast_range,
                     d, cx, cy = row
                     return _mk('cross', (cx, cy), _dir_to(cx, px), d, cross, tier='cross')
         cross.sort(key=lambda r: (abs(r[2] - py), r[0]))
-        d, cx, cy = cross[0]
-        return _mk('cross', (cx, cy), _dir_to(cx, px), d, cross, tier='cross')
+        _co = _side(cross)
+        if _co:
+            d, cx, cy = _co[0]
+            return _mk('cross', (cx, cy), _dir_to(cx, px), d, cross, tier='cross')
+        # 同侧cross空且宽限未满:不横穿到异侧梯子,idle站住
     return _mk('idle', None, None, None)
 
 
@@ -254,7 +274,9 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                          aoe_y_up=None, aoe_y_down=None, aoe_dual=False,
                          same_platform_fn=None, metric=None, slope_y_up=None,
                          combat_mode='random', manual_same_y=MANUAL_SINGLE_Y_GAP,
-                         allow_cross_up=True, allow_cross_down=True):
+                         allow_cross_up=True, allow_cross_down=True,
+                         lock_grace_ms=10**9,
+                         side_anchor_x=None):
     """决策核心:build_buckets 三档分桶 → 维持当前锁定 → pick_from_buckets 选新。
 
     分档(用户2026-09-23定稿,治同层/跳高混池逐帧换锁):
@@ -273,6 +295,7 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
     _skeys = set((r[1], r[2]) for r in slope_rows)
     plane = [r for r in cand if (r[1], r[2]) not in _skeys]
     plane_in_range = [r for r in plane if r[0] <= cast_range]
+    _anchor_x = target_cx if target_cx is not None else side_anchor_x  # drop当帧target清空,用上一锁X做方向锚
 
     if target_cx is not None:
         locked_in = None        # 本帧仍在同层/跳高桶cand里
@@ -335,11 +358,35 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
             if monsters and abs(target_cx - px) <= cast_range and _gin_y:
                 return _mk('cast', (target_cx, target_cy), _dir_to(target_cx, px),
                            abs(target_cx - px), tier='in')
+            # 【脱检宽限·短记忆】近身档空、旧锁同层范围外、连续脱检未满LOCK_GRACE_MS时,沿用旧锁坐标继续
+            # 走近(pursue只走不打,不会空打/钉尸体):滤掉YOLO单帧/几帧漏检、特效遮挡造成的全屏横跳,不呆;
+            # 持续脱检超宽限(旧怪真消失)才落到下面同侧滞回/全局pick重选。近身档刷怪由末尾pick选cast优先接管;
+            # cross跨层锁不粘(跨层维持另走locked_cross)。
+            if (lock_tier != 'cross' and not plane_in_range
+                    and abs(target_cx - px) > cast_range
+                    and lock_grace_ms < LOCK_GRACE_MS):
+                return _mk('pursue', (target_cx, target_cy), _dir_to(target_cx, px),
+                           abs(target_cx - px), tier='out')
+            # 【方向滞回·用户定稿规则】旧锁是同层范围外(pursue)且本帧脱检、技能范围内又无怪可直打时,
+            # 不许横穿到屏幕另一侧、仅因那边远怪Y差小几px就换锁(用户:范围外锁只被近身怪替换,不换另一方向
+            # 仅近一点点的远怪;没近身怪就不换锁,免得左右抢)。只在旧目标【同侧】当帧范围外怪里选X最接近旧
+            # 目标的一只延续走近;同侧一只不剩(旧方向真清空)才放给末尾pick全局重选。延续的仍是当帧真实怪,
+            # 不冻结坐标、不沿旧坐标续命、不sleep,YOLO单帧漏检/换框被同侧连续性滤掉。
+            if not plane_in_range and abs(target_cx - px) > cast_range:
+                _old_right = target_cx > px
+                _same_side = [r for r in plane
+                              if r[0] > cast_range and (r[1] > px) == _old_right]
+                if _same_side:
+                    _same_side.sort(key=lambda r: abs(r[1] - target_cx))
+                    _sd, _scx, _scy = _same_side[0]
+                    return _mk('pursue', (_scx, _scy), _dir_to(_scx, px), _sd, tier='out')
 
     # 无锁定 / 让位 / 脱检判死:统一交 pick 按 同层→跳高→跨层 优先级选当前最优怪
     return pick_from_buckets(px, py, cand, cross, cast_range,
                              group_priority, group_radius, aoe_dual, cur_cross,
-                             slope_rows=slope_rows, skill_range=skill_range)
+                             slope_rows=slope_rows, skill_range=skill_range,
+                             side_anchor_x=_anchor_x,
+                             allow_switch=(_anchor_x is None or lock_grace_ms >= LOCK_GRACE_MS))
 
 
 def decide_alive(has_hp, has_dmg):
@@ -413,7 +460,8 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                 aoe_y_up=None, aoe_y_down=None, aoe_dual=False, can_strike=True, lock_tier=None,
                 same_platform_fn=None, metric=None, slope_y_up=None,
                 combat_mode='random', manual_same_y=MANUAL_SINGLE_Y_GAP,
-                allow_cross_up=True, allow_cross_down=True):
+                allow_cross_up=True, allow_cross_down=True,
+                lock_grace_ms=10**9):
     """组合 select_combat_target + lock_status + decide_attack，得到本tick完整的战斗决策。
 
     参数: 见各部分；now/lock_time 单位ms。
@@ -460,7 +508,9 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                             aoe_y_up, aoe_y_down, aoe_dual, same_platform_fn=same_platform_fn,
                             metric=metric, slope_y_up=slope_y_up,
                             combat_mode=combat_mode, manual_same_y=manual_same_y,
-                            allow_cross_up=allow_cross_up, allow_cross_down=allow_cross_down)
+                            allow_cross_up=allow_cross_up, allow_cross_down=allow_cross_down,
+                            lock_grace_ms=lock_grace_ms,
+                            side_anchor_x=(lock[0] if lock else None))
     # 技能施放决策
     skill = 'none'
     if d['target'] is not None and d['dist'] is not None:

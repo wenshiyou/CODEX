@@ -1754,6 +1754,7 @@ class MinimapRouteRecorder:
         self._combat_exec_feedback = None    # 【阶段二】主线→B出手反馈{'pos':(x,y),'first':ms,'t':ms};B据此+血条/伤害判空怪,绝不靠主线选怪
         self._b_lock = None                  # B私有:当前锁定怪(cx,cy),跨帧维持(B唯一写)
         self._b_lock_tier = None             # B私有:锁定类别 in/out/cross
+        self._b_lock_last_seen_ms = 0        # B私有:当前锁最后在怪表时间(脱检宽限,500ms内沿用抗横跳)
         self._b_hp_confirmed = False         # B私有:当前锁是否已见血条
         self._b_gone = 0                     # B私有:连续无血条帧
         self._b_lock_time = 0                # B私有:当前锁锁定时刻ms
@@ -17261,11 +17262,13 @@ class MinimapRouteRecorder:
         _detect_open = False   # 攻击后0~500ms检测窗是否在窗内(探针日志用)
         _judge_pos = _bl       # 判活/保锁目标:默认当帧锁;攻击反馈窗内=最近一击那只怪
         _has_dmg = False
-        # 判活(用户2026-09-21定稿):计时器与攻击同步,每按一次攻击用feedback.t重新计时;攻击后0~STRIKE_DEADLINE_MS(500ms)
-        # 为检测窗,窗内血条(combat_step A∪B)或伤害数字任一=怪活着续锁续打;满500ms两者皆无=空怪/打死→drop换怪;不攻击(_fb无)不检测。
+        # 判活(2026-09-25修):检测窗随每下攻击feedback.t在0~STRIKE_DEADLINE_MS(500ms)内检血条(combat_step A∪B)/伤害数字,
+        # 任一出现=怪活着续锁续打;判死deadline改用【首次出手feedback.first,连续点按不刷新】,从第一下起满500ms两者皆无=空怪/打死→drop;
+        # 不攻击(_fb无)不检测。旧版误用每下刷新的t计deadline,主攻约300ms连点致deadline永不到、空怪锁着不换,已修。
         if _fb and _fb.get('pos') and _fb.get('t'):
             _fpos = _fb['pos']
-            _last_t = _fb.get('t', 0) or 0
+            _last_t = _fb.get('t', 0) or 0          # 最近一击时间(主攻每下刷新):仅用于"每下0~500ms开窗检伤害"
+            _first_t = _fb.get('first') or _last_t  # 当前目标【首次出手】时间(连续点按不刷新,换目标/drop由主线清feedback)
             _el = now_ms - _last_t
             if _last_t and now_ms >= _last_t and 0 <= _el < STRIKE_DEADLINE_MS:
                 _detect_open = True
@@ -17275,8 +17278,12 @@ class MinimapRouteRecorder:
                 except Exception as _e:
                     _debug_log("[B决策] 伤害数字检测异常: %s" % _e)
                     _has_dmg = False
-            if _last_t and now_ms >= _last_t and _el >= STRIKE_DEADLINE_MS:
-                _attacked = True    # 最近一击满500ms这一帧仍针对出手怪,血条/伤害皆无则lock_status判死drop
+            # 判死deadline以【首次出手first】计时(2026-09-25根因修复):旧代码误用每下刷新的t,主攻约300ms一下使now-t永远
+            # <500ms、判死窗永远走不完→attacked恒False→空怪/尸体/背景锁着连续空打不换(日志曾连续9秒cast无血无伤drop=False)。
+            # first连续攻击不刷新,从第一下起满STRIKE_DEADLINE_MS即认"已出手"并持续为真;当帧血条/伤害皆无→lock_status判drop换锁,
+            # 见血/见伤续打(真怪被打死当帧起无血无伤,因first很早attacked已为真,立刻drop);走近中不出手无feedback不会误判。
+            if _first_t and now_ms >= _first_t and (now_ms - _first_t) >= STRIKE_DEADLINE_MS:
+                _attacked = True    # 首次出手满500ms起持续针对出手怪,血条/伤害皆无则lock_status判死drop
                 _judge_pos = _fpos
         # can_strike=判活目标在停步线+主攻Y带;只影响"曾见血后走近/跳打中"的保锁,满窗无血无伤两分支都drop
         _in_skill = bool(_judge_pos) and abs(_judge_pos[0] - px) <= _stop and -_yup <= (_judge_pos[1] - py) <= _ydn
@@ -17339,6 +17346,11 @@ class MinimapRouteRecorder:
         except Exception as _pe:
             _debug_log("[判活探针] 异常: %s" % _pe)
         _pmode, _pcup, _pcdn = self._platform_cross_direction()
+        # 脱检宽限(治YOLO漏帧全屏横跳):当前B锁距上次"仍在怪表"的脱检ms;无锁给极大值=不宽限
+        if self._b_lock is not None:
+            _grace_ms = now_ms - getattr(self, '_b_lock_last_seen_ms', now_ms)
+        else:
+            _grace_ms = 10**9
         _dl = combat_logic.combat_step(
             # 选怪不按录制台过滤(用户2026-09-24定稿):怪→小地图靠倍率换算,calib倍率不准/为0会把怪全判'不在台上'→一只不锁只乱走。
             # 手动选台的约束只放在走位边界(平台守护线程+_combat_at_locked_edge,小地图光点对绿线、不涉倍率,准):人不出台;
@@ -17354,7 +17366,8 @@ class MinimapRouteRecorder:
             can_strike=_in_skill, lock_tier=self._b_lock_tier,
             same_platform_fn=None, metric=(None if _slope_air else metric),  # 腾空窗:用空中Y算的metric作废,改以锚点Y现算
             slope_y_up=(_sjmax if _slope_on else None),
-            combat_mode=_pmode, allow_cross_up=_pcup, allow_cross_down=_pcdn)  # 面板模式分流(2026-09-24):随机全图/单台只锁同台Y<50/多台按选中台方向跨层
+            combat_mode=_pmode, allow_cross_up=_pcup, allow_cross_down=_pcdn,
+            lock_grace_ms=_grace_ms)  # 面板模式分流(2026-09-24):随机全图/单台只锁同台Y<50/多台按选中台方向跨层
         # B锁生命周期回存
         self._b_hp_confirmed = _dl['hp_confirmed']
         self._b_gone = _dl['gone_frames']
@@ -17374,6 +17387,31 @@ class MinimapRouteRecorder:
                 self._b_hp_confirmed = False
                 self._b_gone = 0
             self._b_lock = _tgt
+        # 脱检宽限计时:新锁/drop当帧视为可见;维持锁则按容差(X40/Y50,同select locked_in)查当帧怪表刷新
+        if _new_target or _drop:
+            self._b_lock_last_seen_ms = now_ms
+        elif self._b_lock is not None and _cand:
+            _lvx, _lvy = self._b_lock
+            if any(abs((_b[0] + _b[2]) // 2 - _lvx) <= 40 and abs(_b[3] - _lvy) <= 50 for _b in _cand):
+                self._b_lock_last_seen_ms = now_ms
+        # [只读诊断] 锁怪横向大跳(>200px)时取证:这帧近身档(X<=停步线、Y主攻带)到底有没有怪、judge/feedback是谁
+        if _new_target and _old is not None and _tgt is not None and abs(_tgt[0] - _old[0]) > 200:
+            try:
+                _near = []
+                for _mb in merged:
+                    _x1, _y1, _x2, _y2 = _mb[0], _mb[1], _mb[2], _mb[3]
+                    _mcx = (_x1 + _x2) // 2; _mcy = _y2; _dx = abs(_mcx - px); _dy = _mcy - py
+                    if _dx <= _stop and -_yup <= _dy <= _ydn:
+                        _near.append((_mcx, _mcy, int(_dx), int(_dy)))
+                _near.sort(key=lambda r: (abs(r[3]), r[2]))
+                _jp = ('(%d,%d)' % (_judge_pos[0], _judge_pos[1])) if _judge_pos else None
+                _fp = ('pos(%d,%d) el=%dms' % (_fb['pos'][0], _fb['pos'][1], int(now_ms - (_fb.get('t') or 0)))) if _fb else None
+                _debug_log('[锁怪横跳诊断] old=(%d,%d)->tgt=(%d,%d) %s[%s] drop=%s grace=%dms px=%d 侧=%s->%s judge=%s fb=%s 近身档怪数=%d %s' % (
+                    _old[0], _old[1], _tgt[0], _tgt[1], _dl.get('state'), _dl.get('tier'), _dl.get('drop'), _grace_ms, px,
+                    ('右' if _old[0] > px else '左'), ('右' if _tgt[0] > px else '左'), _jp, _fp,
+                    len(_near), _near[:6]))
+            except Exception as _je:
+                _debug_log('[锁怪横跳诊断] 异常 %s' % _je)
         if _dl.get('state') == 'switch':
             self._b_probe_side = -self._b_probe_side
             self._b_probe_switched = True
