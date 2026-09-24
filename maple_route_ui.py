@@ -14222,10 +14222,18 @@ class MinimapRouteRecorder:
             _r0 = self._research_anchor_around_dot(frame, tr, float(_P0.get("thr", 0.62)))
             if _r0 is not None:
                 _ax0, _ay0, _src0, _sc0 = _r0
-                tr["last"] = (_ax0, _ay0); tr["foot"] = (_ax0, _ay0); tr["miss"] = 0; tr["score"] = _sc0; tr["last_t"] = time.time() * 1000
-                self._role_pos_src = _src0
-                self._last_char_match_pos = tr["foot"]; self._last_char_match_time = time.time() * 1000
-                return tr["foot"]
+                _n0 = time.time() * 1000
+                _ok0, _jd0, _lim0, _dt0 = self._char_disp_plausible(
+                    tr.get("last"), _ax0, _ay0, _n0, tr,
+                    relocate_win=(_n0 < float(getattr(self, '_char_relocate_until', 0) or 0)))
+                if _ok0:
+                    tr["last"] = (_ax0, _ay0); tr["foot"] = (_ax0, _ay0); tr["miss"] = 0; tr["score"] = _sc0; tr["last_t"] = _n0
+                    self._role_pos_src = _src0
+                    self._last_char_match_pos = tr["foot"]; self._last_char_match_time = _n0
+                    return tr["foot"]
+                if _n0 - getattr(self, '_bigjump_log_t', 0.0) > 500.0:
+                    self._bigjump_log_t = _n0
+                    _debug_log("[角色跟踪] 跳变拦截 d=%.0fpx 限%.0fpx 源=冷启动黑框%s(超统一速度门,拒采保旧点)" % (_jd0, _lim0, _src0))
             self._role_pos_src = 'none'
             return None
         P = self._role_rec.get("params", ROLE_TRACK_DEFAULT) if self._role_rec else ROLE_TRACK_DEFAULT
@@ -14396,19 +14404,14 @@ class MinimapRouteRecorder:
             # 30fps下真实跑步/下落/爬梯是连续小步(<60px/帧),误匹配到同名文本是瞬时跳到另一固定文本(实测70~236px=2100~7000px/s)必被拦;
             # 阈值夹[FLOOR60,CAP150]:高帧战斗≈60px、低帧卡顿≤150px(超大跳变不直接放行);真瞬移(≥250)同样被拦后由_research_anchor_around_dot
             # 借黑框光点(独立第二源)在新位置ROI重捕,硬拦不影响真瞬移。V_MAX=1800px/s是旧120px@约67ms反推的保守初值,真机按[跳变拦截]日志复核再标定。
-            if last is not None:
-                _dtm = now - tr.get("last_t", 0.0)
-                if _dtm <= 0.0:
-                    _dtm = 1000.0 / 30.0   # 无上一帧时间戳/同帧重入:按忙档30fps标称间隔,阈值落到FLOOR附近
-                _disp_lim = min(ROLE_BIGJUMP_CAP_PX,
-                                max(ROLE_BIGJUMP_FLOOR_PX, ROLE_MAX_SPEED_PX_S * _dtm / 1000.0))
-                _jd = float(np.hypot(_bx - last[0], _by - last[1]))
-                if _jd > _disp_lim:
-                    if now - getattr(self, '_bigjump_log_t', 0.0) > 500.0:
-                        self._bigjump_log_t = now
-                        _debug_log("[角色跟踪] 跳变拦截 d=%.0fpx 限%.0fpx dt=%.0fms v=%.0fpx/s 源=%s(超速度闸转黑框重捕)" % (
-                            _jd, _disp_lim, _dtm, _jd / max(_dtm, 1.0) * 1000.0, _pk))
-                    continue
+            _reloc = now < float(getattr(self, '_char_relocate_until', 0) or 0)
+            _okj, _jd, _disp_lim, _dtm = self._char_disp_plausible(last, _bx, _by, now, tr, relocate_win=_reloc)
+            if not _okj:
+                if now - getattr(self, '_bigjump_log_t', 0.0) > 500.0:
+                    self._bigjump_log_t = now
+                    _debug_log("[角色跟踪] 跳变拦截 d=%.0fpx 限%.0fpx dt=%.0fms v=%.0fpx/s 源=%s(超统一速度门,本帧拒采保旧点)" % (
+                        _jd, _disp_lim, _dtm, _jd / max(_dtm, 1.0) * 1000.0, _pk))
+                continue
             # 大跳变以内:保留原弱匹配小跳变过滤(人名局部窗>maxmove且弱匹配<0.75丢;兜底锚点>80且弱匹配<0.75丢)
             if last is not None and _pv[0] < 0.75:
                 _move_lim = maxmove if _pk == "name" else AUX_ANCHOR_MAX_MOVE
@@ -14440,10 +14443,17 @@ class MinimapRouteRecorder:
         _r2 = self._research_anchor_around_dot(frame, tr, thr)
         if _r2 is not None:
             _ax2, _ay2, _src2, _sc2 = _r2
-            tr["last"] = (_ax2, _ay2); tr["foot"] = (_ax2, _ay2); tr["miss"] = 0; tr["score"] = _sc2; tr["last_t"] = now
-            self._role_pos_src = _src2
-            self._last_char_match_pos = tr["foot"]; self._last_char_match_time = now
-            return tr["foot"]
+            _reloc2 = now < float(getattr(self, '_char_relocate_until', 0) or 0)
+            _ok2, _jd2, _lim2, _dt2 = self._char_disp_plausible(last, _ax2, _ay2, now, tr, relocate_win=_reloc2)
+            if _ok2:
+                tr["last"] = (_ax2, _ay2); tr["foot"] = (_ax2, _ay2); tr["miss"] = 0; tr["score"] = _sc2; tr["last_t"] = now
+                self._role_pos_src = _src2
+                self._last_char_match_pos = tr["foot"]; self._last_char_match_time = now
+                return tr["foot"]
+            if now - getattr(self, '_bigjump_log_t', 0.0) > 500.0:
+                self._bigjump_log_t = now
+                _debug_log("[角色跟踪] 跳变拦截 d=%.0fpx 限%.0fpx dt=%.0fms 源=黑框重捕%s(超统一速度门,拒采保旧点等下帧重找)" % (
+                    _jd2, _lim2, _dt2, _src2))
         # 黑框也缺=本帧确实无人(用户2026-09-19定稿:坐标绝不冻结/停旧点,直接None,下游本帧跳过);tr["last"]保留供下帧局部窗快速重找、不掉帧率
         self._role_pos_src = 'none'
         return None
@@ -14830,6 +14840,29 @@ class MinimapRouteRecorder:
         if not _last_atk or now_ms - int(_last_atk) >= ATTACT_STANCE_MS:
             return False
         return True
+
+    def _char_disp_plausible(self, last, bx, by, now_ms, tr, relocate_win=False):
+        """统一位移速度门(用户2026-09-24方案A,根治黑框重捕洗白飞点):任何定位源(主匹配/全图/黑框_research)采信写基准前都过这道闸。
+        合法大跳变只放三种:①无上一可信点(冷启动) ②瞬移700ms重定位窗(_char_relocate_until,水平/竖直/巡游/跨层四处瞬移发起都置位)
+        ③局部连续1秒找不到(_full_persistent=真丢/过图)。其余超ROLE_MAX_SPEED归一化位移(夹[FLOOR60,CAP150])一律判误匹配拒采、保旧点。
+        返回(ok,jd,lim,dtm)。纯判定不碰self状态,可离线单测。"""
+        if last is None or relocate_win or (tr or {}).get('_full_persistent', False):
+            if last is not None:
+                _jd0 = float(np.hypot(float(bx) - float(last[0]), float(by) - float(last[1])))
+                if _jd0 > ROLE_BIGJUMP_CAP_PX and float(now_ms) - float(getattr(self, '_bigjump_log_t', 0) or 0) > 300.0:
+                    self._bigjump_log_t = float(now_ms)
+                    _debug_log("[门·大跳变放行] jd=%.0f>%d reloc=%d pers=%d dt=%.0f" % (
+                        _jd0, ROLE_BIGJUMP_CAP_PX, 1 if relocate_win else 0,
+                        1 if (tr or {}).get('_full_persistent') else 0,
+                        float(now_ms) - float((tr or {}).get('last_t', 0) or 0)))
+            return True, 0.0, 0.0, 0.0
+        _dtm = float(now_ms) - float((tr or {}).get('last_t', 0) or 0)
+        if _dtm <= 0.0:
+            _dtm = 1000.0 / 30.0
+        _lim = min(ROLE_BIGJUMP_CAP_PX,
+                   max(ROLE_BIGJUMP_FLOOR_PX, ROLE_MAX_SPEED_PX_S * _dtm / 1000.0))
+        _jd = float(np.hypot(float(bx) - float(last[0]), float(by) - float(last[1])))
+        return (bool(_jd <= _lim)), _jd, _lim, _dtm
 
     def _char_anchor_trustable(self, rawp, now_ms):
         """本帧识别点rawp能否采信进正式屏幕基点。非站桩态恒True(走路/爬梯/瞬移实时跟随、绝不门控);
