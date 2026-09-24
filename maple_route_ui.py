@@ -7887,6 +7887,33 @@ class MinimapRouteRecorder:
                 self._handle_hotkey(vk)
             self._key_state[vk] = pressed
 
+    def _check_file_cmd(self):
+        """文件信号触发(外部/自动化控制):读 data/_run_cmd.flag(内容 F10/F12),读后即删,
+        直接派发 _handle_hotkey,与按 F10/F12 走完全相同入口,零业务分叉。读文件不受 UIPI 隔离。"""
+        try:
+            _cf = os.path.join(DATA_DIR, "_run_cmd.flag")
+            if not os.path.exists(_cf):
+                return
+            try:
+                with open(_cf, "r", encoding="utf-8") as _f:
+                    _cmd = _f.read().strip().upper()
+            except Exception:
+                return
+            if not _cmd:
+                return  # 写了一半的空文件不删,下轮重读
+            try:
+                os.remove(_cf)
+            except Exception:
+                pass
+            if _cmd in ("F10", "0X79", "START", "RUN"):
+                _debug_log("[文件触发] 收到 start -> 派发 F10 入口")
+                self._handle_hotkey(VK_F10)
+            elif _cmd in ("F12", "0X7B", "STOP"):
+                _debug_log("[文件触发] 收到 stop -> 派发 F12 入口")
+                self._handle_hotkey(VK_F12)
+        except Exception as _e:
+            _debug_log("[文件触发] 异常: %r" % (_e,))
+
     def _handle_hotkey(self, vk):
         if vk == VK_F3:
             # F3=小地图一屏视野绿框校准(用户2026-09-16指定F3):进入后在小地图点左下+右上两点(相对光点)、
@@ -18429,6 +18456,7 @@ class MinimapRouteRecorder:
             self._seg_loop['4route'] = self._seg_loop.get('4route', 0) + time.time() - self._lk.get('before_route', time.time())
             self._lk['after_route'] = time.time()
             self._check_hotkeys()
+            self._check_file_cmd()
             # 蓝色框校准模式：方向键微调选中角点，S保存，Q退出（与输入框一致的set差集边沿触发，避免字典重置bug）
             if self._calibrating_blue_box:
                 if not hasattr(self, '_bluebox_prev_keys'):
