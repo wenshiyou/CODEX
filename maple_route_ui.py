@@ -4860,6 +4860,8 @@ class MinimapRouteRecorder:
             # 【用户2026-09-23定稿】模式只定义打怪范围,不再负责启停(F10启动/F12停止):
             # 随机=自由全图打怪(不看录制台子);手动=在选中的录制台子上打。切换即时生效,不打断当前运行。
             self.route_mode = "手动" if item_idx == 0 else "随机"
+            if self.route_mode == "随机":
+                self._show_platform_selector = False  # 切随机收起选台面板(随机分支不看台、按钮隐藏)
             self._save_route_config()
             _mode_txt = "全图自由打怪" if self.route_mode == "随机" else "定平台打怪(看台子选择)"
             print("[模式] 切换为: %s（%s, F10启动/F12停止）" % (self.route_mode, _mode_txt))
@@ -8602,7 +8604,7 @@ class MinimapRouteRecorder:
                 self._delete_ladder_at(map_x, map_y)
                 return
             # 【模块B】台子选择按钮点击（小地图左上方）
-            if self._btn_platform_selector and _in(self._btn_platform_selector, x, y):
+            if self.route_mode != "随机" and self._btn_platform_selector and _in(self._btn_platform_selector, x, y):
                 self._show_platform_selector = not self._show_platform_selector
                 print("[台子选择] 打开面板" if self._show_platform_selector else "[台子选择] 关闭面板")
                 return
@@ -9023,19 +9025,22 @@ class MinimapRouteRecorder:
 
         self._seg_sum['map'] = self._seg_sum.get('map', 0) + time.time() - self._seg_tp  # [分段]小地图段
         self._seg_tp = time.time()
-        # === 【模块B】台子选择按钮（小地图左上方）===
-        # 点击弹出选择面板，可多选平台，选完关闭
-        btn_sel_x, btn_sel_y, btn_sel_w, btn_sel_h = map_display_x + 5, map_display_y + 5, 60, 20
-        self._btn_platform_selector = (btn_sel_x, btn_sel_y, btn_sel_w, btn_sel_h)
-        cv2.rectangle(frame, (btn_sel_x, btn_sel_y), (btn_sel_x+btn_sel_w, btn_sel_y+btn_sel_h), (60, 60, 60), -1)
-        cv2.rectangle(frame, (btn_sel_x, btn_sel_y), (btn_sel_x+btn_sel_w, btn_sel_y+btn_sel_h), (150, 150, 150), 1)
-        self._putcn(frame, "台子选择", btn_sel_x+5, btn_sel_y+14)  # PIL中文，位置与cv2一致
-        # 显示当前选中的平台数量
-        if self._selected_platforms:
-            sel_text = "已选:%d" % len(self._selected_platforms)
-            self._putcn(frame, sel_text, btn_sel_x+btn_sel_w+5, btn_sel_y+14, (0, 255, 0))
+        # === 【模块B】台子选择按钮（小地图左上方）=== 仅手动模式显示;随机=全图自由不看台(用户2026-09-25:二选一分支,永不并存)
+        if self.route_mode == "随机":
+            self._btn_platform_selector = None   # 随机分支:不绘制,点击入口(_btn为None)天然失效
         else:
-            self._putcn(frame, "全部", btn_sel_x+btn_sel_w+5, btn_sel_y+14, (200, 200, 200))
+            # 点击弹出选择面板，可多选平台，选完关闭
+            btn_sel_x, btn_sel_y, btn_sel_w, btn_sel_h = map_display_x + 5, map_display_y + 5, 60, 20
+            self._btn_platform_selector = (btn_sel_x, btn_sel_y, btn_sel_w, btn_sel_h)
+            cv2.rectangle(frame, (btn_sel_x, btn_sel_y), (btn_sel_x+btn_sel_w, btn_sel_y+btn_sel_h), (60, 60, 60), -1)
+            cv2.rectangle(frame, (btn_sel_x, btn_sel_y), (btn_sel_x+btn_sel_w, btn_sel_y+btn_sel_h), (150, 150, 150), 1)
+            self._putcn(frame, "台子选择", btn_sel_x+5, btn_sel_y+14)  # PIL中文，位置与cv2一致
+            # 显示当前选中的平台数量
+            if self._selected_platforms:
+                sel_text = "已选:%d" % len(self._selected_platforms)
+                self._putcn(frame, sel_text, btn_sel_x+btn_sel_w+5, btn_sel_y+14, (0, 255, 0))
+            else:
+                self._putcn(frame, "全部", btn_sel_x+btn_sel_w+5, btn_sel_y+14, (200, 200, 200))
 
         # === 梯删除按钮（小地图右上角，用户2026-09-09）：点一下进入待选→点梯子蓝线删该条，再点退出 ===
         btn_ld_w, btn_ld_h = 60, 20
@@ -15410,7 +15415,7 @@ class MinimapRouteRecorder:
                 base_w = _pmax - _pmin
             else:
                 base_w = x_max - x_min
-            _dist = max(15.0, base_w * random.uniform(0.15, 0.28))   # 回到界内15~28%台宽(不到中点)
+            _dist = max(15.0, base_w * random.uniform(0.15, 0.20))   # 回到界内15~20%台宽(用户2026-09-25定稿,原15~28%太靠内)
             target = (x_max - _dist) if side == 'right' else (x_min + _dist)
             self._platform_edge_cmd = {'side': side, 'dir': dirn, 'target': float(target), 'ts': time.time() * 1000}
             _debug_log("[平台边界] 守护触线 光点x=%.0f 端点[%.0f~%.0f] 越%s→朝%s回 目标=%.0f"
@@ -15429,6 +15434,12 @@ class MinimapRouteRecorder:
         self._platform_edge_cmd = None
         self._platform_retreat = None
         self._platform_retreat_active = False
+        # 谁关谁开:回退主权结束(完成/超时/卡住/丢点/被垂直动作打断)统一恢复B锁,下帧热怪表重锁同台最近;
+        # 若紧接着进爬梯/下跳,垂直流程会在起跳前自行再关锁,不冲突
+        try:
+            self._set_b_lock_enabled(True, '平台回退结束·重锁')
+        except Exception:
+            pass
         if msg:
             _debug_log(msg)
             if exception:
@@ -15459,6 +15470,8 @@ class MinimapRouteRecorder:
                   'last_px': None, 'last_progress_ts': now}
             self._platform_retreat = st
             self._platform_retreat_active = True
+            # 回退独占:关B锁并当场清锁(识怪/怪表照跑),回退段B不产pursue、不与朝内键抢方向;收口统一开锁重锁
+            self._set_b_lock_enabled(False, '平台越线回退·关锁清锁')
             try:
                 self._release_combat_move()
                 self._key_up(VK_LEFT)
@@ -17198,6 +17211,7 @@ class MinimapRouteRecorder:
 
     def _start_runtime_detection(self):
         # 运行层(方案B):怪物识别(模板+YOLO+血条)+移动监管+边界守护,点"开始运行"才启动、停止即停(幂等,主循环按_running收敛)
+        self._b_lock_enabled = True  # 每次F10锁怪总开关复位为开(防上次回退/爬梯/下跳关锁态中F12残留False致本次不锁怪)
         if not (self._recognize_thread and self._recognize_thread.is_alive()):
             self._monster_running = True
             self._recognize_thread = threading.Thread(target=self._recognize_loop, daemon=True, name="detect_monster")
