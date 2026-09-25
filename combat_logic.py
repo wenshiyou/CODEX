@@ -111,7 +111,8 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
                   allow_cross=True, metric=None, same_platform_fn=None,
                   slope_y_up=None, combat_mode='random',
                   manual_same_y=MANUAL_SINGLE_Y_GAP,
-                  allow_cross_up=True, allow_cross_down=True):
+                  allow_cross_up=True, allow_cross_down=True,
+                  manual_x_band=None):
     """按"这套打法实际够得着的高度"把怪分三档(用户2026-09-23定稿,与主线high_slope同一口径):
       · 同层档 cand(元素(x_gap,cx,cy)):站直/走近/原地主攻够得到——
           上方 |dy|<=attack_y_up(主攻上沿,开跳高也只给主攻带100,不含跳高段);
@@ -155,6 +156,13 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
             cy = y2
             x_gap = abs(cx - px)
             dy = cy - py
+        # 平台台界X带门(用户2026-09-26):manual_x_band=(屏幕xlo,xhi),主线以人物屏幕点+光点绿线数据界按
+        # 瞬移实测X比例反算;平台(单台/多台同一分支)只锁带内怪,带外=本台绿线外(相邻台/屏外)一律不进任何桶,
+        # 从源头不锁/不追/不瞬移台外怪(治同高异台远怪把人拉出台、越线回退拉锯)。自由random不传(None)=不过滤。
+        if combat_mode in ('single', 'multi') and manual_x_band is not None:
+            _bxlo, _bxhi = manual_x_band
+            if cx < _bxlo or cx > _bxhi:
+                continue
         if selected_platforms:
             pf = get_monster_platform(cx, cy)
             if pf:
@@ -276,7 +284,8 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                          combat_mode='random', manual_same_y=MANUAL_SINGLE_Y_GAP,
                          allow_cross_up=True, allow_cross_down=True,
                          lock_grace_ms=10**9,
-                         side_anchor_x=None):
+                         side_anchor_x=None,
+                         manual_x_band=None):
     """决策核心:build_buckets 三档分桶 → 维持当前锁定 → pick_from_buckets 选新。
 
     分档(用户2026-09-23定稿,治同层/跳高混池逐帧换锁):
@@ -290,7 +299,8 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
         px, py, monsters, selected_platforms, skill_range, get_monster_platform,
         attack_y_up, attack_y_down, group_priority, aoe_y_up, aoe_y_down,
         allow_cross, metric, same_platform_fn, slope_y_up,
-        combat_mode, manual_same_y, allow_cross_up, allow_cross_down)
+        combat_mode, manual_same_y, allow_cross_up, allow_cross_down,
+        manual_x_band=manual_x_band)
 
     _skeys = set((r[1], r[2]) for r in slope_rows)
     plane = [r for r in cand if (r[1], r[2]) not in _skeys]
@@ -471,7 +481,7 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                 same_platform_fn=None, metric=None, slope_y_up=None,
                 combat_mode='random', manual_same_y=MANUAL_SINGLE_Y_GAP,
                 allow_cross_up=True, allow_cross_down=True,
-                lock_grace_ms=10**9):
+                lock_grace_ms=10**9, manual_x_band=None):
     """组合 select_combat_target + lock_status + decide_attack，得到本tick完整的战斗决策。
 
     参数: 见各部分；now/lock_time 单位ms。
@@ -520,7 +530,8 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                             combat_mode=combat_mode, manual_same_y=manual_same_y,
                             allow_cross_up=allow_cross_up, allow_cross_down=allow_cross_down,
                             lock_grace_ms=lock_grace_ms,
-                            side_anchor_x=(lock[0] if lock else None))
+                            side_anchor_x=(lock[0] if lock else None),
+                            manual_x_band=manual_x_band)
     # 技能施放决策
     skill = 'none'
     if d['target'] is not None and d['dist'] is not None:
