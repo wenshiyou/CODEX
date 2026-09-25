@@ -529,7 +529,7 @@ WD_BG_MOTION_MIN = 2      # 上+右两块必须同时在动,才判定背景在�
 WD_JUMP_GATE_MS = 1000    # 跳后静默(用户2026-09-09定最简单方案)：起跳后1秒内不做背景帧差(跳跃空中镜头会上下抖,1秒必已落地),落地后再接着对比,不搞离地/落地状态机
 MOVE_KEY_MIN_MS = 100     # 方向键持续按住≥此值才算"有效移动";出手掰脸转身仅60ms,更短轻点不算移动、不解除原地钉基点(用户2026-09-24)
 CHAR_HOLD_MAX_MS = 1500   # 判定原地但人物特征丢失时,屏幕基点最多沿用上一可信点的时长;超时交黑框/全图重搜(短时保持,不是坐标冻结)
-ATTACT_STANCE_MS = 700    # 钉基点"正在攻击"窗:最近主攻/群攻出手在700ms内才算站桩输出中(主攻默认300ms一点,覆盖动作+空怪判定余量);停手走位/追击即解除钉住
+ATTACT_STANCE_MS = 500    # 钉基点"正在攻击"窗:最近主攻/群攻出手在500ms内才算站桩输出中(用户2026-09-25定稿700->500;主攻/群攻键均读面板atk1_key/aoe_key,不写死x/z);停手走位/追击即解除钉住
 CHAR_STANCE_JUMP_PX = 50  # 站桩输出态屏幕基点单帧最大可信位移;超过=技能特效误匹配错点、丢弃钉上一可信点(实测正常相邻帧<20px、特效误匹配一帧跳171~239px)
 # === 打怪区域·小地图边界(用户2026-09-11定稿:左右=手划竖线,上下=点选平台绿线) ===
 # 原理:左右边界=用户拖两条竖线(l/r),黄光点越竖线→守护线程发令、主线朝内固定拉回一段;
@@ -14447,11 +14447,8 @@ class MinimapRouteRecorder:
             self._role_pos_src = _src2
             self._last_char_match_pos = tr["foot"]; self._last_char_match_time = now
             return tr["foot"]
-        # 黑框/全图都没找到(用户2026-09-24定稿):坐标钉在上一可信点原地不动——不消失、不被误匹配拽飞、不返回None让下游停手发呆;
-        # 丢点期间人物线程仍每帧在黑框小窗找、满2秒转全图(只人名)找,新可信点一出现即在上文覆盖last恢复跟随。仅冷启动从无last才返回None。
-        if last is not None:
-            self._role_pos_src = 'hold'
-            return tr["foot"] if tr.get("foot") is not None else last
+        # 视觉层找不到真锚点一律返回None(用户2026-09-25定稿,不再无限沿用旧点):是否原地钉点交主循环_apply_char_detection按
+        # "站桩攻击中丢人名才钉1.5s、非攻击不钉"决定;黑框即刻找、满2秒转全屏只找人名的重捕在上方持续进行,找到真点下一帧即恢复。
         self._role_pos_src = 'none'
         return None
 
@@ -14841,7 +14838,7 @@ class MinimapRouteRecorder:
     def _char_anchor_trustable(self, rawp, now_ms):
         """本帧识别点rawp能否采信进正式屏幕基点。非站桩态恒True(走路/爬梯/瞬移实时跟随、绝不门控);
         站桩态只接受相对上一可信基点的小幅渐变(<=CHAR_STANCE_JUMP_PX),一帧大跳变=技能特效里误匹配到别处的错点
-        (实测站桩正常相邻帧<20px、特效误匹配一帧跳171~239px),返回False交_char_pos_hold_ok钉住上一可信点。
+        (实测站桩正常相邻帧<20px、特效误匹配一帧跳171~239px),返回False交_apply_char_detection钉住上一可信点。
         冷启动(还没有上一可信点)直接采信。"""
         if not self._char_stance_locked(now_ms):
             return True
@@ -14850,16 +14847,37 @@ class MinimapRouteRecorder:
             return True
         return float(np.hypot(rawp[0] - prev[0], rawp[1] - prev[1])) <= CHAR_STANCE_JUMP_PX
 
-    def _char_pos_hold_ok(self, now_ms):
-        """人物特征基点【丢失,或站桩中出大跳变错点】时,是否把屏幕基点钉在上一可信点(用户2026-09-24定稿,纯距离门)。
-        条件:①有上一可信点 ②距最后真实坐标<=CHAR_HOLD_MAX_MS(超时交黑框/全图重搜,防钉死) ③站桩输出态
-        (_char_stance_locked:无有效移动键+没起跳/爬梯/瞬移/腾空+正在攻击窗内)。不再用田字背景静止:田字框本身由基点定位、基点错它跟着错
-        =循环论证,已摘除;田字检测本体保留(待搬小地图)。"""
-        if not self._player_screen_pos:
-            return False
-        if now_ms - int(getattr(self, '_char_last_real_t', 0) or 0) > CHAR_HOLD_MAX_MS:
-            return False
-        return self._char_stance_locked(now_ms)
+    def _apply_char_detection(self, rawp, now_ms):
+        """消费人物识别线程本帧结果,产出正式屏幕基点_player_screen_pos(用户2026-09-25定稿,手动/随机两模式通用)。三分支边界明确:
+        ①采信真锚点:非站桩攻击态(走路/追击/爬梯/瞬移)任何锚点(name/脸/后脑/宠物)都实时采信、坐标不冻结;站桩攻击态只采信人名(name)
+          ——攻击特效里脸/宠物/特效点一律不顶替,且再过_char_anchor_trustable渐变闸(<=CHAR_STANCE_JUMP_PX)。
+        ②站桩攻击中丢人名:原地钉点最多CHAR_HOLD_MAX_MS=1.5s,坐标/_player_screen_t/_char_last_real_t一律不刷新(否则连续攻击每帧把
+          "最后真实时间"刷成当前、钉点窗被无限延长=旧bug);识别线程并行从丢失0s起黑框找、满2s转全屏只找人名,人名回来下一帧即走①恢复。
+        ③其余(非攻击丢失 / 攻击钉点超1.5s人名仍没回):不钉点,坐标立刻放空,交识别线程黑框→全屏重捕,找到真点即恢复,不拿旧坐标乱锁乱打。
+        返回 'name'/'anchor'/'hold'/'none' 供诊断。"""
+        _src = getattr(self, '_role_pos_src', None)
+        _stance = self._char_stance_locked(now_ms)
+        if rawp is not None and (not _stance or _src == 'name') \
+                and self._char_anchor_trustable(rawp, now_ms):
+            self._player_screen_pos = rawp
+            self._player_screen_t = self._raw_char_t   # 透传坐标时间戳,瞬移校验据此判陈旧、坐标陈旧观测据此报警
+            self._char_last_real_t = now_ms
+            return 'name' if _src == 'name' else 'anchor'
+        _last_real = int(getattr(self, '_char_last_real_t', 0) or 0)
+        if _stance and self._player_screen_pos and 0 <= now_ms - _last_real <= CHAR_HOLD_MAX_MS:
+            _left = CHAR_HOLD_MAX_MS - (now_ms - _last_real)
+            self._rlog_throttle('char_hold',
+                                "攻击中基点丢失·原地钉点(黑框/全屏只找人名重认中,余%dms)" % int(_left),
+                                500, log='combat')
+            return 'hold'
+        if self._player_screen_pos is not None:
+            self._rlog_throttle('char_relock',
+                                "基点丢失·黑框重认中(%s)" % ("攻击钉点1.5s超时释放" if _stance else "非攻击不钉点"),
+                                500, log='combat')
+        self._player_screen_pos = None
+        self._player_screen_t = self._raw_char_t
+        return 'none'
+
 
     def _note_freq_event(self, key, limit, win_ms, msg):
         """滑动窗高频事件计数:窗内达limit次往【异常】栏报一条,窗长冷却防刷屏。仅主线程调用。"""
@@ -18352,16 +18370,8 @@ class MinimapRouteRecorder:
                         # 人物/怪/YOLO/血条 都由后台检测线程同一帧算好了，主线程只读结果+过滤假怪（主线程不再做重活）
                         _rawp = self._raw_char_pos
                         _hold_ms = int(time.time() * 1000)
-                        if _rawp is not None and self._char_anchor_trustable(_rawp, _hold_ms):
-                            self._player_screen_pos = _rawp
-                            self._player_screen_t = self._raw_char_t   # 透传坐标时间戳,瞬移校验据此判陈旧、坐标陈旧观测据此报警
-                            self._char_last_real_t = _hold_ms
-                        elif self._char_pos_hold_ok(_hold_ms):
-                            # 原地钉基点(用户2026-09-24纯距离门):站桩输出中特征点丢失、或一帧大跳变(特效误匹配错点),沿用上一可信点(限时CHAR_HOLD_MAX_MS);pos/t都不刷新
-                            self._rlog_throttle('char_hold', "人物基点原地保持(%d,%d)" % (int(self._player_screen_pos[0]), int(self._player_screen_pos[1])), 500, log='combat')
-                        else:
-                            self._player_screen_pos = None
-                            self._player_screen_t = self._raw_char_t
+                        # 三分支消费人物点(用户2026-09-25定稿):攻击中丢人名钉原地1.5s不拿别的点顶、非攻击不钉立刻黑框/全屏重捕,详见_apply_char_detection
+                        self._apply_char_detection(_rawp, _hold_ms)
                         # 人物坐标常开打印(用户2026-09-18):坐标由检测线程常开生产、不依赖是否点运行,故在主循环透传处节流打到"打怪"日志,待机/运行都能看
                         if self._player_screen_pos is not None:
                             self._rlog_throttle('char_pos', "人物坐标=(%d,%d)" % (int(self._player_screen_pos[0]), int(self._player_screen_pos[1])), 500, log='combat')
