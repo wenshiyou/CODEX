@@ -17739,6 +17739,21 @@ class MinimapRouteRecorder:
         target = (t_dist, t_cx, t_cy)
         self._combat_locked_target = (t_cx, t_cy)
         self._combat_last_target_pos = (t_cx, t_cy)
+        # 【出手前·最新点复核(用户2026-09-26,治"锁别台怪空打")】B决策包可能在人物跨层/掉台/越线回退/战斗瞬移的
+        # 前一帧发布(包内state/dist按旧人物点),主线这一帧执行时人已到别层(实测包cast贴身dist=1、最新点Y差已183)。
+        # 平台模式(单台single/多台multi同一分支)包让cast近身打时,用本帧最新人物点复核:仍在同台Y带(40)且X进停步
+        # 射程才出手;否则判过期包——不按攻击键(杜绝对别台空打)、不沿用旧dist走近,松键等B下一帧用最新点重锁
+        # (识怪/B每帧热跑,下一帧即同台新锁或idle,不呆)。slope跳高/跨层cross/pursue走近不在此门;自由random不拦。
+        _pmv, _pcupv, _pcdnv = self._platform_cross_direction()
+        if _pmv in ('single', 'multi') and _dl.get('state') == 'cast':
+            _rdy = t_cy - py_layer
+            _rdx = abs(t_cx - px)
+            if not (-combat_logic.MANUAL_SINGLE_Y_GAP < _rdy < combat_logic.MANUAL_SINGLE_Y_GAP) or _rdx > stop_range:
+                self._release_combat_move()
+                self._release_all_keys()
+                _debug_log("[平台复核] 丢弃过期cast包 目标=(%d,%d) 最新人物=(%d,%d) X差%d Y差%d(同台带%d/停步射程%d),松键等B重锁" % (
+                    t_cx, t_cy, px, py_layer, _rdx, _rdy, combat_logic.MANUAL_SINGLE_Y_GAP, stop_range))
+                return
         # --- drop善后(动作层):B判死,主线只清出手反馈+上屏+当帧重选(纯最近不拉黑位置);跳高打空也走这(=普通空怪,不降级cross) ---
         if _dl.get('drop'):
             self._note_phantom_drop('空怪')   # 纯最近(2026-09-20):判死只放手当帧重选,不再拉黑位置
