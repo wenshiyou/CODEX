@@ -38,8 +38,9 @@ CROSS_X_HYST = 30
 CROSS_X_MAX = 300    # 跨层最大X差:X差>=300先pursue水平走近,靠近后仍超面板可达带才跨层(用户:X差<300)
 LOCK_GRACE_MS = 500   # 同层范围外旧锁连续脱检宽限:此时间内沿用旧锁走近,抗YOLO漏帧全屏横跳
 
-# 手动选台·单台模式同台Y容差(用户2026-09-24):单台就这么点地方,只锁与人物|Y差|<50的同台怪,超50=别的台一律不锁
-MANUAL_SINGLE_Y_GAP = 50
+# 平台模式(单台single+多台multi同一分支)同台Y容差(用户2026-09-26 50->40):只锁与人物|Y差|<40的同台怪,
+# 超40=别的台一律不锁(单台cross全关;多台仅对选中台方向走cross跨台);自由random模式不用此值、不受限。
+MANUAL_SINGLE_Y_GAP = 40
 
 
 def _mk(state, target, direction, dist, cross_candidates=None, group=None, tier=None):
@@ -131,17 +132,16 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
         if aoe_y_down is not None:
             _pool_y_down = max(_pool_y_down, aoe_y_down)
     # === 两套打怪规则(用户2026-09-24):同一套分桶代码按 combat_mode 收窄同层Y带/跨层方向,random逐行等价现状 ===
-    #  random 全图自由:同层带=面板(群攻放宽)、双向可跨层、跳高照开;
-    #  single 手动单台:只认|Y差|<manual_same_y(50)同台怪,跨层/跳高全关(上、下层怪一律不锁);
-    #  multi  手动多台:同层带=面板,跨层只放行"还有更高/更低选中台"的方向(allow_cross_up/down,主线按光点与选中台Y算)。
-    if combat_mode == 'single':
+    #  random 自由全图:同层带=面板(群攻放宽)、双向可跨层、跳高照开,不受manual_same_y限制;
+    #  single(单台)/multi(多台)=平台模式同一分支(用户2026-09-26):同台Y带统一=manual_same_y(40)、跳高全关;
+    #    唯一区别是跨台cross——single全关(上下层怪都不锁),multi仅放行"还有更高/更低选中台"的方向(allow_cross_up/down)。
+    if combat_mode in ('single', 'multi'):
         eff_up, eff_down = manual_same_y, manual_same_y
-        cross_up = cross_down = False
         eff_slope = None
-    elif combat_mode == 'multi':
-        eff_up, eff_down = _pool_y_up, _pool_y_down
-        cross_up, cross_down = bool(allow_cross_up), bool(allow_cross_down)
-        eff_slope = slope_y_up
+        if combat_mode == 'single':
+            cross_up = cross_down = False
+        else:
+            cross_up, cross_down = bool(allow_cross_up), bool(allow_cross_down)
     else:
         eff_up, eff_down = _pool_y_up, _pool_y_down
         cross_up = cross_down = bool(allow_cross)
@@ -163,8 +163,8 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
             else:
                 continue
         if x_gap >= CROSS_X_MAX:
-            # X差超300先pursue水平走近(用户:X>=300先走过去);单台模式远处怪也要Y在同台50带内才走近,否则=别台丢弃
-            if combat_mode == 'single':
+            # X差超300先pursue水平走近(用户:X>=300先走过去);平台模式(单台/多台)远处怪也要Y在同台40带内才走近,否则=别台丢弃
+            if combat_mode in ('single', 'multi'):
                 if (dy < 0 and -dy < eff_up) or (dy >= 0 and dy < eff_down):
                     cand.append((x_gap, cx, cy))
                 continue
@@ -172,7 +172,7 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
             continue
         if dy < 0:
             _ay = -dy
-            if combat_mode == 'single':
+            if combat_mode in ('single', 'multi'):
                 _within = _ay < eff_up
             else:
                 _within = eff_up is not None and _ay <= eff_up
@@ -185,7 +185,7 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
                 if cross_up:
                     cross.append((x_gap, cx, cy))                     # 跨层上层→梯子(单台关/多台仅上方还有选中台)
         else:
-            if combat_mode == 'single':
+            if combat_mode in ('single', 'multi'):
                 _within = dy < eff_down
             else:
                 _within = (eff_down is None or dy <= eff_down)
@@ -334,6 +334,16 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                 _d, cx, cy = locked_cross
                 return _mk('cross', (cx, cy), _dir_to(cx, px), _d, cross, tier='cross')
         else:
+            _gdy0 = target_cy - py
+            # 平台模式(单台/多台同一分支):旧锁本帧已掉出同台Y带(人物跨层/掉台/越线回退后,目标在别的台),
+            # 不管它是否还活着都不许续cast/pursue对别台空打、更不许瞬移出台——立即落pick按当帧怪表重选:
+            # 同台plane空、跨台cross也空->idle/巡游;多台cross有选中台怪才走跨台。自由模式不受此限。
+            if combat_mode in ('single', 'multi') and not (-eff_up < _gdy0 < eff_down):
+                return pick_from_buckets(px, py, cand, cross, cast_range,
+                                         group_priority, group_radius, aoe_dual, cur_cross,
+                                         slope_rows=slope_rows, skill_range=skill_range,
+                                         side_anchor_x=_anchor_x,
+                                         allow_switch=(_anchor_x is None or lock_grace_ms >= LOCK_GRACE_MS))
             # 锁定目标本帧从怪表脱检(YOLO漏帧/特效遮挡/硬裁)。
             # 仍活着(target_alive=血条或伤害数字在)就按上帧档位续锁续打,跳打/原地打都不打断;
             # 真死了(血条、伤害都没)才落pick重选最近(表空=idle),绝不沿旧坐标空打。
@@ -349,7 +359,7 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
             #  上层cross/超远/超同层带→不补;旧"判死cross无条件续旧坐标"已物理删(自我续命根因),
             #  落pick按当帧最新怪表重选:身边同层怪立刻接管,同层空且cross桶有怪重选一只cross,全空idle。
             _gdy = target_cy - py
-            if combat_mode == 'single':
+            if combat_mode in ('single', 'multi'):
                 _gin_y = (-eff_up < _gdy < eff_down)
             else:
                 _gin_y = _in_band(target_cy, py, eff_up, eff_down)

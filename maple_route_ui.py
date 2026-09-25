@@ -651,6 +651,11 @@ GREEN_SLOPE_MIN = 6       # 绿线Y波动>6px才算坡(用户2026-09-24口径:5�
 LAYER_Y_GAP = 150         # 用户2026-09-05：怪脚Y与人物Y差≤150px=同平台怪（超150=跨层/不同平台）；简单直接不靠绿线
 # === 同层巡游找怪(用户2026-09-19):同层无怪也无跨层候选时,朝小地图光点"远的一侧竖线"走70%,边走边找怪、遇怪即停不补齐;一次结束冷却15s ===
 ROAM_SIDE_RATIO = 0.70    # 朝远侧竖线走该侧剩余距离的比例
+# 真机标定(2026-09-26):光点/绿线/台界都在原始小地图【数据坐标】(FIXED_W=340)。水平瞬移一次在数据坐标的阶跃约
+# 20~23(日志瞬移前后光点实测;放大显示窗量的42px÷动态放大MAP_SCALE(近2倍)≈21,显示窗尺不可直接当数据坐标)。
+# 面板瞬移距离是屏幕px,数据步长=面板瞬移距离×(22/250≈0.088),面板250→数据约22(取略偏大防临界擦边越台);
+# 光点到该侧台端剩余<=此步长(闪了必越界/擦边)就不闪、改走路,防一闪越出台子。
+TELEPORT_SCREEN_TO_MAP_X = 22.0 / 250.0
 ROAM_COOLDOWN_MS = 15000  # 一次巡游结束(遇怪/走完)后冷却,期内不主动巡游(防左右来回晃)
 ROAM_MIN_SIDE_PX = 24     # 远侧距离(小地图px)小于此=已贴边没空间,改短冷却3s不巡游
 ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人物上方+60内可直打；>60够不着→走近)。用户2026-09-06：80→60
@@ -1838,7 +1843,7 @@ class MinimapRouteRecorder:
         else:
             print("Map area: 未检测到（请先绑定游戏窗口或F9校准）")
         print("方案 %d 已加载: %d 平台, %d 梯子 (模式: %s)" % (
-            self.current_route, len(self.platforms), len(self.ladders), self.route_mode))
+            self.current_route, len(self.platforms), len(self.ladders), self._mode_display_name()))
         print("UI: 左上角=刷新/手动/方案X  第一排=平台/梯子/保存▼/方案▼")
         print("    第二排=清除(绿=平台)/清除(蓝=梯子)/模式▼/清除(橙=方案)")
         print("=== 梯子录制=旧版原理(直接收集光点画面像素坐标,与平台同一空间);已移除滚动相位相关和手动编辑功能 ===\n")
@@ -2965,10 +2970,15 @@ class MinimapRouteRecorder:
             print("[清梯子] 没有可删除的梯子")
 
 
+    def _mode_display_name(self):
+        """打怪模式【显示名】(仅界面/日志):内部 route_mode 值仍是 '随机'/'手动'(配置与全部判断不改名,旧配置兼容),
+        界面/日志统一显示 自由/平台(用户2026-09-26:随机→自由、手动→平台,只改名字)。"""
+        return '自由' if getattr(self, 'route_mode', '手动') == '随机' else '平台'
+
     def _dropdown_items(self):
         """返回当前下拉菜单的菜单项列表（仅mode下拉保留）"""
         if self._dropdown == "mode":
-            return ["手动", "随机"]
+            return ["平台", "自由"]  # 仅显示名;写回值仍按 item_idx 映射 手动/随机(见 _handle_dropdown_item)
         return []
 
     # ===== 方案系统独立窗口 =====
@@ -4864,7 +4874,7 @@ class MinimapRouteRecorder:
                 self._show_platform_selector = False  # 切随机收起选台面板(随机分支不看台、按钮隐藏)
             self._save_route_config()
             _mode_txt = "全图自由打怪" if self.route_mode == "随机" else "定平台打怪(看台子选择)"
-            print("[模式] 切换为: %s（%s, F10启动/F12停止）" % (self.route_mode, _mode_txt))
+            print("[模式] 切换为: %s（%s, F10启动/F12停止）" % (self._mode_display_name(), _mode_txt))
             self._add_log("打怪模式:%s" % _mode_txt)
 
     # ===== 随机模式运行逻辑 =====
@@ -4924,7 +4934,7 @@ class MinimapRouteRecorder:
         _mode_txt = "全图自由" if self.route_mode == "随机" else ("定平台(选中%d台)" % len(self._selected_platforms))
         print("[启动] 战斗已启动（%s）" % _mode_txt)
         self._add_log("战斗已启动（%s）" % _mode_txt)
-        _debug_log("[启动] 运行已触发, _running=True, _random_running=True, mode=%s" % self.route_mode)
+        _debug_log("[启动] 运行已触发, _running=True, _random_running=True, mode=%s" % self._mode_display_name())
 
     def _stop_random(self):
         """停止随机模式：松开所有按键"""
@@ -4938,9 +4948,10 @@ class MinimapRouteRecorder:
         self._running = False
         if self._monster_overlay_running:
             self._stop_monster_overlay()
-        print("[随机] 模式已停止")
-        self._add_log("随机模式已停止")
-        _debug_log("[随机] 模式已停止")
+        _mdn = self._mode_display_name()
+        print("[%s] 模式已停止" % _mdn)
+        self._add_log("%s模式已停止" % _mdn)
+        _debug_log("[%s] 模式已停止" % _mdn)
 
     def _random_pick_route(self):
         """从勾选的方案中随机选一个（排除上一个避免连续重复）；没勾选返回None"""
@@ -6432,7 +6443,7 @@ class MinimapRouteRecorder:
                             "右" if dx > 0 else "左", px))
                     elif on_manual_pf:
                         self._move_stuck_jump_time = now_ms
-                        _debug_log("[移动] 台内卡住不跳(手动选台) 方向=%s X=%.0f" % ("右" if dx > 0 else "左", px))
+                        _debug_log("[移动] 台内卡住不跳(平台选台) 方向=%s X=%.0f" % ("右" if dx > 0 else "左", px))
                 self._move_stuck_last_x = px
                 self._move_stuck_last_time = now_ms
 
@@ -6530,7 +6541,8 @@ class MinimapRouteRecorder:
             if (bool(_rtp_key) and _rtp_x > 0
                     and now_ms - getattr(self, '_combat_last_h_teleport', 0) > TP_COOLDOWN_MS
                     and now_ms >= getattr(self, '_combat_tp_post_until', 0)
-                    and not _rbound and _rrem > 0.3 * _rspan):
+                    and not _rbound and _rrem > 0.3 * _rspan
+                    and not self._manual_tp_leaves_platform(_rside, _rtp_x)):
                 # 配合移动:先朝巡游方向按住左右键(_move_horizontal同款_random_move_keys),瞬移不单独用
                 if _rsgn > 0:
                     if VK_LEFT in self._random_move_keys:
@@ -7238,6 +7250,31 @@ class MinimapRouteRecorder:
     # ========================================================================
     # 【模块B】平台判定优化：配合小地图绿线和人物光点，判定怪在哪个平台
     # ========================================================================
+
+    def _manual_tp_leaves_platform(self, move_dir, tp_screen_dist):
+        """手动选台·水平瞬移"闪一步会不会越出台子"判定(用户2026-09-26定稿)。
+        真机比率 屏幕250px=小地图40px(TELEPORT_SCREEN_TO_MAP_X=0.16),把面板瞬移距离换算成小地图一步步长;
+        光点到该向台端的剩余小地图距离<=一步步长(闪了必越界/擦边)->True=不闪、改走路(走路由_combat_at_locked_edge到边停住)。
+        随机/未选台(_locked_platform_x_range返回None)、非水平方向->False不拦(全图自由);竖直瞬移不查X台界。
+        手动模式光点丢失->True不盲闪(宁走不冲台)。"""
+        if move_dir not in ("left", "right"):
+            return False
+        xr = self._locked_platform_x_range()
+        if xr is None:
+            return False
+        dot = getattr(self, "_player_map_pos", None)
+        if not dot:
+            return True
+        try:
+            _step = max(0.0, float(tp_screen_dist)) * TELEPORT_SCREEN_TO_MAP_X
+            _dx = float(dot[0]); _xmin = float(xr[0]); _xmax = float(xr[1])
+        except Exception:
+            return True
+        if _step <= 0:
+            return False
+        if move_dir == "right":
+            return (_xmax - _dx) <= _step
+        return (_dx - _xmin) <= _step
 
     def _effective_scale(self):
         """【模块B】返回最终倍率(总值) = 检测值 + 手动偏移值。
@@ -8021,7 +8058,7 @@ class MinimapRouteRecorder:
             else:
                 # 【用户2026-09-23】F10统一走启动入口(随机/手动都从这起),标志/初始化/监管线一次性置齐
                 self._start_random()
-                _debug_log("[启动] F10 已触发, hwnd=%s, mode=%s" % (self.hwnd, self.route_mode))
+                _debug_log("[启动] F10 已触发, hwnd=%s, mode=%s" % (self.hwnd, self._mode_display_name()))
                 try:
                     self._rlog("战斗已启动(F10)", LOG_OK, log='behavior')
                 except Exception:
@@ -8662,7 +8699,7 @@ class MinimapRouteRecorder:
                 if self._monster_overlay_running:
                     self._stop_monster_overlay()
                 self._add_log("战斗已停止")
-                _debug_log("[停止] 手动模式已停止")
+                _debug_log("[停止] %s模式已停止" % self._mode_display_name())
             return
 
         # 8. 子标签页（人物特征弹窗/怪物数据）
@@ -8996,7 +9033,7 @@ class MinimapRouteRecorder:
         # 而名字按列表个数起(方案5/方案6),id与名字错位→实际用"方案6"(id=route_002)却显示"方案2"。
         # 改为查当前方案的name显示,和方案列表/用户认知永远一致;查不到才退回底层编号。
         if self.route_mode == "随机":
-            plan_label = "随机"
+            plan_label = "自由"
         else:
             _cur_plan, _ = self._find_plan(num_to_plan_id(self.current_route))
             plan_label = (_cur_plan.get("name") if _cur_plan and _cur_plan.get("name")
@@ -9217,7 +9254,7 @@ class MinimapRouteRecorder:
                 iy = menu_y1 + i * DROPDOWN_ITEM_H
                 if i > 0:
                     cv2.line(frame, (bx + 3, iy), (bx + bw - 4, iy), (85, 85, 85), 1)
-                is_current = (self._dropdown == "mode" and text == self.route_mode)
+                is_current = (self._dropdown == "mode" and text == self._mode_display_name())
                 if is_current:
                     cv2.rectangle(frame, (bx + 1, iy + 1), (bx + bw - 2, iy + DROPDOWN_ITEM_H - 1), (0, 70, 0), -1)
                 color = (0, 255, 0) if is_current else (240, 240, 240)
@@ -15388,7 +15425,7 @@ class MinimapRouteRecorder:
                 if getattr(self, 'route_mode', '手动') != '随机' and not getattr(self, '_platform_guard_warned', False):
                     self._platform_guard_warned = True
                     try:
-                        self._rlog("手动模式未勾选任何台子,平台边界守护不生效;请在台子选择勾选要守的台", log='behavior')
+                        self._rlog("平台模式未勾选任何台子,平台边界守护不生效;请在台子选择勾选要守的台", log='behavior')
                     except Exception:
                         pass
                 return
@@ -17896,7 +17933,14 @@ class MinimapRouteRecorder:
                                     "打怪区域:刚从%s侧拉回,冷却内不水平瞬移、改走路靠近(防闪回线上死循环)" % move_dir,
                                     800, log='behavior')
             # ①水平优先:配了X且水平差≥X阈值→按住水平方向+瞬移(不管Y差)
-            if _tp_ready and _tp_x > 0 and t_dist >= _tp_x and not _tp_bound_block:
+            if _tp_ready and _tp_x > 0 and t_dist >= _tp_x and not _tp_bound_block \
+                    and self._manual_tp_leaves_platform(move_dir, _tp_x):
+                # 平台选台:朝该向闪一步会越出台子->不瞬移,节流说明一次,随后落走路(到边硬闸停住)
+                self._rlog_throttle('manual_tp_edge',
+                    "平台选台:朝%s到台端剩余不足一闪(一步约%.0f小地图px),不瞬移改走路防越台" % (
+                        move_dir, _tp_x * TELEPORT_SCREEN_TO_MAP_X), 1000, log='behavior')
+            if _tp_ready and _tp_x > 0 and t_dist >= _tp_x and not _tp_bound_block \
+                    and not self._manual_tp_leaves_platform(move_dir, _tp_x):
                 # 用户2026-09-05：追怪稳稳按住方向键连续走，不停顿
                 self._set_combat_move(move_dir)
                 # 位移检测：按住方向却没走=卡住→已登记【独占解卡】，本帧停手
