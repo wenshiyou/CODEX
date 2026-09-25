@@ -656,9 +656,9 @@ ROAM_SIDE_RATIO = 0.70    # 朝远侧竖线走该侧剩余距离的比例
 # 面板瞬移距离是屏幕px,数据步长=面板瞬移距离×(22/250≈0.088),面板250→数据约22(取略偏大防临界擦边越台);
 # 光点到该侧台端剩余<=此步长(闪了必越界/擦边)就不闪、改走路,防一闪越出台子。
 TELEPORT_SCREEN_TO_MAP_X = 22.0 / 250.0
-# 平台选怪台界X带(用户2026-09-26):绿线数据界反算成屏幕可达带时左右各内缩的屏幕px,吃X比例/光点/录制误差,
-# 保证带内确属本台、带外相邻台怪被滤掉而台内怪零误伤。
-PLATFORM_BAND_SCREEN_MARGIN = 35.0
+# 平台选怪方向门(用户2026-09-26,零屏幕换算):光点到选中台绿线【数据坐标】端剩余<=此值即判该侧已到台边,
+# 该侧、停步射程外的怪不再锁(追它必出台);射程内脸上的怪照打。与走位到边硬闸同口径,只认光点+绿线不涉倍率。
+PLATFORM_REACH_EDGE_MAP = 10.0
 ROAM_COOLDOWN_MS = 15000  # 一次巡游结束(遇怪/走完)后冷却,期内不主动巡游(防左右来回晃)
 ROAM_MIN_SIDE_PX = 24     # 远侧距离(小地图px)小于此=已贴边没空间,改短冷却3s不巡游
 ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人物上方+60内可直打；>60够不着→走近)。用户2026-09-06：80→60
@@ -7279,32 +7279,23 @@ class MinimapRouteRecorder:
             return (_xmax - _dx) <= _step
         return (_dx - _xmin) <= _step
 
-    def _platform_screen_x_band(self, screen_px):
-        """平台选怪·本台屏幕可达X带(用户2026-09-26,治"同高异台远怪被锁、瞬移拉出台、越线回退拉锯")。
-        以人物屏幕点screen_px为基准,把选中台绿线【数据坐标】左右端用瞬移实测X比例(数据->屏幕=1/0.088)
-        反算成游戏窗口屏幕X带(bxlo,bxhi):怪屏幕中心X落带内才许B锁,带外=本台绿线外(相邻台/屏外)不锁不追不瞬移。
-        只用 光点+录制绿线+瞬移X比例(走位已验证的同一套),不碰已停用的怪->小地图倍率(_effective_scale)。
-        自由/未选台/光点或台界缺失->None(不过滤);多台取选中台绿线并集最左最右(跨台缺口本就要跨,口径同走位台界)。"""
+    def _platform_reachable_sides(self):
+        """平台选怪·左右方向可达(用户2026-09-26,零屏幕换算;替代已废的屏幕X带反算——固定比例在镜头卷动/
+        边缘钳制下偏窄会误滤同台怪)。纯用光点对选中台绿线【数据坐标】端:光点到该侧台端剩余>PLATFORM_REACH_EDGE_MAP
+        (没走到走位硬闸停步线)=该侧可达True。与_combat_at_locked_edge/_manual_tp_leaves_platform同口径,只认光点+绿线、
+        不碰屏幕↔数据比例/倍率。自由/未选台/光点或台界缺失->(True,True)不锁死(不误停同台打怪)。"""
         try:
             _pmv, _, _ = self._platform_cross_direction()
             if _pmv not in ('single', 'multi'):
-                return None
+                return True, True
             _xr = self._locked_platform_x_range()
             _dot = getattr(self, '_player_map_pos', None)
-            if _xr is None or not _dot or _dot[0] is None or screen_px is None:
-                return None
-            _k = (1.0 / TELEPORT_SCREEN_TO_MAP_X) if TELEPORT_SCREEN_TO_MAP_X > 0 else 0.0
-            if _k <= 0:
-                return None
-            _dx = float(_dot[0]); _xmin = float(_xr[0]); _xmax = float(_xr[1]); _pxf = float(screen_px)
-            _m = float(PLATFORM_BAND_SCREEN_MARGIN)
-            _bxlo = _pxf - (_dx - _xmin) * _k + _m
-            _bxhi = _pxf + (_xmax - _dx) * _k - _m
-            if _bxhi <= _bxlo:
-                return None
-            return (_bxlo, _bxhi)
+            if _xr is None or not _dot or _dot[0] is None:
+                return True, True
+            _dx = float(_dot[0]); _xmin = float(_xr[0]); _xmax = float(_xr[1]); _r = float(PLATFORM_REACH_EDGE_MAP)
+            return (_dx - _xmin) > _r, (_xmax - _dx) > _r
         except Exception:
-            return None
+            return True, True
 
     def _effective_scale(self):
         """【模块B】返回最终倍率(总值) = 检测值 + 手动偏移值。
@@ -17450,12 +17441,18 @@ class MinimapRouteRecorder:
             _grace_ms = now_ms - getattr(self, '_b_lock_last_seen_ms', now_ms)
         else:
             _grace_ms = 10**9
-        _mx_band = self._platform_screen_x_band(px)   # 平台选怪台界X带(屏幕可达带);自由/未选台/光点缺失=None不过滤
+        _reach_l, _reach_r = self._platform_reachable_sides()   # 平台方向门(光点对绿线数据端,零屏幕换算);自由/未选台=(True,True)
+        if _pmode in ('single', 'multi') and now_ms - getattr(self, '_reach_dbg_last', -99999) >= 1500:
+            self._reach_dbg_last = now_ms
+            _debug_log("[平台方向门] 左可达=%s 右可达=%s 光点X=%s 台界=%s" % (
+                _reach_l, _reach_r,
+                (self._player_map_pos[0] if getattr(self, '_player_map_pos', None) else None),
+                self._locked_platform_x_range()))
         _dl = combat_logic.combat_step(
-            # 平台选怪约束(用户2026-09-26):不靠怪→小地图倍率(calib不准曾致一只不锁),改用 manual_x_band——
-            # 以人物屏幕点+光点绿线数据界按瞬移实测X比例反算的【屏幕可达X带】,平台模式只锁带内本台怪,带外相邻台/屏外怪
-            # 不进桶(治同高异台远怪瞬移拉出台、越线回退拉锯);走位另有平台守护+_combat_at_locked_edge兜底人不出台。
-            # 自由模式 _mx_band=None、selected_platforms 固定传[],全图最近口径不变。
+            # 平台选怪约束(用户2026-09-26,零屏幕换算):不靠怪→小地图倍率、也不用固定比例反算屏幕带(镜头卷动偏窄漏同台怪);
+            # 改传 reach_left/right(光点对绿线数据端判人是否走到台边)。平台只丢"人物外侧+该侧已到台边+停步射程外"的怪,
+            # 射程内脸上怪照打、台中间两侧怪全锁;走位另有平台守护+_combat_at_locked_edge兜底人不出台。
+            # 自由 reach=(True,True)、selected_platforms 固定传[],全图最近口径不变。
             now_ms, px, py, _cand, [], _skr, _aoe, _far_x,
             _judge_pos, bars, _has_dmg, True, True,   # 判活窗内lock=出手怪(钉保锁),窗外_judge_pos=_bl等价原逻辑
             self._b_probe_side, self._b_probe_switched,
@@ -17469,7 +17466,7 @@ class MinimapRouteRecorder:
             slope_y_up=(_sjmax if _slope_on else None),
             combat_mode=_pmode, allow_cross_up=_pcup, allow_cross_down=_pcdn,
             lock_grace_ms=_grace_ms,
-            manual_x_band=_mx_band)  # 面板分流+台界X带(2026-09-26):自由全图/平台只锁同台Y<40且在本台屏幕X带内
+            reach_left=_reach_l, reach_right=_reach_r)  # 面板分流+平台方向门(2026-09-26):自由全图/平台同台Y<40,到边侧射程外怪不锁
         # B锁生命周期回存
         self._b_hp_confirmed = _dl['hp_confirmed']
         self._b_gone = _dl['gone_frames']
