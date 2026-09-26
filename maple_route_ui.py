@@ -4774,7 +4774,7 @@ class MinimapRouteRecorder:
         # 人工上梯起跳定位(用户2026-09-21):跑跳离梯心px / 直跳提前松键px,分左右,正数;随梯子方案存盘
         jf = tk.Frame(right, relief="solid", borderwidth=1)
         jf.pack(fill="x", pady=(0, 2), padx=2)
-        tk.Label(jf, text="上梯起跳定位(px正数)", font=("微软雅黑", 8, "bold")).grid(
+        tk.Label(jf, text="上梯起跳定位(小地图单位)", font=("微软雅黑", 8, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", padx=3, pady=(2, 1))
         _jc = getattr(self, '_ladder_jump_cfg', {})
         def _mk_e(r, c, val):
@@ -6976,17 +6976,21 @@ class MinimapRouteRecorder:
         """Y上闸门:人物当前站的台子属于选定的上限组(该界线合并的任一台)=禁止再向上。未设上限/编辑态/判不到当前台=放行。"""
         if getattr(self, '_bound_edit', False):
             return False
-        if self._auto_platform_top_block():   # 定平台自动门控(用户2026-09-24):单台孤岛/多台站最顶层也禁向上爬梯·上瞬移,与手点上限组取或;向下不拦
-            return True
+        # 模式隔离(用户2026-09-26):台子模式只用自动最顶层极值;手点打怪区域上限组只在自由模式
+        if self.route_mode != '随机':
+            return self._auto_platform_top_block()
         _grp = self._valid_pf_group(self._bound_top_grp)
         if not _grp:
             return False
         return self._bound_current_pf_id() in _grp
 
     def _bound_block_down(self):
-        """Y下闸门:人物当前站的台子属于选定的下限组(该界线合并的任一台)=禁止向下。未设下限/编辑态/判不到当前台=放行。"""
+        """Y下闸门:台子模式=自动最底层极值(_auto_platform_bottom_block);自由模式=手点下限组。编辑态/判不到台=放行。"""
         if getattr(self, '_bound_edit', False):
             return False
+        # 模式隔离(用户2026-09-26):台子模式用自动最底层;手点打怪区域下限组只在自由模式
+        if self.route_mode != '随机':
+            return self._auto_platform_bottom_block()
         _grp = self._valid_pf_group(self._bound_bot_grp)
         if not _grp:
             return False
@@ -7016,6 +7020,32 @@ class MinimapRouteRecorder:
                     if self._platform_y_avg(_pf) <= _ymin + AUTO_TOP_LAYER_TOL}
         if _cur in _top_ids:
             self._rlog_throttle('auto_top_layer', "定平台:已在最顶层选中台,不向上爬梯", 1500, log='behavior')
+            return True
+        return False
+
+    def _auto_platform_bottom_block(self):
+        """台子模式·自动最底层门控(用户2026-09-26定稿,拦向下):单台=孤岛拦向下跳;多台选中台绿线Y均值
+        最大(小地图Y越大越低)为最底层、AUTO_TOP_LAYER_TOL内并排台并入,人站最底层拦向下。
+        随机模式/零勾选/编辑态/判不到当前台(腾空·梯上)→放行。按台id判身份,同台坡度波动不影响。"""
+        if getattr(self, '_bound_edit', False):
+            return False
+        _sel = self._active_platforms()
+        if not _sel or not self.platforms:
+            return False
+        _cur = self._bound_current_pf_id()
+        if _cur is None or (_cur + 1) not in _sel:
+            return False
+        _sel_pfs = [_pf for _pf in self.platforms if (_pf.get('id', 0) + 1) in _sel]
+        if not _sel_pfs:
+            return False
+        if len(_sel_pfs) == 1:
+            self._rlog_throttle('auto_bot_single', "定平台:当前唯一选中台,不向下跳(只在本台打)", 1500, log='behavior')
+            return True
+        _ymax = max(self._platform_y_avg(_pf) for _pf in _sel_pfs)
+        _bot_ids = {_pf.get('id', 0) for _pf in _sel_pfs
+                    if self._platform_y_avg(_pf) >= _ymax - AUTO_TOP_LAYER_TOL}
+        if _cur in _bot_ids:
+            self._rlog_throttle('auto_bot_layer', "定平台:已在最底层选中台,不向下跳", 1500, log='behavior')
             return True
         return False
 
@@ -15376,6 +15406,8 @@ class MinimapRouteRecorder:
         # Y上下限已改为"认平台绿线身份"的同步闸门(_bound_block_up/down在发起动作处即时判),守护线程只管左右越线。
         if getattr(self, '_bound_edit', False):
             return
+        if self.route_mode != '随机':
+            return  # 台子模式:左右边界用选中台自动极值(_combat_at_locked_edge);打怪区域竖线守护只在自由模式
         dot = getattr(self, '_player_map_pos', None)
         if not dot:
             return
@@ -17447,23 +17479,7 @@ class MinimapRouteRecorder:
             _grace_ms = now_ms - getattr(self, '_b_lock_last_seen_ms', now_ms)
         else:
             _grace_ms = 10**9
-        # 平台选怪判台(2026-09-26定稿,小地图紫点纯X):平台模式传入选中台号,build_buckets逐只把怪经绿框实时比例
-        # 换算成紫点X、落选中台绿线X区间才留(别台/屏外不锁不追不瞬移出台);自由模式传[]不判台=全图最近口径。
         _sel_pf_ids = self._active_platforms() if _pmode in ('single', 'multi') else []
-        if _sel_pf_ids and now_ms - getattr(self, '_purple_dbg_last', -99999) >= 2000:
-            self._purple_dbg_last = now_ms
-            _xr = self._locked_platform_x_range()
-            _pitems = []
-            for (_bx1, _by1, _bx2, _by2, _bs) in _cand:
-                _bcx = (_bx1 + _bx2) // 2; _bcy = _by2
-                _mp = self._screen_to_map(_bcx, _bcy)
-                if _mp is not None:
-                    _tag = '%.0f/%s' % (_mp[0], ('内' if (_xr and _xr[0] <= _mp[0] <= _xr[1]) else '外'))
-                else:
-                    _tag = 'NA'
-                _pitems.append(_tag)
-            _debug_log("[紫点判台] 选中台=%s 绿线X并集=%s | 紫点mapX/内外: %s" % (
-                _sel_pf_ids, ('%.0f~%.0f' % _xr) if _xr else 'NA', ' '.join(_pitems[:10])))
         _dl = combat_logic.combat_step(
             # 平台锁怪X范围(用户2026-09-26最终定稿·动态):平台模式回调_platform_lock_x按光点在当前台位置动态给左右
             # 可锁窗口距离(端外只留100px),别台/屏外不锁不追不瞬移出台;自由模式combat_mode=random不调回调=全图最近口径。
@@ -18710,7 +18726,7 @@ class MinimapRouteRecorder:
                             _tk_start = time.time()
                             _tk_count = 0
                             while time.time() - _tk_start < 0.010:
-                                if not self._tk_root.dooneevent(0):  # 0 = 不等待，有事件就处理
+                                if not self._tk_root.dooneevent(2):  # 2=TCL_DONT_WAIT非阻塞(0=ALL_EVENTS会阻塞等事件→钉死主循环帧率0.1,2026-09-26卡顿根因)
                                     # 没有事件时短暂sleep，避免CPU占用过高
                                     time.sleep(0.001)
                                     _tk_count += 1
