@@ -658,6 +658,7 @@ ROAM_SIDE_RATIO = 0.70    # 朝远侧竖线走该侧剩余距离的比例
 TELEPORT_SCREEN_TO_MAP_X = 22.0 / 250.0
 PLATFORM_X_EXTEND = 100   # 平台判台X延伸(小地图px):掉台归位判台用(_get_monster_platform,2026-09-26)
 PLATFORM_LOCK_X_TOL = 100  # 平台锁怪X·台端外技能容差(游戏【窗口px】,用户2026-09-26动态锁怪):动态左右距离端外只留100
+MONSTER_MAP_Y_SNAP = 10   # 紫点Y吸到绿线的最大偏差(小地图px,用户2026-09-26):|怪Y-绿线Y|≤10才拉到线上,超过不硬贴防跨层
 ROAM_COOLDOWN_MS = 15000  # 一次巡游结束(遇怪/走完)后冷却,期内不主动巡游(防左右来回晃)
 ROAM_MIN_SIDE_PX = 24     # 远侧距离(小地图px)小于此=已贴边没空间,改短冷却3s不巡游
 ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人物上方+60内可直打；>60够不着→走近)。用户2026-09-06：80→60
@@ -8037,7 +8038,7 @@ class MinimapRouteRecorder:
                     dx = abs(px - map_x)
                     dy = abs(py - map_y)
                     # X最接近且Y偏差<15px（怪站在这个平台上）
-                    if dx < best_dx and dy < 15:
+                    if dx < best_dx and dy <= MONSTER_MAP_Y_SNAP:
                         best_dx = dx
                         best_y = py
             if best_y is not None:
