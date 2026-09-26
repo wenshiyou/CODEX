@@ -6488,6 +6488,10 @@ class MinimapRouteRecorder:
         一次巡游结束(遇怪/走完)起冷却ROAM_COOLDOWN_MS。返回True=本帧巡游在走路(调用方直接return);False=没巡游。
         水平移动唯一走_move_horizontal(小地图光点导航,用_random_move_keys,与战斗combat键互不复用)。
         爬梯/软态去梯/选台走/越线拉回一律不巡游并取消进行中的巡游(跨层/拉回打断不耗冷却)。"""
+        if self.route_mode != '随机':
+            # 台子模式(单/多台)无怪原地等刷怪、不巡游:巡游朝"远侧竖线"走70%、冷却后反向=反复左右横跳;仅自由模式巡游
+            self._roam_end(False)
+            return False
         cs = getattr(self, '_climb_state', 'none')
         if cs != 'none' or getattr(self, '_combat_transit', False):
             self._roam_end(False)
@@ -9016,49 +9020,50 @@ class MinimapRouteRecorder:
         try:
             _bln = self._get_bound_lines()
             _bedit = getattr(self, '_bound_edit', False)
-            _bcol = (0, 165, 255) if _bedit else (255, 255, 0)   # cv2 BGR:竖线调整中=橙、常态=青
-            _blw = max(1, int(round(BOUND_LINE_W * 0.8)))        # 线宽=基准80%(3→2)
-            _bxl, _bxr = int(_bln['l'] * scale_x), int(_bln['r'] * scale_x)
-            cv2.line(map_display, (_bxl, 0), (_bxl, render_h), _bcol, _blw)   # 左竖线
-            cv2.line(map_display, (_bxr, 0), (_bxr, render_h), _bcol, _blw)   # 右竖线
-            # Y界线高亮(一条界线可合并多个相连台子,同组染同色=连成一体):编辑态暂存=黄、只成形1条待配对=紫、两条齐后上限红/下限蓝;常态上限红/下限蓝。本段在绿线之后、高亮盖上层
-            _idcol = {}
-            _tg = self._valid_pf_group(getattr(self, '_bound_top_grp', []))
-            _bg = self._valid_pf_group(getattr(self, '_bound_bot_grp', []))
-            if _bedit:
-                if _tg and _bg:
-                    for _i in _tg: _idcol[_i] = (0, 0, 255)     # 上限=红BGR
-                    for _i in _bg: _idcol[_i] = (255, 0, 0)     # 下限=蓝BGR
-                elif _tg:
-                    for _i in _tg: _idcol[_i] = (255, 0, 255)   # 只成形一条=紫(待第二条定上下)
-                for _i in getattr(self, '_bound_staging', []):
-                    _idcol[_i] = (0, 255, 255)                  # 暂存区=黄BGR(优先级最高)
-            else:
-                for _i in _tg: _idcol[_i] = (0, 0, 255)
-                for _i in _bg: _idcol[_i] = (255, 0, 0)
-            for _p in self.platforms:
-                _pid = _p.get('id', -1)
-                if _pid not in _idcol:
-                    continue
-                _hpts = self._platform_points(_p)
-                if len(_hpts) >= 2:
-                    _spts = [(int(pt[0] * scale_x), int(pt[1] * scale_y)) for pt in _hpts]
-                    cv2.polylines(map_display, [np.array(_spts, np.int32).reshape(-1, 1, 2)],
-                                  False, _idcol[_pid], 3)
-            # 右键清除Y界线气泡(仅编辑态):右键点中某条已成形界线→命中处弹"清除",左键点中清空该组;退出编辑时统一存盘(用户2026-09-12)
-            _cm = getattr(self, '_bound_clear_menu', None)
-            if _bedit and _cm:
-                _rw = map_display.shape[1]
-                _rh = map_display.shape[0]
-                _ax = int(_cm['mx'] * scale_x)
-                _ay = int(_cm['my'] * scale_y)
-                _cw, _ch = 46, 20
-                _ax = max(2, min(_ax, _rw - _cw - 2))
-                _ay = max(2, min(_ay + 6, _rh - _ch - 2))   # 落在命中点略下方,钳在小地图内
-                cv2.rectangle(map_display, (_ax, _ay), (_ax + _cw, _ay + _ch), (60, 60, 60), -1)
-                cv2.rectangle(map_display, (_ax, _ay), (_ax + _cw, _ay + _ch), (0, 165, 255), 1)
-                self._putcn(map_display, "清除", _ax + 9, _ay + 15, (255, 255, 255))
-                _cm['rect'] = (_ax, _ay, _cw, _ch)         # 回写显示空间命中框供左键判定(每帧随缩放刷新)
+            if self.route_mode == '随机' or _bedit:  # 打怪区线只在自由模式显示(或编辑中);台子模式隐藏,功能亦不生效
+                _bcol = (0, 165, 255) if _bedit else (255, 255, 0)   # cv2 BGR:竖线调整中=橙、常态=青
+                _blw = max(1, int(round(BOUND_LINE_W * 0.8)))        # 线宽=基准80%(3→2)
+                _bxl, _bxr = int(_bln['l'] * scale_x), int(_bln['r'] * scale_x)
+                cv2.line(map_display, (_bxl, 0), (_bxl, render_h), _bcol, _blw)   # 左竖线
+                cv2.line(map_display, (_bxr, 0), (_bxr, render_h), _bcol, _blw)   # 右竖线
+                # Y界线高亮(一条界线可合并多个相连台子,同组染同色=连成一体):编辑态暂存=黄、只成形1条待配对=紫、两条齐后上限红/下限蓝;常态上限红/下限蓝。本段在绿线之后、高亮盖上层
+                _idcol = {}
+                _tg = self._valid_pf_group(getattr(self, '_bound_top_grp', []))
+                _bg = self._valid_pf_group(getattr(self, '_bound_bot_grp', []))
+                if _bedit:
+                    if _tg and _bg:
+                        for _i in _tg: _idcol[_i] = (0, 0, 255)     # 上限=红BGR
+                        for _i in _bg: _idcol[_i] = (255, 0, 0)     # 下限=蓝BGR
+                    elif _tg:
+                        for _i in _tg: _idcol[_i] = (255, 0, 255)   # 只成形一条=紫(待第二条定上下)
+                    for _i in getattr(self, '_bound_staging', []):
+                        _idcol[_i] = (0, 255, 255)                  # 暂存区=黄BGR(优先级最高)
+                else:
+                    for _i in _tg: _idcol[_i] = (0, 0, 255)
+                    for _i in _bg: _idcol[_i] = (255, 0, 0)
+                for _p in self.platforms:
+                    _pid = _p.get('id', -1)
+                    if _pid not in _idcol:
+                        continue
+                    _hpts = self._platform_points(_p)
+                    if len(_hpts) >= 2:
+                        _spts = [(int(pt[0] * scale_x), int(pt[1] * scale_y)) for pt in _hpts]
+                        cv2.polylines(map_display, [np.array(_spts, np.int32).reshape(-1, 1, 2)],
+                                      False, _idcol[_pid], 3)
+                # 右键清除Y界线气泡(仅编辑态):右键点中某条已成形界线→命中处弹"清除",左键点中清空该组;退出编辑时统一存盘(用户2026-09-12)
+                _cm = getattr(self, '_bound_clear_menu', None)
+                if _bedit and _cm:
+                    _rw = map_display.shape[1]
+                    _rh = map_display.shape[0]
+                    _ax = int(_cm['mx'] * scale_x)
+                    _ay = int(_cm['my'] * scale_y)
+                    _cw, _ch = 46, 20
+                    _ax = max(2, min(_ax, _rw - _cw - 2))
+                    _ay = max(2, min(_ay + 6, _rh - _ch - 2))   # 落在命中点略下方,钳在小地图内
+                    cv2.rectangle(map_display, (_ax, _ay), (_ax + _cw, _ay + _ch), (60, 60, 60), -1)
+                    cv2.rectangle(map_display, (_ax, _ay), (_ax + _cw, _ay + _ch), (0, 165, 255), 1)
+                    self._putcn(map_display, "清除", _ax + 9, _ay + 15, (255, 255, 255))
+                    _cm['rect'] = (_ax, _ay, _cw, _ch)         # 回写显示空间命中框供左键判定(每帧随缩放刷新)
         except Exception as _be:
             _debug_log("[UI小地图] 打怪区域画线异常: %s" % _be)
 
@@ -15640,6 +15645,13 @@ class MinimapRouteRecorder:
         ①停主线(返回True占_aux_busy,打怪/巡路暂停) ②左右方向键+攻击键全松、清场BOUND_RELEASE_MS
         ③硬压朝内方向键1000~1500ms随机、一口气拉回中间(中途不重判/不翻转=不碎步) ④到点立马松键、恢复主线。
         爬梯/跨层冻结中不水平拉回(梯子上水平无意义)。物理键只在主线发,守护线程只置令。"""
+        if self.route_mode != '随机':
+            # 打怪区竖线拉回只在自由模式有效;台子模式左右用选中台自动极值。清切换模式时残留的拉回令/侧标
+            if self._bound_pull is not None or self._bound_guard_side is not None:
+                self._bound_pull = None
+                self._bound_guard_side = None
+                self._release_combat_move()
+            return False
         side = self._bound_guard_side
         if side is None or self._in_vertical_motion() or getattr(self, '_climb_state', 'none') != 'none':
             return False
