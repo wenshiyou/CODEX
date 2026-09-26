@@ -656,6 +656,8 @@ ROAM_SIDE_RATIO = 0.70    # 朝远侧竖线走该侧剩余距离的比例
 # 面板瞬移距离是屏幕px,数据步长=面板瞬移距离×(22/250≈0.088),面板250→数据约22(取略偏大防临界擦边越台);
 # 光点到该侧台端剩余<=此步长(闪了必越界/擦边)就不闪、改走路,防一闪越出台子。
 TELEPORT_SCREEN_TO_MAP_X = 22.0 / 250.0
+PLATFORM_X_EXTEND = 100   # 平台判台X延伸(小地图px):掉台归位判台用(_get_monster_platform,2026-09-26)
+PLATFORM_LOCK_X_TOL = 100  # 平台锁怪X·台端外技能容差(游戏【窗口px】,用户2026-09-26动态锁怪):动态左右距离端外只留100
 ROAM_COOLDOWN_MS = 15000  # 一次巡游结束(遇怪/走完)后冷却,期内不主动巡游(防左右来回晃)
 ROAM_MIN_SIDE_PX = 24     # 远侧距离(小地图px)小于此=已贴边没空间,改短冷却3s不巡游
 ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人物上方+60内可直打；>60够不着→走近)。用户2026-09-06：80→60
@@ -7205,6 +7207,37 @@ class MinimapRouteRecorder:
                     return True
         return False
 
+    def _platform_lock_x(self, cx, cy, px):
+        """【平台模式·动态锁怪X范围,用户2026-09-26最终定稿】怪在游戏窗口坐标,判它X上能不能锁:
+        以人物光点在【当前所在选中台】绿线上的位置,动态给左右可锁窗口距离——
+          向右可锁 = (台右端xmx - 光点pmx) × 绿框水平比例_cam_x_scale + PLATFORM_LOCK_X_TOL
+          向左可锁 = (光点pmx - 台左端xmn) × 绿框水平比例_cam_x_scale + PLATFORM_LOCK_X_TOL
+        台端外只留100窗口px技能容差,别台/屏外怪(超出所在侧可锁距离)返回False不锁,从源头不追不瞬移出台。
+        自由模式combat_mode=random不调本方法。台/光点/比例取不到=定位异常,保守False不锁。"""
+        _mp = getattr(self, '_player_map_pos', None)
+        _scale = getattr(self, '_cam_x_scale', None)
+        if not _mp or not _scale:
+            return False
+        _pmx = float(_mp[0])
+        _sel = self._active_platforms()
+        if not _sel or not self.platforms:
+            return False
+        _pf = None
+        for _p in self.platforms:
+            if (_p.get('id', 0) + 1) in _sel:
+                _xmn0, _xmx0 = self._platform_x_range(_p)
+                if (_xmn0 - PLATFORM_EDGE_MARGIN) <= _pmx <= (_xmx0 + PLATFORM_EDGE_MARGIN):
+                    _pf = _p
+                    break
+        if _pf is None:
+            return False
+        _xmn, _xmx = self._platform_x_range(_pf)
+        _right = (float(_xmx) - _pmx) * float(_scale) + PLATFORM_LOCK_X_TOL
+        _left = (_pmx - float(_xmn)) * float(_scale) + PLATFORM_LOCK_X_TOL
+        if cx >= px:
+            return float(cx - px) <= max(0.0, _right)
+        return float(px - cx) <= max(0.0, _left)
+
     def _combat_at_locked_edge(self, move_dir):
         """【锁平台·拟人化2026-09-07】战斗移动方向是否已到平台X边缘。
         优先用"勾选平台绿线"硬边界；没勾平台才退回"人物当前所在平台"。
@@ -7852,10 +7885,10 @@ class MinimapRouteRecorder:
 
     def _get_monster_platform(self, screen_x, screen_y):
         """【模块B·平台模式判台,2026-09-26定稿】怪屏幕坐标→小地图紫点X,紫点X落在某【选中台】绿线X区间
-        再向两侧各延伸一个面板技能范围(atk1_distance,锁怪范围=打怪范围=台子+延伸技能范围,用户2026-09-26)
+        再向两侧各固定延伸PLATFORM_X_EXTEND(100,用户2026-09-26最终定稿、不分平台)
         内即判该台可打怪,返回该台dict;自由模式/零勾选/换算失效/不落任何选中台延伸区→None。
         只看X、不看点线Y距离:侧视屏幕Y(高低)与小地图俯视Y不等比,点线距离会因Y映射误差误丢同台怪;
-        上下层同X重叠台不在此分,交由combat_logic平台Y带(±skill_range)+cross门区分。"""
+        上下层同X重叠台不在此分,交由combat_logic平台Y带(上50下20)+cross门区分。"""
         map_pos = self._screen_to_map(screen_x, screen_y)
         if map_pos is None:
             return None
@@ -7863,9 +7896,13 @@ class MinimapRouteRecorder:
         _sel = self._active_platforms()
         if not _sel or not self.platforms:
             return None
-        # 锁怪范围=打怪范围=面板技能范围(用户2026-09-26定稿):台绿线X区间两端各延伸skill_range,XY同时满足才锁
-        _skr = int(self._get_fight_config().get("atk1_distance", 150) or 150)
-        _tol = _skr
+        # X锁怪范围(用户2026-09-26最终定稿):PLATFORM_X_EXTEND=100是游戏【窗口屏幕px】(怪在窗口),
+        # 台绿线是小地图坐标,故按绿框实时放大率把100屏幕px换算成小地图容差(100/_cam_x_scale≈6.7),
+        # 屏幕上看才是真正延伸100px(直接当小地图单位会放大到≈1500px=没限制)。Y带上50下20在combat_logic(本就是窗口px)。
+        _cxs = getattr(self, '_cam_x_scale', None)
+        if not _cxs:
+            return None
+        _tol = PLATFORM_X_EXTEND / float(_cxs)
         for pf in self.platforms:
             if (pf.get('id', 0) + 1) not in _sel:
                 continue
@@ -16480,12 +16517,19 @@ class MinimapRouteRecorder:
             if _sel:
                 cur_pf = self._get_current_manual_platform()
                 cur_num = (cur_pf.get('id', 0) + 1) if (cur_pf and isinstance(cur_pf, dict)) else None
+                # 下一台=离人物光点最近的选中台(用户2026-09-26定稿:打最近的选了的,不是编号最小/全屏最近)
                 next_pf = None
+                _next_d = 1e18
                 for pf in self.platforms:
                     pm = pf.get('id', 0) + 1
                     if pm not in _sel or pm == cur_num:
                         continue
-                    if next_pf is None or pm < next_pf.get('id', 0) + 1:
+                    _pts = self._platform_points(pf)
+                    _ppx = float(_pts[len(_pts) // 2][0])
+                    _ppy = float(_pts[len(_pts) // 2][1])
+                    _pd = abs(_ppx - mpx) + abs(_ppy - mpy)
+                    if _pd < _next_d:
+                        _next_d = _pd
                         next_pf = pf
                 if next_pf is None:
                     self._trans_stall_diag('no_next_platform(只选当前台/无下一台)', now,
@@ -17421,8 +17465,8 @@ class MinimapRouteRecorder:
             _debug_log("[紫点判台] 选中台=%s 绿线X并集=%s | 紫点mapX/内外: %s" % (
                 _sel_pf_ids, ('%.0f~%.0f' % _xr) if _xr else 'NA', ' '.join(_pitems[:10])))
         _dl = combat_logic.combat_step(
-            # 平台选怪判台(用户2026-09-26定稿,小地图紫点纯X):平台模式传入选中台号,build_buckets逐只把怪经绿框实时
-            # 比例换算成紫点X、落选中台绿线X区间才留(别台/屏外不锁不追不瞬移出台);自由模式传[]不判台=全图最近口径。
+            # 平台锁怪X范围(用户2026-09-26最终定稿·动态):平台模式回调_platform_lock_x按光点在当前台位置动态给左右
+            # 可锁窗口距离(端外只留100px),别台/屏外不锁不追不瞬移出台;自由模式combat_mode=random不调回调=全图最近口径。
             now_ms, px, py, _cand, _sel_pf_ids, _skr, _aoe, _far_x,
             _judge_pos, bars, _has_dmg, True, True,   # 判活窗内lock=出手怪(钉保锁),窗外_judge_pos=_bl等价原逻辑
             self._b_probe_side, self._b_probe_switched,
@@ -17435,7 +17479,8 @@ class MinimapRouteRecorder:
             same_platform_fn=None, metric=(None if _slope_air else metric),  # 腾空窗:用空中Y算的metric作废,改以锚点Y现算
             slope_y_up=(_sjmax if _slope_on else None),
             combat_mode=_pmode, allow_cross_up=_pcup, allow_cross_down=_pcdn,
-            lock_grace_ms=_grace_ms)  # 面板分流+小地图紫点纯X判台(2026-09-26):平台只锁紫点X落选中台绿线区间、且Y同台40内的怪
+            lock_grace_ms=_grace_ms,
+            platform_lock_x_fn=self._platform_lock_x)  # 动态锁怪X(2026-09-26):平台只锁当前台动态左右距离(端外留100窗口px)内、Y上60下20的怪
         # B锁生命周期回存
         self._b_hp_confirmed = _dl['hp_confirmed']
         self._b_gone = _dl['gone_frames']
@@ -17740,18 +17785,18 @@ class MinimapRouteRecorder:
         self._combat_last_target_pos = (t_cx, t_cy)
         # 【出手前·最新点复核(用户2026-09-26,治"锁别台怪空打")】B决策包可能在人物跨层/掉台/越线回退/战斗瞬移的
         # 前一帧发布(包内state/dist按旧人物点),主线这一帧执行时人已到别层(实测包cast贴身dist=1、最新点Y差已183)。
-        # 平台模式(单台single/多台multi同一分支)包让cast近身打时,用本帧最新人物点复核:仍在同台Y带(40)且X进停步
+        # 平台模式(单台single/多台multi同一分支)包让cast近身打时,用本帧最新人物点复核:仍在同台Y带(上50下20)且X进停步
         # 射程才出手;否则判过期包——不按攻击键(杜绝对别台空打)、不沿用旧dist走近,松键等B下一帧用最新点重锁
         # (识怪/B每帧热跑,下一帧即同台新锁或idle,不呆)。slope跳高/跨层cross/pursue走近不在此门;自由random不拦。
         _pmv, _pcupv, _pcdnv = self._platform_cross_direction()
         if _pmv in ('single', 'multi') and _dl.get('state') == 'cast':
             _rdy = t_cy - py_layer
             _rdx = abs(t_cx - px)
-            if not (-skill_range < _rdy < skill_range) or _rdx > stop_range:
+            if not (-combat_logic.PLATFORM_Y_UP < _rdy < combat_logic.PLATFORM_Y_DOWN):  # 动态锁怪只复核Y(上60下20),X由build_buckets动态距离把关
                 self._release_combat_move()
                 self._release_all_keys()
-                _debug_log("[平台复核] 丢弃过期cast包 目标=(%d,%d) 最新人物=(%d,%d) X差%d Y差%d(同台带%d/停步射程%d),松键等B重锁" % (
-                    t_cx, t_cy, px, py_layer, _rdx, _rdy, skill_range, stop_range))
+                _debug_log("[平台复核] 丢弃过期cast包 目标=(%d,%d) 最新人物=(%d,%d) X差%d Y差%d(Y上带%d下带%d/停步射程%d),松键等B重锁" % (
+                    t_cx, t_cy, px, py_layer, _rdx, _rdy, combat_logic.PLATFORM_Y_UP, combat_logic.PLATFORM_Y_DOWN, stop_range))
                 return
         # --- drop善后(动作层):B判死,主线只清出手反馈+上屏+当帧重选(纯最近不拉黑位置);跳高打空也走这(=普通空怪,不降级cross) ---
         if _dl.get('drop'):

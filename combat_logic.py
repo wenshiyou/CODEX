@@ -38,9 +38,11 @@ CROSS_X_HYST = 30
 CROSS_X_MAX = 300    # 跨层最大X差:X差>=300先pursue水平走近,靠近后仍超面板可达带才跨层(用户:X差<300)
 LOCK_GRACE_MS = 500   # 同层范围外旧锁连续脱检宽限:此时间内沿用旧锁走近,抗YOLO漏帧全屏横跳
 
-# 平台模式(单台single+多台multi同一分支)锁怪范围(用户2026-09-26定稿)=打怪范围=面板技能范围skill_range:
-# X=台子绿线端点±skill_range(主文件_get_monster_platform判台扩区), Y=人物基点±skill_range(上下对称按面板);
-# XY同时满足才锁。自由random模式不用平台带、不受限。
+# 平台模式(单台single+多台multi同一分支,用户2026-09-26最终定稿)锁怪范围=打怪范围:
+# X=台子绿线左右端点各延伸面板技能范围skill_range(端点随台不同、延伸值固定;主文件_get_monster_platform判台);
+# Y=人物基点向上PLATFORM_Y_UP(50)、向下PLATFORM_Y_DOWN(20),值固定;XY同时满足才锁。自由random不用平台带、不受限。
+PLATFORM_Y_UP = 60      # 平台锁怪Y带·人物基点向上60(怪脚Y在[py-60,py])
+PLATFORM_Y_DOWN = 20    # 平台锁怪Y带·人物基点向下20(怪脚Y在[py,py+20])
 
 
 def _mk(state, target, direction, dist, cross_candidates=None, group=None, tier=None):
@@ -110,7 +112,8 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
                   group_priority=False, aoe_y_up=None, aoe_y_down=None,
                   allow_cross=True, metric=None, same_platform_fn=None,
                   slope_y_up=None, combat_mode='random',
-                  allow_cross_up=True, allow_cross_down=True):
+                  allow_cross_up=True, allow_cross_down=True,
+                  platform_lock_x_fn=None):
     """按"这套打法实际够得着的高度"把怪分三档(用户2026-09-23定稿,与主线high_slope同一口径):
       · 同层档 cand(元素(x_gap,cx,cy)):站直/走近/原地主攻够得到——
           上方 |dy|<=attack_y_up(主攻上沿,开跳高也只给主攻带100,不含跳高段);
@@ -132,11 +135,11 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
             _pool_y_down = max(_pool_y_down, aoe_y_down)
     # === 两套打怪规则(用户2026-09-24):同一套分桶代码按 combat_mode 收窄同层Y带/跨层方向,random逐行等价现状 ===
     #  random 自由全图:同层带=面板(群攻放宽)、双向可跨层、跳高照开;
-    #  single(单台)/multi(多台)=平台模式同一分支(用户2026-09-26定稿):锁怪范围=打怪范围=面板skill_range,
-    #    Y=人物基点±skill_range、X=台子端点±skill_range(判台回调扩区),跳高全关;
+    #  single(单台)/multi(多台)=平台模式同一分支(用户2026-09-26最终定稿):锁怪范围=打怪范围,
+    #    Y=人物基点上60/下20(固定)、X=动态左右锁怪距离(随光点在台上位置,台端外只留100窗口px容差,platform_lock_x_fn回调),跳高全关;
     #    唯一区别是跨台cross——single全关(上下层怪都不锁),multi仅放行"还有更高/更低选中台"的方向(allow_cross_up/down)。
     if combat_mode in ('single', 'multi'):
-        eff_up = eff_down = max(1, int(skill_range))
+        eff_up, eff_down = PLATFORM_Y_UP, PLATFORM_Y_DOWN
         eff_slope = None
         if combat_mode == 'single':
             cross_up = cross_down = False
@@ -155,17 +158,15 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
             cy = y2
             x_gap = abs(cx - px)
             dy = cy - py
-        # 平台判台(用户2026-09-26定稿,小地图紫点纯X):平台模式(single/multi)主线传入选中台号selected_platforms,
-        # 回调get_monster_platform(cx,cy)把怪屏幕坐标经绿框镜头实时比例换算成小地图紫点X,紫点X落进某选中台
-        # 绿线X区间(含容差)才返回该台;返回None(换算失效)或台号不在选中列表=别台/屏外怪,直接不进任何桶
-        # (从源头不锁别台、不追不瞬移出台)。自由random的selected_platforms为空,整段跳过=全图最近口径不变。
-        # 上下层同X重叠台不在此区分,交由下方同台Y带(eff=40)+cross门(单台关/多台按方向)处理。
-        if selected_platforms:
-            pf = get_monster_platform(cx, cy)
-            if not pf or (pf.get('id', 0) + 1) not in selected_platforms:
+        # 锁怪X范围(用户2026-09-26最终定稿·动态):平台模式(single/multi)回调platform_lock_x_fn(cx,cy,px),
+        # 按人物光点在当前台绿线上的位置动态给左右可锁窗口距离(台端外只留100px技能容差),
+        # 怪窗口X差超过所在侧可锁距离=别台/屏外怪,直接不锁(从源头不锁别台、不追不瞬移出台)。
+        # 自由random不传回调(None),整段跳过=全图最近口径不变。上下层交由Y带+cross门处理。
+        if combat_mode in ('single', 'multi') and platform_lock_x_fn is not None:
+            if not platform_lock_x_fn(cx, cy, px):
                 continue
         if x_gap >= CROSS_X_MAX:
-            # X差超300先pursue水平走近(用户:X>=300先走过去);平台模式(单台/多台)远处怪也要Y在同台40带内才走近,否则=别台丢弃
+            # X差超300先pursue水平走近(用户:X>=300先走过去);平台模式(单台/多台)远处怪也要Y在同台带(上60下20)内才走近,否则=别台丢弃
             if combat_mode in ('single', 'multi'):
                 if (dy < 0 and -dy < eff_up) or (dy >= 0 and dy < eff_down):
                     cand.append((x_gap, cx, cy))
@@ -278,7 +279,7 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                          combat_mode='random',
                          allow_cross_up=True, allow_cross_down=True,
                          lock_grace_ms=10**9,
-                         side_anchor_x=None):
+                         side_anchor_x=None, platform_lock_x_fn=None):
     """决策核心:build_buckets 三档分桶 → 维持当前锁定 → pick_from_buckets 选新。
 
     分档(用户2026-09-23定稿,治同层/跳高混池逐帧换锁):
@@ -292,7 +293,7 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
         px, py, monsters, selected_platforms, skill_range, get_monster_platform,
         attack_y_up, attack_y_down, group_priority, aoe_y_up, aoe_y_down,
         allow_cross, metric, same_platform_fn, slope_y_up,
-        combat_mode, allow_cross_up, allow_cross_down)
+        combat_mode, allow_cross_up, allow_cross_down, platform_lock_x_fn)
 
     _skeys = set((r[1], r[2]) for r in slope_rows)
     plane = [r for r in cand if (r[1], r[2]) not in _skeys]
@@ -477,7 +478,7 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                 same_platform_fn=None, metric=None, slope_y_up=None,
                 combat_mode='random',
                 allow_cross_up=True, allow_cross_down=True,
-                lock_grace_ms=10**9):
+                lock_grace_ms=10**9, platform_lock_x_fn=None):
     """组合 select_combat_target + lock_status + decide_attack，得到本tick完整的战斗决策。
 
     参数: 见各部分；now/lock_time 单位ms。
@@ -526,7 +527,8 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                             combat_mode=combat_mode,
                             allow_cross_up=allow_cross_up, allow_cross_down=allow_cross_down,
                             lock_grace_ms=lock_grace_ms,
-                            side_anchor_x=(lock[0] if lock else None))
+                            side_anchor_x=(lock[0] if lock else None),
+                            platform_lock_x_fn=platform_lock_x_fn)
     # 技能施放决策
     skill = 'none'
     if d['target'] is not None and d['dist'] is not None:
