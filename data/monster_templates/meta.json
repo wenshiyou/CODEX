@@ -1,1 +1,20 @@
-[]
+[
+  {
+    "id": 0,
+    "width": 12,
+    "height": 6,
+    "offset_x": 0,
+    "offset_y": 35,
+    "direction": "left",
+    "created_at": "2026-09-26 01:02:04"
+  },
+  {
+    "id": 1,
+    "width": 13,
+    "height": 5,
+    "offset_x": 0,
+    "offset_y": 35,
+    "direction": "right",
+    "created_at": "2026-09-26 01:02:16"
+  }
+]

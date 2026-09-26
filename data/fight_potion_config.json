@@ -28,5 +28,9 @@
   "far_range_y_down": "320",
   "hp_value": "35",
   "teleport_key": "d",
-  "teleport_distance": "250"
+  "teleport_distance": "250",
+  "match_sim": {
+    "char": "0.70",
+    "monster": "0.65"
+  }
 }

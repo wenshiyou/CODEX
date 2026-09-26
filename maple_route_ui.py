@@ -656,9 +656,6 @@ ROAM_SIDE_RATIO = 0.70    # 朝远侧竖线走该侧剩余距离的比例
 # 面板瞬移距离是屏幕px,数据步长=面板瞬移距离×(22/250≈0.088),面板250→数据约22(取略偏大防临界擦边越台);
 # 光点到该侧台端剩余<=此步长(闪了必越界/擦边)就不闪、改走路,防一闪越出台子。
 TELEPORT_SCREEN_TO_MAP_X = 22.0 / 250.0
-# 平台选怪方向门(用户2026-09-26,零屏幕换算):光点到选中台绿线【数据坐标】端剩余<=此值即判该侧已到台边,
-# 该侧、停步射程外的怪不再锁(追它必出台);射程内脸上的怪照打。与走位到边硬闸同口径,只认光点+绿线不涉倍率。
-PLATFORM_REACH_EDGE_MAP = 10.0
 ROAM_COOLDOWN_MS = 15000  # 一次巡游结束(遇怪/走完)后冷却,期内不主动巡游(防左右来回晃)
 ROAM_MIN_SIDE_PX = 24     # 远侧距离(小地图px)小于此=已贴边没空间,改短冷却3s不巡游
 ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人物上方+60内可直打；>60够不着→走近)。用户2026-09-06：80→60
@@ -7279,23 +7276,31 @@ class MinimapRouteRecorder:
             return (_xmax - _dx) <= _step
         return (_dx - _xmin) <= _step
 
-    def _platform_reachable_sides(self):
-        """平台选怪·左右方向可达(用户2026-09-26,零屏幕换算;替代已废的屏幕X带反算——固定比例在镜头卷动/
-        边缘钳制下偏窄会误滤同台怪)。纯用光点对选中台绿线【数据坐标】端:光点到该侧台端剩余>PLATFORM_REACH_EDGE_MAP
-        (没走到走位硬闸停步线)=该侧可达True。与_combat_at_locked_edge/_manual_tp_leaves_platform同口径,只认光点+绿线、
-        不碰屏幕↔数据比例/倍率。自由/未选台/光点或台界缺失->(True,True)不锁死(不误停同台打怪)。"""
+    def _platform_camera_x_band(self, screen_px):
+        """平台台界屏幕X带·相机镜头放大率版(2026-09-26,真机同帧核对通过、正式用于build_buckets台界过滤)。
+        以人物特征屏幕点screen_px(与怪cx同为游戏窗口客户区坐标)为原点,台界【数据端】相对光点mx的数据差×
+        当前镜头实时放大率_cam_x_scale(=窗口宽/绿框数据宽,每帧刷新,日志约15.24)。不碰光点映射原点sx(其与特征点
+        存在系间偏移),只借尺度scale_x。返回(bxlo,bxhi,dbg)或None;带反转时bxlo=None。仅平台模式。"""
         try:
             _pmv, _, _ = self._platform_cross_direction()
             if _pmv not in ('single', 'multi'):
-                return True, True
+                return None
             _xr = self._locked_platform_x_range()
             _dot = getattr(self, '_player_map_pos', None)
-            if _xr is None or not _dot or _dot[0] is None:
-                return True, True
-            _dx = float(_dot[0]); _xmin = float(_xr[0]); _xmax = float(_xr[1]); _r = float(PLATFORM_REACH_EDGE_MAP)
-            return (_dx - _xmin) > _r, (_xmax - _dx) > _r
+            _sc = getattr(self, '_cam_x_scale', None)
+            _win = getattr(self, '_cam_x_winw', None)
+            if _xr is None or not _dot or _dot[0] is None or screen_px is None or not _sc or not _win:
+                return None
+            _mx = float(_dot[0]); _xmin = float(_xr[0]); _xmax = float(_xr[1])
+            _pxf = float(screen_px); _sc = float(_sc); _m = 15.0
+            _bxlo = max(0.0, _pxf + (_xmin - _mx) * _sc) + _m
+            _bxhi = min(float(_win), _pxf + (_xmax - _mx) * _sc) - _m
+            _dbg = (_mx, _xmin, _xmax, round(_sc, 2), round(_pxf))
+            if _bxhi <= _bxlo:
+                return (None, None, _dbg)
+            return (_bxlo, _bxhi, _dbg)
         except Exception:
-            return True, True
+            return None
 
     def _effective_scale(self):
         """【模块B】返回最终倍率(总值) = 检测值 + 手动偏移值。
@@ -14109,6 +14114,10 @@ class MinimapRouteRecorder:
             rx = offset_x / float(bw) if bw > 0 else 0.5  # 仅用于日志显示
             ry = offset_y / float(bh) if bh > 0 else 0.5
             mode = "绿框"
+            # 缓存当前镜头取景框X变换(数据px->屏幕px放大率=窗口宽/绿框数据宽,每帧实时,日志约15.24),
+            # 供平台台界屏幕带反算;旧固定比例(1/0.088=11.36)偏小约35%致反算带偏窄漏同台怪,弃用
+            self._cam_x_scale = scale_x
+            self._cam_x_winw = win_w
         else:
             # 未校准：回退旧方案（整个小地图归一化，到边时不准）
             offset_x = mx
@@ -17441,18 +17450,26 @@ class MinimapRouteRecorder:
             _grace_ms = now_ms - getattr(self, '_b_lock_last_seen_ms', now_ms)
         else:
             _grace_ms = 10**9
-        _reach_l, _reach_r = self._platform_reachable_sides()   # 平台方向门(光点对绿线数据端,零屏幕换算);自由/未选台=(True,True)
-        if _pmode in ('single', 'multi') and now_ms - getattr(self, '_reach_dbg_last', -99999) >= 1500:
-            self._reach_dbg_last = now_ms
-            _debug_log("[平台方向门] 左可达=%s 右可达=%s 光点X=%s 台界=%s" % (
-                _reach_l, _reach_r,
-                (self._player_map_pos[0] if getattr(self, '_player_map_pos', None) else None),
-                self._locked_platform_x_range()))
+        # 平台台界X带(相机镜头实时放大率,2026-09-26定稿):自由/未选台/标定失效->None不过滤;_xband_t三元供诊断,_xband二元供选怪
+        _xband_t = self._platform_camera_x_band(px)
+        _xband = (_xband_t[0], _xband_t[1]) if (_pmode in ('single', 'multi') and _xband_t is not None and _xband_t[0] is not None) else None
+        if _pmode in ('single', 'multi') and _xband_t is not None and now_ms - getattr(self, '_band_dbg_last', -99999) >= 2000:
+            self._band_dbg_last = now_ms
+            _blo, _bhi, _bdbg = _xband_t
+            if _blo is not None:
+                _bitems = []
+                for (_bx1, _by1, _bx2, _by2, _bs) in _cand:
+                    _bcx = (_bx1 + _bx2) // 2; _bcy = _by2
+                    _bin = '内' if (_blo <= _bcx <= _bhi) else '外'
+                    _bitems.append("(%d,%d,%s,X%d,Y%d)" % (_bcx, _bcy, _bin, abs(_bcx - px), abs(_bcy - py)))
+                _debug_log("[台界带核对] mx/xmin/xmax/scale/px=%s 屏幕带=(%.0f,%.0f) | %s" % (
+                    _bdbg, _blo, _bhi, ' '.join(_bitems[:8])))
+            else:
+                _debug_log("[台界带核对] 带反转(内缩后空) dbg=%s" % (_bdbg,))
         _dl = combat_logic.combat_step(
-            # 平台选怪约束(用户2026-09-26,零屏幕换算):不靠怪→小地图倍率、也不用固定比例反算屏幕带(镜头卷动偏窄漏同台怪);
-            # 改传 reach_left/right(光点对绿线数据端判人是否走到台边)。平台只丢"人物外侧+该侧已到台边+停步射程外"的怪,
-            # 射程内脸上怪照打、台中间两侧怪全锁;走位另有平台守护+_combat_at_locked_edge兜底人不出台。
-            # 自由 reach=(True,True)、selected_platforms 固定传[],全图最近口径不变。
+            # 平台选怪约束(用户2026-09-26定稿,相机镜头实时放大率台界X带):manual_x_band由当帧scale_x(约15.24)把选中台
+            # 绿线数据界反算成屏幕X带、原点锚人物特征点;带外=屏外/相邻台怪,build_buckets直接不进桶(不锁不追不瞬移出台)。
+            # 带反转/标定失效->None不过滤保安全;自由模式恒None、selected_platforms固定传[],全图最近口径不变。
             now_ms, px, py, _cand, [], _skr, _aoe, _far_x,
             _judge_pos, bars, _has_dmg, True, True,   # 判活窗内lock=出手怪(钉保锁),窗外_judge_pos=_bl等价原逻辑
             self._b_probe_side, self._b_probe_switched,
@@ -17466,7 +17483,7 @@ class MinimapRouteRecorder:
             slope_y_up=(_sjmax if _slope_on else None),
             combat_mode=_pmode, allow_cross_up=_pcup, allow_cross_down=_pcdn,
             lock_grace_ms=_grace_ms,
-            reach_left=_reach_l, reach_right=_reach_r)  # 面板分流+平台方向门(2026-09-26):自由全图/平台同台Y<40,到边侧射程外怪不锁
+            manual_x_band=_xband)  # 面板分流+相机台界X带(2026-09-26):自由全图/平台同台Y<40且在台界X带内,带外别台怪不锁
         # B锁生命周期回存
         self._b_hp_confirmed = _dl['hp_confirmed']
         self._b_gone = _dl['gone_frames']
