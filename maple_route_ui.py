@@ -1,4 +1,4 @@
-﻿"""
+"""
 Minimap Route Recorder - 鼠标操作版
 Auto lock game window + blue border detection (projection) + ROI dot tracking
 三套方案（route_1/2/3），每套独立存储平台+梯子；方式：手动/随机
@@ -656,7 +656,6 @@ ROAM_SIDE_RATIO = 0.70    # 朝远侧竖线走该侧剩余距离的比例
 # 面板瞬移距离是屏幕px,数据步长=面板瞬移距离×(22/250≈0.088),面板250→数据约22(取略偏大防临界擦边越台);
 # 光点到该侧台端剩余<=此步长(闪了必越界/擦边)就不闪、改走路,防一闪越出台子。
 TELEPORT_SCREEN_TO_MAP_X = 22.0 / 250.0
-MONSTER_MAP_X_TOL = 2          # 平台紫点判台:怪紫点X落选中台绿线X区间的容差(小地图数据px),纯X判同台
 ROAM_COOLDOWN_MS = 15000  # 一次巡游结束(遇怪/走完)后冷却,期内不主动巡游(防左右来回晃)
 ROAM_MIN_SIDE_PX = 24     # 远侧距离(小地图px)小于此=已贴边没空间,改短冷却3s不巡游
 ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人物上方+60内可直打；>60够不着→走近)。用户2026-09-06：80→60
@@ -7142,7 +7141,7 @@ class MinimapRouteRecorder:
         """【选怪层·面板模式分流,用户2026-09-24定稿】返回(combat_mode, allow_cross_up, allow_cross_down),
         作为B锁怪是否跨层/只锁同台的单一事实源,与走位层 _auto_platform_top_block 同口径:
         编辑态/随机模式/手动零勾选/勾选台在platforms全失效->('random',True,True)全图自由;
-        手动有效选中台恰1个->('single',False,False)只锁屏幕|Y差|<MANUAL_SINGLE_Y_GAP同台怪,不跨层不跳高;
+        手动有效选中台恰1个->('single',False,False)只锁屏幕|Y差|<面板skill_range同台怪,不跨层不跳高;
         手动有效选中台>=2个->('multi',up,dn):以小地图光点Y(越小越高)对各选中台绿线Y均值,
         还存在更高选中台才放行向上cross、还存在更低台才放行向下cross(人在最顶层up=False,中底层True);
         光点丢失(爬梯/光门遮挡)->保守('multi',True,True)(爬梯中B锁本就关,恢复后每帧重算)。B线程只读不写,不依赖倍率。"""
@@ -7852,10 +7851,11 @@ class MinimapRouteRecorder:
         return (map_x, map_y)
 
     def _get_monster_platform(self, screen_x, screen_y):
-        """【模块B·平台模式判台,2026-09-26定稿纯X】怪屏幕坐标→小地图紫点X,紫点X落进某个【选中台】绿线X区间
-        (含MONSTER_MAP_X_TOL容差)即判怪在该台,返回该台dict;自由模式/零勾选/换算失效/不落任何选中台→None。
+        """【模块B·平台模式判台,2026-09-26定稿】怪屏幕坐标→小地图紫点X,紫点X落在某【选中台】绿线X区间
+        再向两侧各延伸一个面板技能范围(atk1_distance,锁怪范围=打怪范围=台子+延伸技能范围,用户2026-09-26)
+        内即判该台可打怪,返回该台dict;自由模式/零勾选/换算失效/不落任何选中台延伸区→None。
         只看X、不看点线Y距离:侧视屏幕Y(高低)与小地图俯视Y不等比,点线距离会因Y映射误差误丢同台怪;
-        用户口径=紫点与绿线X重合即同台;上下层同X重叠台不在此分,交由combat_logic同台Y带(40)+cross门区分。"""
+        上下层同X重叠台不在此分,交由combat_logic平台Y带(±skill_range)+cross门区分。"""
         map_pos = self._screen_to_map(screen_x, screen_y)
         if map_pos is None:
             return None
@@ -7863,11 +7863,14 @@ class MinimapRouteRecorder:
         _sel = self._active_platforms()
         if not _sel or not self.platforms:
             return None
+        # 锁怪范围=打怪范围=面板技能范围(用户2026-09-26定稿):台绿线X区间两端各延伸skill_range,XY同时满足才锁
+        _skr = int(self._get_fight_config().get("atk1_distance", 150) or 150)
+        _tol = _skr
         for pf in self.platforms:
             if (pf.get('id', 0) + 1) not in _sel:
                 continue
             _xmn, _xmx = self._platform_x_range(pf)
-            if (_xmn - MONSTER_MAP_X_TOL) <= mx <= (_xmx + MONSTER_MAP_X_TOL):
+            if (_xmn - _tol) <= mx <= (_xmx + _tol):
                 return pf
         return None
 
@@ -17744,11 +17747,11 @@ class MinimapRouteRecorder:
         if _pmv in ('single', 'multi') and _dl.get('state') == 'cast':
             _rdy = t_cy - py_layer
             _rdx = abs(t_cx - px)
-            if not (-combat_logic.MANUAL_SINGLE_Y_GAP < _rdy < combat_logic.MANUAL_SINGLE_Y_GAP) or _rdx > stop_range:
+            if not (-skill_range < _rdy < skill_range) or _rdx > stop_range:
                 self._release_combat_move()
                 self._release_all_keys()
                 _debug_log("[平台复核] 丢弃过期cast包 目标=(%d,%d) 最新人物=(%d,%d) X差%d Y差%d(同台带%d/停步射程%d),松键等B重锁" % (
-                    t_cx, t_cy, px, py_layer, _rdx, _rdy, combat_logic.MANUAL_SINGLE_Y_GAP, stop_range))
+                    t_cx, t_cy, px, py_layer, _rdx, _rdy, skill_range, stop_range))
                 return
         # --- drop善后(动作层):B判死,主线只清出手反馈+上屏+当帧重选(纯最近不拉黑位置);跳高打空也走这(=普通空怪,不降级cross) ---
         if _dl.get('drop'):

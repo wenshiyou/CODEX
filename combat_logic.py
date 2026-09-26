@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 打怪决策核心（纯逻辑，可脱离游戏用合成数据单元测试）。
 只负责"选哪只 / 往哪走 / 什么状态"，不碰底层检测/移动/存活。
@@ -38,9 +38,9 @@ CROSS_X_HYST = 30
 CROSS_X_MAX = 300    # 跨层最大X差:X差>=300先pursue水平走近,靠近后仍超面板可达带才跨层(用户:X差<300)
 LOCK_GRACE_MS = 500   # 同层范围外旧锁连续脱检宽限:此时间内沿用旧锁走近,抗YOLO漏帧全屏横跳
 
-# 平台模式(单台single+多台multi同一分支)同台Y容差(用户2026-09-26 50->40):只锁与人物|Y差|<40的同台怪,
-# 超40=别的台一律不锁(单台cross全关;多台仅对选中台方向走cross跨台);自由random模式不用此值、不受限。
-MANUAL_SINGLE_Y_GAP = 40
+# 平台模式(单台single+多台multi同一分支)锁怪范围(用户2026-09-26定稿)=打怪范围=面板技能范围skill_range:
+# X=台子绿线端点±skill_range(主文件_get_monster_platform判台扩区), Y=人物基点±skill_range(上下对称按面板);
+# XY同时满足才锁。自由random模式不用平台带、不受限。
 
 
 def _mk(state, target, direction, dist, cross_candidates=None, group=None, tier=None):
@@ -110,7 +110,6 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
                   group_priority=False, aoe_y_up=None, aoe_y_down=None,
                   allow_cross=True, metric=None, same_platform_fn=None,
                   slope_y_up=None, combat_mode='random',
-                  manual_same_y=MANUAL_SINGLE_Y_GAP,
                   allow_cross_up=True, allow_cross_down=True):
     """按"这套打法实际够得着的高度"把怪分三档(用户2026-09-23定稿,与主线high_slope同一口径):
       · 同层档 cand(元素(x_gap,cx,cy)):站直/走近/原地主攻够得到——
@@ -132,11 +131,12 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
         if aoe_y_down is not None:
             _pool_y_down = max(_pool_y_down, aoe_y_down)
     # === 两套打怪规则(用户2026-09-24):同一套分桶代码按 combat_mode 收窄同层Y带/跨层方向,random逐行等价现状 ===
-    #  random 自由全图:同层带=面板(群攻放宽)、双向可跨层、跳高照开,不受manual_same_y限制;
-    #  single(单台)/multi(多台)=平台模式同一分支(用户2026-09-26):同台Y带统一=manual_same_y(40)、跳高全关;
+    #  random 自由全图:同层带=面板(群攻放宽)、双向可跨层、跳高照开;
+    #  single(单台)/multi(多台)=平台模式同一分支(用户2026-09-26定稿):锁怪范围=打怪范围=面板skill_range,
+    #    Y=人物基点±skill_range、X=台子端点±skill_range(判台回调扩区),跳高全关;
     #    唯一区别是跨台cross——single全关(上下层怪都不锁),multi仅放行"还有更高/更低选中台"的方向(allow_cross_up/down)。
     if combat_mode in ('single', 'multi'):
-        eff_up, eff_down = manual_same_y, manual_same_y
+        eff_up = eff_down = max(1, int(skill_range))
         eff_slope = None
         if combat_mode == 'single':
             cross_up = cross_down = False
@@ -275,7 +275,7 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                          group_priority=False, group_radius=0,
                          aoe_y_up=None, aoe_y_down=None, aoe_dual=False,
                          same_platform_fn=None, metric=None, slope_y_up=None,
-                         combat_mode='random', manual_same_y=MANUAL_SINGLE_Y_GAP,
+                         combat_mode='random',
                          allow_cross_up=True, allow_cross_down=True,
                          lock_grace_ms=10**9,
                          side_anchor_x=None):
@@ -292,7 +292,7 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
         px, py, monsters, selected_platforms, skill_range, get_monster_platform,
         attack_y_up, attack_y_down, group_priority, aoe_y_up, aoe_y_down,
         allow_cross, metric, same_platform_fn, slope_y_up,
-        combat_mode, manual_same_y, allow_cross_up, allow_cross_down)
+        combat_mode, allow_cross_up, allow_cross_down)
 
     _skeys = set((r[1], r[2]) for r in slope_rows)
     plane = [r for r in cand if (r[1], r[2]) not in _skeys]
@@ -475,7 +475,7 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                 freeze_lock=False, group_priority=False, group_radius=0,
                 aoe_y_up=None, aoe_y_down=None, aoe_dual=False, can_strike=True, lock_tier=None,
                 same_platform_fn=None, metric=None, slope_y_up=None,
-                combat_mode='random', manual_same_y=MANUAL_SINGLE_Y_GAP,
+                combat_mode='random',
                 allow_cross_up=True, allow_cross_down=True,
                 lock_grace_ms=10**9):
     """组合 select_combat_target + lock_status + decide_attack，得到本tick完整的战斗决策。
@@ -523,7 +523,7 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                             allow_cross, now, lock_time, freeze_lock, lock_tier, group_priority, group_radius,
                             aoe_y_up, aoe_y_down, aoe_dual, same_platform_fn=same_platform_fn,
                             metric=metric, slope_y_up=slope_y_up,
-                            combat_mode=combat_mode, manual_same_y=manual_same_y,
+                            combat_mode=combat_mode,
                             allow_cross_up=allow_cross_up, allow_cross_down=allow_cross_down,
                             lock_grace_ms=lock_grace_ms,
                             side_anchor_x=(lock[0] if lock else None))
