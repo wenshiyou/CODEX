@@ -656,6 +656,7 @@ ROAM_SIDE_RATIO = 0.70    # 朝远侧竖线走该侧剩余距离的比例
 # 面板瞬移距离是屏幕px,数据步长=面板瞬移距离×(22/250≈0.088),面板250→数据约22(取略偏大防临界擦边越台);
 # 光点到该侧台端剩余<=此步长(闪了必越界/擦边)就不闪、改走路,防一闪越出台子。
 TELEPORT_SCREEN_TO_MAP_X = 22.0 / 250.0
+MONSTER_MAP_X_TOL = 2          # 平台紫点判台:怪紫点X落选中台绿线X区间的容差(小地图数据px),纯X判同台
 ROAM_COOLDOWN_MS = 15000  # 一次巡游结束(遇怪/走完)后冷却,期内不主动巡游(防左右来回晃)
 ROAM_MIN_SIDE_PX = 24     # 远侧距离(小地图px)小于此=已贴边没空间,改短冷却3s不巡游
 ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人物上方+60内可直打；>60够不着→走近)。用户2026-09-06：80→60
@@ -7276,32 +7277,6 @@ class MinimapRouteRecorder:
             return (_xmax - _dx) <= _step
         return (_dx - _xmin) <= _step
 
-    def _platform_camera_x_band(self, screen_px):
-        """平台台界屏幕X带·相机镜头放大率版(2026-09-26,真机同帧核对通过、正式用于build_buckets台界过滤)。
-        以人物特征屏幕点screen_px(与怪cx同为游戏窗口客户区坐标)为原点,台界【数据端】相对光点mx的数据差×
-        当前镜头实时放大率_cam_x_scale(=窗口宽/绿框数据宽,每帧刷新,日志约15.24)。不碰光点映射原点sx(其与特征点
-        存在系间偏移),只借尺度scale_x。返回(bxlo,bxhi,dbg)或None;带反转时bxlo=None。仅平台模式。"""
-        try:
-            _pmv, _, _ = self._platform_cross_direction()
-            if _pmv not in ('single', 'multi'):
-                return None
-            _xr = self._locked_platform_x_range()
-            _dot = getattr(self, '_player_map_pos', None)
-            _sc = getattr(self, '_cam_x_scale', None)
-            _win = getattr(self, '_cam_x_winw', None)
-            if _xr is None or not _dot or _dot[0] is None or screen_px is None or not _sc or not _win:
-                return None
-            _mx = float(_dot[0]); _xmin = float(_xr[0]); _xmax = float(_xr[1])
-            _pxf = float(screen_px); _sc = float(_sc); _m = 15.0
-            _bxlo = max(0.0, _pxf + (_xmin - _mx) * _sc) + _m
-            _bxhi = min(float(_win), _pxf + (_xmax - _mx) * _sc) - _m
-            _dbg = (_mx, _xmin, _xmax, round(_sc, 2), round(_pxf))
-            if _bxhi <= _bxlo:
-                return (None, None, _dbg)
-            return (_bxlo, _bxhi, _dbg)
-        except Exception:
-            return None
-
     def _effective_scale(self):
         """【模块B】返回最终倍率(总值) = 检测值 + 手动偏移值。
         检测值：三点检测/手动记录写入的 _calibrated_scale_x/y；未检测时用默认值(0.10)。
@@ -7330,15 +7305,20 @@ class MinimapRouteRecorder:
               怪小地图Y = 人物小地图Y + (怪屏幕Y - 人物屏幕Y) * scale
         参数：screen_x, screen_y = 怪在游戏画面中的屏幕坐标
         返回：(map_x, map_y) 估算的小地图坐标；人物位置未知时返回None"""
-        # =====【倍率功能·已停用 2026-09-24】屏幕<->小地图换算停用,直接None:怪判台/小地图怪紫点/跨层walk选台安全跳过,跨层统一走梯子。恢复:删下一return行。=====
-        return None
         # 人物小地图坐标（黄色光点中心）
         if not self._player_map_pos or not self._player_screen_pos:
             return None
         pmap_x, pmap_y = self._player_map_pos       # 人物在小地图上的坐标
         pscr_x, pscr_y = self._player_screen_pos     # 人物在游戏画面中的屏幕坐标
-        # X和Y用各自的最终scale = 定完点锁定的倍率 + 手动偏移（最终值）
-        effective_sx, effective_sy = self._effective_scale()
+        # 怪屏幕->小地图比例取【绿框镜头实时放大率的倒数】(屏幕px->数据px,2026-09-26定稿):固定倍率(三点0.10/
+        # 瞬移标定0.088)在镜头卷动/边缘钳制下偏、曾反算带偏窄漏同台怪;绿框scale每帧随镜头刷新(实测约15.24)、
+        # 与台界屏幕带互为反函数、真机核对准。只读绿框缓存,不改绿框绘制/光点映射。缓存缺失(未校准/全图)->None安全侧不判台。
+        _cxs = getattr(self, '_cam_x_scale', None)
+        _cys = getattr(self, '_cam_y_scale', None)
+        if not _cxs or not _cys:
+            return None
+        effective_sx = 1.0 / float(_cxs)
+        effective_sy = 1.0 / float(_cys)
         # 以人物为参考点，计算怪相对于人物的偏移，再转成小地图偏移
         map_x = pmap_x + (screen_x - pscr_x) * effective_sx
         map_y = pmap_y + (screen_y - pscr_y) * effective_sy
@@ -7872,30 +7852,23 @@ class MinimapRouteRecorder:
         return (map_x, map_y)
 
     def _get_monster_platform(self, screen_x, screen_y):
-        """【模块B】判定怪在哪个平台上（用手动录制平台判定）
-        用途：找怪时判断怪和人物是否同平台，还是在上面/下面的平台
-        原理：
-          1. 怪屏幕坐标(YOLO) → 估算小地图坐标(_screen_to_map)
-          2. 用手动录制的平台判定：距离≤15px = 在该平台上
-        参数：screen_x, screen_y = 怪在游戏画面中的屏幕坐标
-        返回：平台对象dict；找不到返回None"""
+        """【模块B·平台模式判台,2026-09-26定稿纯X】怪屏幕坐标→小地图紫点X,紫点X落进某个【选中台】绿线X区间
+        (含MONSTER_MAP_X_TOL容差)即判怪在该台,返回该台dict;自由模式/零勾选/换算失效/不落任何选中台→None。
+        只看X、不看点线Y距离:侧视屏幕Y(高低)与小地图俯视Y不等比,点线距离会因Y映射误差误丢同台怪;
+        用户口径=紫点与绿线X重合即同台;上下层同X重叠台不在此分,交由combat_logic同台Y带(40)+cross门区分。"""
         map_pos = self._screen_to_map(screen_x, screen_y)
         if map_pos is None:
             return None
-        mx, my = map_pos
-        # 用手动录制的平台判定
-        if not self.platforms:
+        mx = map_pos[0]
+        _sel = self._active_platforms()
+        if not _sel or not self.platforms:
             return None
-        best_pf = None
-        best_dist = 999.0
         for pf in self.platforms:
-            pts = self._platform_points(pf)
-            d = self._point_to_polyline_dist(mx, my, pts)
-            if d < best_dist:
-                best_dist = d
-                best_pf = pf
-        if best_pf and best_dist <= 15:
-            return best_pf
+            if (pf.get('id', 0) + 1) not in _sel:
+                continue
+            _xmn, _xmx = self._platform_x_range(pf)
+            if (_xmn - MONSTER_MAP_X_TOL) <= mx <= (_xmx + MONSTER_MAP_X_TOL):
+                return pf
         return None
 
 
@@ -14118,6 +14091,9 @@ class MinimapRouteRecorder:
             # 供平台台界屏幕带反算;旧固定比例(1/0.088=11.36)偏小约35%致反算带偏窄漏同台怪,弃用
             self._cam_x_scale = scale_x
             self._cam_x_winw = win_w
+            # 同步缓存Y向镜头实时放大率(数据px->屏幕px),供怪屏幕->小地图紫点判台取倒数;只缓存不改绿框行为(2026-09-26)
+            self._cam_y_scale = scale_y
+            self._cam_y_winh = win_h
         else:
             # 未校准：回退旧方案（整个小地图归一化，到边时不准）
             offset_x = mx
@@ -16492,30 +16468,10 @@ class MinimapRouteRecorder:
             cross_candidates.sort()
             _, fx, fy = cross_candidates[0]
         target_mid = None
-        via = 'ladder'
-        if fx is not None:
-            # 仅当怪在绿线、人也在绿线、且两绿线有交叉点才走walk
-            monster_pf = self._get_monster_platform(fx, fy)
-            cur_pf = self._get_current_manual_platform() if monster_pf else None
-            inter = self._find_platform_intersection(cur_pf, monster_pf) if (monster_pf and cur_pf) else None
-            if monster_pf and cur_pf and inter:
-                via = 'walk'
-                _path = []
-                _bpts = sorted(self._platform_points(cur_pf),
-                               key=lambda p: (abs(float(p[0]) - mpx) + abs(float(p[1]) - mpy)))
-                _path += [(float(p[0]), float(p[1])) for p in _bpts]
-                _path.append((float(inter[0]), float(inter[1])))
-                _fork = len(_path) - 1
-                _tpts = sorted(self._platform_points(monster_pf),
-                               key=lambda p: (abs(float(p[0]) - inter[0]) + abs(float(p[1]) - inter[1])))
-                _path += [(float(p[0]), float(p[1])) for p in _tpts]
-                self._transit_walk_fork_idx = _fork
-                self._transit_walk_path = _path
-                target_mid = _path[-1]
-                _debug_log("[跨层] 绿线相连交叉点(%.0f,%.0f),走绿线组合路径(%d点)" % (inter[0], inter[1], len(_path)))
-            elif monster_pf:
-                _debug_log("[跨层] 怪在绿线但人不在/绿线不相连,走梯/跳段")
-        else:
+        via = 'ladder'   # cross怪统一梯子/横跳下台(用户定稿),绿线相连walk已弃用,故via恒ladder
+        # cross怪(上/下别台)统一走梯子/横跳下台(用户定稿),不再走"绿线相连walk":倍率恢复后纯X判台会让上下层
+        # X重叠的cross怪误判同台而复活旧walk分支;walk绿线路径已弃用。仅"无cross怪的选台模式"保留水平选台。
+        if fx is None:
             # 无cross怪:选台模式→下一选中台(录制台点真实小地图坐标);全图未选台→原地等刷
             _sel = self._active_platforms()
             if _sel:
@@ -16553,12 +16509,6 @@ class MinimapRouteRecorder:
         self._transit_jump_probe_t = 0
         self._transit_jump_probe_next = 0
         self._transit_jump_effective = False
-        if via == 'walk':
-            # 绿线找本层怪:不关怪扫,目标=绿线终点(真实小地图坐标)
-            self._ladder_precise_mode = False
-            self._transit_target = target_mid
-            print("[跨层] 绿线相连,走台子路径(%.0f,%.0f)" % (target_mid[0], target_mid[1]))
-            return True
         if fx is not None:
             # cross上/下梯段关扫时机交给各入口(用户2026-09-19):上行enter先进settle站定、稳梯建锁成功才关(走近/站定/扫梯怪扫全程开);
             # 下行_enter_descend在第一次下跳即自行置True。这里先False不抢关,不设怪小地图目标;方向只看屏幕Y(怪Y<人Y=上层)
@@ -17450,27 +17400,27 @@ class MinimapRouteRecorder:
             _grace_ms = now_ms - getattr(self, '_b_lock_last_seen_ms', now_ms)
         else:
             _grace_ms = 10**9
-        # 平台台界X带(相机镜头实时放大率,2026-09-26定稿):自由/未选台/标定失效->None不过滤;_xband_t三元供诊断,_xband二元供选怪
-        _xband_t = self._platform_camera_x_band(px)
-        _xband = (_xband_t[0], _xband_t[1]) if (_pmode in ('single', 'multi') and _xband_t is not None and _xband_t[0] is not None) else None
-        if _pmode in ('single', 'multi') and _xband_t is not None and now_ms - getattr(self, '_band_dbg_last', -99999) >= 2000:
-            self._band_dbg_last = now_ms
-            _blo, _bhi, _bdbg = _xband_t
-            if _blo is not None:
-                _bitems = []
-                for (_bx1, _by1, _bx2, _by2, _bs) in _cand:
-                    _bcx = (_bx1 + _bx2) // 2; _bcy = _by2
-                    _bin = '内' if (_blo <= _bcx <= _bhi) else '外'
-                    _bitems.append("(%d,%d,%s,X%d,Y%d)" % (_bcx, _bcy, _bin, abs(_bcx - px), abs(_bcy - py)))
-                _debug_log("[台界带核对] mx/xmin/xmax/scale/px=%s 屏幕带=(%.0f,%.0f) | %s" % (
-                    _bdbg, _blo, _bhi, ' '.join(_bitems[:8])))
-            else:
-                _debug_log("[台界带核对] 带反转(内缩后空) dbg=%s" % (_bdbg,))
+        # 平台选怪判台(2026-09-26定稿,小地图紫点纯X):平台模式传入选中台号,build_buckets逐只把怪经绿框实时比例
+        # 换算成紫点X、落选中台绿线X区间才留(别台/屏外不锁不追不瞬移出台);自由模式传[]不判台=全图最近口径。
+        _sel_pf_ids = self._active_platforms() if _pmode in ('single', 'multi') else []
+        if _sel_pf_ids and now_ms - getattr(self, '_purple_dbg_last', -99999) >= 2000:
+            self._purple_dbg_last = now_ms
+            _xr = self._locked_platform_x_range()
+            _pitems = []
+            for (_bx1, _by1, _bx2, _by2, _bs) in _cand:
+                _bcx = (_bx1 + _bx2) // 2; _bcy = _by2
+                _mp = self._screen_to_map(_bcx, _bcy)
+                if _mp is not None:
+                    _tag = '%.0f/%s' % (_mp[0], ('内' if (_xr and _xr[0] <= _mp[0] <= _xr[1]) else '外'))
+                else:
+                    _tag = 'NA'
+                _pitems.append(_tag)
+            _debug_log("[紫点判台] 选中台=%s 绿线X并集=%s | 紫点mapX/内外: %s" % (
+                _sel_pf_ids, ('%.0f~%.0f' % _xr) if _xr else 'NA', ' '.join(_pitems[:10])))
         _dl = combat_logic.combat_step(
-            # 平台选怪约束(用户2026-09-26定稿,相机镜头实时放大率台界X带):manual_x_band由当帧scale_x(约15.24)把选中台
-            # 绿线数据界反算成屏幕X带、原点锚人物特征点;带外=屏外/相邻台怪,build_buckets直接不进桶(不锁不追不瞬移出台)。
-            # 带反转/标定失效->None不过滤保安全;自由模式恒None、selected_platforms固定传[],全图最近口径不变。
-            now_ms, px, py, _cand, [], _skr, _aoe, _far_x,
+            # 平台选怪判台(用户2026-09-26定稿,小地图紫点纯X):平台模式传入选中台号,build_buckets逐只把怪经绿框实时
+            # 比例换算成紫点X、落选中台绿线X区间才留(别台/屏外不锁不追不瞬移出台);自由模式传[]不判台=全图最近口径。
+            now_ms, px, py, _cand, _sel_pf_ids, _skr, _aoe, _far_x,
             _judge_pos, bars, _has_dmg, True, True,   # 判活窗内lock=出手怪(钉保锁),窗外_judge_pos=_bl等价原逻辑
             self._b_probe_side, self._b_probe_switched,
             self._is_monster_on_platform, self._get_monster_platform,
@@ -17482,8 +17432,7 @@ class MinimapRouteRecorder:
             same_platform_fn=None, metric=(None if _slope_air else metric),  # 腾空窗:用空中Y算的metric作废,改以锚点Y现算
             slope_y_up=(_sjmax if _slope_on else None),
             combat_mode=_pmode, allow_cross_up=_pcup, allow_cross_down=_pcdn,
-            lock_grace_ms=_grace_ms,
-            manual_x_band=_xband)  # 面板分流+相机台界X带(2026-09-26):自由全图/平台同台Y<40且在台界X带内,带外别台怪不锁
+            lock_grace_ms=_grace_ms)  # 面板分流+小地图紫点纯X判台(2026-09-26):平台只锁紫点X落选中台绿线区间、且Y同台40内的怪
         # B锁生命周期回存
         self._b_hp_confirmed = _dl['hp_confirmed']
         self._b_gone = _dl['gone_frames']

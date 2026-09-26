@@ -111,8 +111,7 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
                   allow_cross=True, metric=None, same_platform_fn=None,
                   slope_y_up=None, combat_mode='random',
                   manual_same_y=MANUAL_SINGLE_Y_GAP,
-                  allow_cross_up=True, allow_cross_down=True,
-                  manual_x_band=None):
+                  allow_cross_up=True, allow_cross_down=True):
     """按"这套打法实际够得着的高度"把怪分三档(用户2026-09-23定稿,与主线high_slope同一口径):
       · 同层档 cand(元素(x_gap,cx,cy)):站直/走近/原地主攻够得到——
           上方 |dy|<=attack_y_up(主攻上沿,开跳高也只给主攻带100,不含跳高段);
@@ -156,20 +155,14 @@ def build_buckets(px, py, monsters, selected_platforms, skill_range,
             cy = y2
             x_gap = abs(cx - px)
             dy = cy - py
-        # 平台台界X带(用户2026-09-26定稿,相机镜头实时放大率):manual_x_band=(bxlo,bxhi)由主线用当帧镜头
-        # scale_x(数据px→屏幕px,真机实测约15.24=窗口宽/取景框数据宽)把选中台绿线数据界反算成屏幕X带,原点锚
-        # 人物特征点(与怪cx同系)。带外怪=屏外/相邻台,平台模式直接不进任何桶(从源头不锁别台、不追不瞬移出台);
-        # 带反转或None(镜头标定失效)不过滤保安全;自由random恒None不过滤。真机同帧核对:同台怪全在带内、别台全外。
-        if combat_mode in ('single', 'multi') and manual_x_band is not None:
-            _bxlo, _bxhi = manual_x_band
-            if _bxlo is not None and _bxhi is not None and (cx < _bxlo or cx > _bxhi):
-                continue
+        # 平台判台(用户2026-09-26定稿,小地图紫点纯X):平台模式(single/multi)主线传入选中台号selected_platforms,
+        # 回调get_monster_platform(cx,cy)把怪屏幕坐标经绿框镜头实时比例换算成小地图紫点X,紫点X落进某选中台
+        # 绿线X区间(含容差)才返回该台;返回None(换算失效)或台号不在选中列表=别台/屏外怪,直接不进任何桶
+        # (从源头不锁别台、不追不瞬移出台)。自由random的selected_platforms为空,整段跳过=全图最近口径不变。
+        # 上下层同X重叠台不在此区分,交由下方同台Y带(eff=40)+cross门(单台关/多台按方向)处理。
         if selected_platforms:
             pf = get_monster_platform(cx, cy)
-            if pf:
-                if (pf.get('id', 0) + 1) not in selected_platforms:
-                    continue
-            else:
+            if not pf or (pf.get('id', 0) + 1) not in selected_platforms:
                 continue
         if x_gap >= CROSS_X_MAX:
             # X差超300先pursue水平走近(用户:X>=300先走过去);平台模式(单台/多台)远处怪也要Y在同台40带内才走近,否则=别台丢弃
@@ -285,8 +278,7 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
                          combat_mode='random', manual_same_y=MANUAL_SINGLE_Y_GAP,
                          allow_cross_up=True, allow_cross_down=True,
                          lock_grace_ms=10**9,
-                         side_anchor_x=None,
-                         manual_x_band=None):
+                         side_anchor_x=None):
     """决策核心:build_buckets 三档分桶 → 维持当前锁定 → pick_from_buckets 选新。
 
     分档(用户2026-09-23定稿,治同层/跳高混池逐帧换锁):
@@ -300,8 +292,7 @@ def select_combat_target(px, py, monsters, selected_platforms, skill_range, far_
         px, py, monsters, selected_platforms, skill_range, get_monster_platform,
         attack_y_up, attack_y_down, group_priority, aoe_y_up, aoe_y_down,
         allow_cross, metric, same_platform_fn, slope_y_up,
-        combat_mode, manual_same_y, allow_cross_up, allow_cross_down,
-        manual_x_band=manual_x_band)
+        combat_mode, manual_same_y, allow_cross_up, allow_cross_down)
 
     _skeys = set((r[1], r[2]) for r in slope_rows)
     plane = [r for r in cand if (r[1], r[2]) not in _skeys]
@@ -486,7 +477,7 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                 same_platform_fn=None, metric=None, slope_y_up=None,
                 combat_mode='random', manual_same_y=MANUAL_SINGLE_Y_GAP,
                 allow_cross_up=True, allow_cross_down=True,
-                lock_grace_ms=10**9, manual_x_band=None):
+                lock_grace_ms=10**9):
     """组合 select_combat_target + lock_status + decide_attack，得到本tick完整的战斗决策。
 
     参数: 见各部分；now/lock_time 单位ms。
@@ -535,8 +526,7 @@ def combat_step(now, px, py, monsters, selected_platforms, skill_range, aoe_rang
                             combat_mode=combat_mode, manual_same_y=manual_same_y,
                             allow_cross_up=allow_cross_up, allow_cross_down=allow_cross_down,
                             lock_grace_ms=lock_grace_ms,
-                            side_anchor_x=(lock[0] if lock else None),
-                            manual_x_band=manual_x_band)
+                            side_anchor_x=(lock[0] if lock else None))
     # 技能施放决策
     skill = 'none'
     if d['target'] is not None and d['dist'] is not None:
