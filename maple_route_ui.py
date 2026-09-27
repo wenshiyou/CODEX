@@ -662,6 +662,7 @@ MONSTER_MAP_Y_SNAP = 10   # 紫点Y吸到绿线的最大偏差(小地图px,用�
 PURPLE_KEEP_MS = 800        # 紫点漏检保持ms(用户2026-09-26):最后已知位置短暂保持防闪,超时消失
 PURPLE_MATCH_SCREEN_PX = 60 # 紫点跨帧关联阈值(屏幕px):此距离内视为同一只怪
 ROAM_COOLDOWN_MS = 15000  # 一次巡游结束(遇怪/走完)后冷却,期内不主动巡游(防左右来回晃)
+ROAM_WAIT_MS = 5000       # 巡游等待(用户2026-09-27):无怪先原地等5秒,满5秒没怪才向对侧走一次
 ROAM_MIN_SIDE_PX = 24     # 远侧距离(小地图px)小于此=已贴边没空间,改短冷却3s不巡游
 ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人物上方+60内可直打；>60够不着→走近)。用户2026-09-06：80→60
 ATTACK_Y_DOWN = 30       # 打怪Y范围·向下：怪比人物低最多30px(人物下方-30内可直打；>30够不着→走近)
@@ -1831,6 +1832,8 @@ class MinimapRouteRecorder:
         self._roam_target_mx = None       # 巡游目标小地图X(光点像素)
         self._roam_start_mx = None        # 巡游起点小地图X(算全程,末段30%停瞬移用)
         self._roam_cd_until = 0           # 巡游冷却截止ms(一次结束起15s)
+        self._roam_phase = None              # 巡游状态机(用户2026-09-27):None/waiting/going/parked
+        self._roam_wait_until = 0            # waiting截止时间(无怪后等5秒)
         self._raw_char_t = 0                # 后台线程最近一次发布人物脚位置的时间戳(ms)
         self._monster_scan_enabled = True   # 怪物识别B线程百分百总开关(锁梯/上梯/下跳关,回打怪开):关=主线程当帧拿不到任何怪数据
         self._raw_monster_packet = ([], {}) # B线程原子发布(怪框列表, metric几何表)同帧配对; metric={框四角:(cx,cy,x_gap,dy)}
@@ -6685,100 +6688,111 @@ class MinimapRouteRecorder:
         return abs(dx) <= 4 and abs(dy) <= 6
 
     def _roam_tick(self, now_ms):
-        """同层巡游找怪(用户2026-09-19):同层无怪、也没跨层梯子候选时,朝小地图光点"远的一侧竖线(l/r)"走该侧
-        剩余距离的ROAM_SIDE_RATIO(70%),边走边找怪;B一锁到怪(任意target)立即松键停手回主线打,没走完也不补齐;
-        一次巡游结束(遇怪/走完)起冷却ROAM_COOLDOWN_MS。返回True=本帧巡游在走路(调用方直接return);False=没巡游。
-        水平移动唯一走_move_horizontal(小地图光点导航,用_random_move_keys,与战斗combat键互不复用)。
-        爬梯/软态去梯/选台走/越线拉回一律不巡游并取消进行中的巡游(跨层/拉回打断不耗冷却)。"""
+        """同层巡游找怪(用户2026-09-27重写:三态状态机,最多走一次)
+        waiting:无怪原地等5秒,刷怪就打;满5秒没怪→going
+        going:向远侧走ROAM_SIDE_RATIO(70%),边走边找怪,遇怪即停去打;走到目标没怪→parked
+        parked:留在对侧一直等出怪,不往回走、不左右反复
+        台子模式不巡游;爬梯/transit/越线拉回取消巡游。返回True=本帧巡游在走路;False=没巡游。"""
         if self.route_mode != '随机':
-            # 台子模式(单/多台)无怪原地等刷怪、不巡游:巡游朝"远侧竖线"走70%、冷却后反向=反复左右横跳;仅自由模式巡游
+            self._roam_phase = None
             self._roam_end(False)
             return False
         cs = getattr(self, '_climb_state', 'none')
         if cs != 'none' or getattr(self, '_combat_transit', False):
+            self._roam_phase = None
             self._roam_end(False)
             return False
         if getattr(self, '_bound_pull', None) is not None:
+            self._roam_phase = None
             self._roam_end(False)
             return False
         _pkt = getattr(self, '_combat_decision_packet', None)
         if _pkt and _pkt.get('target'):
+            # 有怪了:重置巡游状态,去打怪
             if getattr(self, '_roam_active', False):
-                self._roam_end(True)   # 遇怪即停(不补齐),起冷却
+                self._roam_end(False)
+            self._roam_phase = None
             return False
-        if now_ms < getattr(self, '_roam_cd_until', 0):
+        # ---- 无怪:三态状态机 ----
+        if self._roam_phase is None:
+            self._roam_phase = 'waiting'
+            self._roam_wait_until = now_ms + ROAM_WAIT_MS
+            _debug_log("[巡游] 无怪,原地等%.0fs后向对侧找怪" % (ROAM_WAIT_MS / 1000.0))
             return False
-        dot = getattr(self, '_player_map_pos', None)
-        try:
-            lines = self._get_bound_lines()
-        except Exception:
-            lines = None
-        if dot is None or not lines:
-            self._roam_end(False)
-            return False
-        mx, my = dot[0], dot[1]
-        bl, br = lines['l'], lines['r']
-        dL, dR = mx - bl, br - mx
-        if not getattr(self, '_roam_active', False):
+        if self._roam_phase == 'waiting':
+            if now_ms < self._roam_wait_until:
+                return False   # 继续等怪
+            # 等满5秒没怪:选远侧开始走
+            dot = getattr(self, '_player_map_pos', None)
+            try:
+                lines = self._get_bound_lines()
+            except Exception:
+                lines = None
+            if dot is None or not lines:
+                self._roam_phase = 'parked'   # 拿不到坐标,停在这等
+                return False
+            mx, my = dot[0], dot[1]
+            bl, br = lines['l'], lines['r']
+            dL, dR = mx - bl, br - mx
             _far = dR if dR >= dL else dL
             if _far < ROAM_MIN_SIDE_PX:
-                self._roam_cd_until = now_ms + 3000   # 已贴边没空间,短冷却避免每帧重算
+                self._roam_phase = 'parked'   # 已贴边没空间,停在这等
                 return False
             _tgt = mx + ROAM_SIDE_RATIO * dR if dR >= dL else mx - ROAM_SIDE_RATIO * dL
             self._roam_target_mx = _tgt
-            self._roam_start_mx = mx
             self._roam_active = True
-            _debug_log("[巡游] 同层无怪,朝%s侧找怪:光点%.0f→目标%.0f(远侧%.0f小地图px,走%.0f%%)" % (
-                "右" if dR >= dL else "左", mx, _tgt, _far, ROAM_SIDE_RATIO * 100))
-        if self._roam_target_mx is None:
-            self._roam_end(False)
-            return False
-        # === 巡游瞬移(用户2026-09-21):配合走路、不单独用。符合条件朝巡游方向闪一段,闪不成/冷却内落下面走路,不发呆 ===
-        # 复用战斗/向梯瞬移同一套(键+X距离、2秒冷却、前摇后摇、边界拉回冷却),不挂战斗pending校验;末段30%只走不闪防冲过头。
-        try:
-            _rtcfg = self._get_fight_config()
-            _rtp_key = _rtcfg.get("teleport_key", "")
-            _rtp_x = int(_rtcfg.get("teleport_distance", 0) or 0)
-            _rsgn = 1 if self._roam_target_mx > mx else -1
-            _rrem = abs(self._roam_target_mx - mx)
-            _rspan = abs(self._roam_target_mx - (getattr(self, '_roam_start_mx', mx) or mx))
-            _rspan = _rspan if _rspan > 4 else _rrem
-            _rside = 'right' if _rsgn > 0 else 'left'
-            _rbound = (_rside == getattr(self, '_bound_last_side', None)
-                       and now_ms < getattr(self, '_bound_tp_block_until', 0))
-            if (bool(_rtp_key) and _rtp_x > 0
-                    and now_ms - getattr(self, '_combat_last_h_teleport', 0) > TP_COOLDOWN_MS
-                    and now_ms >= getattr(self, '_combat_tp_post_until', 0)
-                    and not _rbound and _rrem > 0.3 * _rspan
-                    and not self._manual_tp_leaves_platform(_rside, _rtp_x)):
-                # 配合移动:先朝巡游方向按住左右键(_move_horizontal同款_random_move_keys),瞬移不单独用
-                if _rsgn > 0:
-                    if VK_LEFT in self._random_move_keys:
-                        self._key_up(VK_LEFT)
-                    if VK_RIGHT not in self._random_move_keys:
-                        self._key_down(VK_RIGHT)
-                else:
-                    if VK_RIGHT in self._random_move_keys:
-                        self._key_up(VK_RIGHT)
-                    if VK_LEFT not in self._random_move_keys:
-                        self._key_down(VK_LEFT)
-                self._pre_teleport_release()   # 松主攻+前摇(不松方向),攻击硬直过了才闪得出
-                self._press_game_key(_rtp_key, duration=120)
-                self._combat_last_h_teleport = now_ms   # 与战斗/向梯瞬移共用2秒冷却
-                self._char_relocate_until = now_ms + 700   # 瞬移合法大跳变:人物识别700ms全图重捕
-                self._rlog_throttle('roam_tp', "巡游找怪朝%s瞬移(剩余小地图%.0fpx)" % (_rside, _rrem), 800, log='behavior')
-        except Exception as _rte:
-            _debug_log("[巡游] 瞬移异常:%s" % _rte)
-        try:
-            _arrived = self._move_horizontal((mx, my), self._roam_target_mx, my)
-        except Exception as _e:
-            _debug_log("[巡游] 水平移动异常:%s" % _e)
-            self._roam_end(False)
-            return False
-        if _arrived or abs(mx - self._roam_target_mx) <= 4:
-            self._roam_end(True)       # 走完,起冷却
-            return False
-        return True
+            self._roam_phase = 'going'
+            _debug_log("[巡游] 等满无怪,向%s侧走:光点%.0f→目标%.0f(走%.0f%%)" % (
+                "右" if dR >= dL else "左", mx, _tgt, ROAM_SIDE_RATIO * 100))
+        if self._roam_phase == 'going':
+            dot = getattr(self, '_player_map_pos', None)
+            if dot is None or self._roam_target_mx is None:
+                self._roam_end(False)
+                self._roam_phase = 'parked'
+                return False
+            mx, my = dot[0], dot[1]
+            # 巡游瞬移(配合走路,不单独用)
+            try:
+                _rtcfg = self._get_fight_config()
+                _rtp_key = _rtcfg.get("teleport_key", "")
+                _rtp_x = int(_rtcfg.get("teleport_distance", 0) or 0)
+                _rsgn = 1 if self._roam_target_mx > mx else -1
+                _rrem = abs(self._roam_target_mx - mx)
+                _rside = 'right' if _rsgn > 0 else 'left'
+                _rbound = (_rside == getattr(self, '_bound_last_side', None)
+                           and now_ms < getattr(self, '_bound_tp_block_until', 0))
+                if (bool(_rtp_key) and _rtp_x > 0
+                        and now_ms - getattr(self, '_combat_last_h_teleport', 0) > TP_COOLDOWN_MS
+                        and now_ms >= getattr(self, '_combat_tp_post_until', 0)
+                        and not _rbound and _rrem > 20
+                        and not self._manual_tp_leaves_platform(_rside, _rtp_x)):
+                    if _rsgn > 0:
+                        if VK_LEFT in self._random_move_keys: self._key_up(VK_LEFT)
+                        if VK_RIGHT not in self._random_move_keys: self._key_down(VK_RIGHT)
+                    else:
+                        if VK_RIGHT in self._random_move_keys: self._key_up(VK_RIGHT)
+                        if VK_LEFT not in self._random_move_keys: self._key_down(VK_LEFT)
+                    self._pre_teleport_release()
+                    self._press_game_key(_rtp_key, duration=120)
+                    self._combat_last_h_teleport = now_ms
+                    self._char_relocate_until = now_ms + 700
+            except Exception:
+                pass
+            # 走向目标
+            try:
+                _arrived = self._move_horizontal((mx, my), self._roam_target_mx, my)
+            except Exception:
+                self._roam_end(False)
+                self._roam_phase = 'parked'
+                return False
+            if _arrived or abs(mx - self._roam_target_mx) <= 4:
+                self._roam_end(False)
+                self._roam_phase = 'parked'
+                _debug_log("[巡游] 走到对侧无怪,留在原地等出怪")
+                return False
+            return True
+        # parked:留在对侧原地等怪,不动作
+        return False
 
     def _roam_end(self, start_cooldown):
         """结束巡游:物理松开左右移动键(_move_horizontal同款_random_move_keys键);start_cooldown=True起15s冷却。"""
