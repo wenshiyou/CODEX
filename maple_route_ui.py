@@ -5219,7 +5219,9 @@ class MinimapRouteRecorder:
         self._desc_scr_last_x = None
         self._desc_scr_last_t = 0
         self._desc_scr_enter_t = 0
-        self._ladder_run_jumped = False  # 25点位是否已跑跳过（防止重复跳）
+        self._ladder_run_jumped = False
+        self._ladder_no_more_runjump = False  # 重置:新一把梯允许跑跳  # 25点位是否已跑跳过（防止重复跳）
+        self._ladder_no_more_runjump = False  # 跑跳失败后禁止再跑跳,直接直跳(用户2026-09-27)
         self._ladder_vert_jumped = False  # 10点位是否已直跳过
         # 精细点动对齐状态(用户2026-09-09),每次爬梯复位
         self._ladder_jump_phase = None    # None=未起跳 / 'post_jump'=起跳后流程中
@@ -5577,6 +5579,7 @@ class MinimapRouteRecorder:
             _debug_log("[爬梯·小地图] 跑跳没抓住(%s,抓梯窗后脑峰值%.2f),回goto走近再直跳(不占直跳轮次)" % (
                 why, getattr(self, '_ladder_back_peak', 0.0)))
         self._ladder_run_jumped = True
+        self._ladder_no_more_runjump = True  # 跑跳失败后不再跑跳,直接移动对准直跳
         self._ladder_vert_jumped = False
         self._ladder_jump_phase = 'mm_goto'
         self._ladder_post_jump_step = None
@@ -5870,7 +5873,8 @@ class MinimapRouteRecorder:
         prev_ad = getattr(self, '_ladder_mm_prev_ad', None)
         # ---- 3) 跑跳:ad在[RUNJUMP_MIN, rj]范围内就跳(用户2026-09-27:不限次数,在属于他的范围内就能跑跳) ----
         if (ad >= LADDER_MM_RUNJUMP_MIN and ad <= rj
-                and self._ladder_mm_approach_streak >= LADDER_MM_APPROACH_FRAMES):
+                and self._ladder_mm_approach_streak >= LADDER_MM_APPROACH_FRAMES
+                and not getattr(self, '_ladder_no_more_runjump', False)):
             self._ladder_mm_prev_px = px; self._ladder_mm_prev_ad = ad
             return self._ladder_mm_start_jump('run', d, py, now_ms, jump_key, vx=approach)
         # ---- 4) 直跳:ad<=vl 且连续停稳 ----
@@ -14623,7 +14627,7 @@ class MinimapRouteRecorder:
         _kr = bool(key_pressed(VK_RIGHT))
         _ku = bool(key_pressed(VK_UP))
         _kd = bool(key_pressed(VK_DOWN))
-        _kj = bool(key_pressed(VK_SPACE))  # 跳
+        _kj = bool(key_pressed(VK_JUMP))  # 跳
         # 瞬移后摇期：瞬时位移=面板瞬移距离（方向=上一次移动方向/朝向）
         if now_ms < getattr(self, '_combat_tp_post_until', 0):
             tp_dist = int(getattr(self, '_combat_tp_distance', 250) or 250)
