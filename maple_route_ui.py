@@ -11692,7 +11692,7 @@ class MinimapRouteRecorder:
                             _rpb = data.get('role_predict_box')
                             if _rpb:
                                 _px0, _py0, _px1, _py1, _preason = _rpb
-                                ppen = gdi32.CreatePen(0, 2, 0x00FFFF)  # 黄色2px=预测框
+                                ppen = gdi32.CreatePen(0, 2, 0xFFFFFF)  # 白色2px=预测框
                                 if ppen:
                                     gdi_objs.append(ppen)
                                 old_ppen = gdi32.SelectObject(hdc, ppen)
@@ -11705,7 +11705,7 @@ class MinimapRouteRecorder:
                                 if pfont:
                                     gdi_objs.append(pfont)
                                 old_pfont = gdi32.SelectObject(hdc, pfont)
-                                gdi32.SetTextColor(hdc, 0x00FFFF)
+                                gdi32.SetTextColor(hdc, 0xFFFFFF)
                                 gdi32.SetBkMode(hdc, 1)
                                 gdi32.TextOutW(hdc, int(_px0) + 4, int(_py0) - 16, _ptxt, len(_ptxt))
                                 gdi32.SelectObject(hdc, old_pfont)
@@ -14483,10 +14483,11 @@ class MinimapRouteRecorder:
         elif _kr:
             _dir = 1
         self._off_prev_mx = mx
-        if getattr(self, 'frame_count', 0) % 10 == 0:
-            _debug_log("[黑框方向] state=%s mx=%d md=%s kl=%d kr=%d dir=%d 用%s" % (
-                self._camera_state, mx, getattr(self,'_combat_move_dir',None), _kl, _kr, _dir,
-                '左' if _dir < 0 else '右'))
+        # [2026-09-27关闭] 黑框方向日志每10帧一次,怪多时频繁触发蒙板日志缓存失效,占绘制130ms/秒
+        # if getattr(self, 'frame_count', 0) % 10 == 0:
+        #     _debug_log("[黑框方向] state=%s mx=%d md=%s kl=%d kr=%d dir=%d 用%s" % (
+        #         self._camera_state, mx, getattr(self,'_combat_move_dir',None), _kl, _kr, _dir,
+        #         '左' if _dir < 0 else '右'))
         if self._camera_state == "deadzone":
             if _dir < 0: sx -= self.DEAD_LEFT_X      # 向左走:黑框偏右,向左补(减)
             elif _dir > 0: sx += self.DEAD_RIGHT_X   # 向右走:黑框偏左,向右补(加)
@@ -14663,9 +14664,8 @@ class MinimapRouteRecorder:
         if _pred is None or frame is None:
             return None
         _px, _py, _reason = _pred
-        # 预测区半径=面板maxmove（统一跳变限制值），比黑框40x40大很多
-        P = self._role_rec.get("params", ROLE_TRACK_DEFAULT) if self._role_rec else ROLE_TRACK_DEFAULT
-        _pr = int(P.get("maxmove", 250) or 250)
+        # 预测区半径=固定80px(比黑框40x40大,但比maxmove250小很多,用户2026-09-27:太大)
+        _pr = 80
         try:
             _H, _W = frame.shape[:2]
         except Exception:
@@ -17955,10 +17955,11 @@ class MinimapRouteRecorder:
                 _near.sort(key=lambda r: (abs(r[3]), r[2]))
                 _jp = ('(%d,%d)' % (_judge_pos[0], _judge_pos[1])) if _judge_pos else None
                 _fp = ('pos(%d,%d) el=%dms' % (_fb['pos'][0], _fb['pos'][1], int(now_ms - (_fb.get('t') or 0)))) if _fb else None
-                _debug_log('[锁怪横跳诊断] old=(%d,%d)->tgt=(%d,%d) %s[%s] drop=%s grace=%dms px=%d 侧=%s->%s judge=%s fb=%s 近身档怪数=%d %s' % (
-                    _old[0], _old[1], _tgt[0], _tgt[1], _dl.get('state'), _dl.get('tier'), _dl.get('drop'), _grace_ms, px,
-                    ('右' if _old[0] > px else '左'), ('右' if _tgt[0] > px else '左'), _jp, _fp,
-                    len(_near), _near[:6]))
+                # [2026-09-27关闭] 锁怪横跳诊断日志怪多层数多时频繁触发,占蒙板日志渲染CPU
+                # _debug_log('[锁怪横跳诊断] old=(%d,%d)->tgt=(%d,%d) %s[%s] drop=%s grace=%dms px=%d 侧=%s->%s judge=%s fb=%s 近身档怪数=%d %s' % (
+                #     _old[0], _old[1], _tgt[0], _tgt[1], _dl.get('state'), _dl.get('tier'), _dl.get('drop'), _grace_ms, px,
+                #     ('右' if _old[0] > px else '左'), ('右' if _tgt[0] > px else '左'), _jp, _fp,
+                #     len(_near), _near[:6]))
             except Exception as _je:
                 _debug_log('[锁怪横跳诊断] 异常 %s' % _je)
         if _dl.get('state') == 'switch':
