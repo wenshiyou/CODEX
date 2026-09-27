@@ -377,11 +377,15 @@ ROLE_ANCHORS = [
     ("name",    "角色名(主模板)",  "主要模板·头顶名字,固定不变,优先用它"),
     ("face_r",  "面部·朝右",      "只采朝右一张=人物主体;朝左由它水平镜像自动生成(不采会换的衣服)"),
     ("back",    "后脑",          "人物后脑/背面样式(爬梯等脸朝里、正面脸匹配不到时),彩色原图不抠图"),
+    ("skill1",  "技能特效1",      "人名被技能特效挡住时冗余,彩色原图不抠图,偏移自动学习"),
+    ("skill2",  "技能特效2",      "第二个技能特效冗余(需先采1)"),
     ("pet1",    "宠物名1",        "人被特效盖住时改用宠物名,建议给宠物改独特名"),
     ("pet2",    "宠物名2",        "第二个宠物名冗余(需先采1)"),
     ("pet3",    "宠物名3",        "第三个宠物名冗余(需先采2)"),
 ]
 ROLE_ANCHOR_KEYS = [_a[0] for _a in ROLE_ANCHORS]
+# 锚点定位优先级(数字越小越优先):人名主模板>面部朝右/后脑>技能特效>宠物名(用户2026-09-27)
+ROLE_ANCHOR_PRIORITY = {"name": 0, "face_r": 1, "back": 1, "skill1": 2, "skill2": 2, "pet1": 3, "pet2": 3, "pet3": 3}
 ROLE_OFF_LEARN_THR = 0.45  # 脸/后脑学"→人名基点"偏移的最低分(用户2026-09-18):同帧人名已过阈锚定真人,脸/后脑有0.45以上可信命中即可量几何差,不必也过定位阈值0.62(实测脸分常0.56~0.62)
 AUX_ANCHOR_MAX_MOVE = 80   # 脸/后脑/宠物这些【兜底锚点】映射点相对上一可信基点的最大合法跳变px(用户2026-09-20):兜底锚点误匹配多,不能像人名那样允许maxmove=250的瞬移,>80且弱匹配(<0.75)即当误匹配丢弃,全图重搜帧也生效
 ANCHOR_OFF_LEARN_MAXDEV = 70  # 脸/后脑学"→人名"偏移时,新量几何差与已学/固化偏移允许的最大偏离px(用户2026-09-20):超过=锚点本帧误匹配在人名外、丢弃不学,锁死固化几何(实测误匹配偏离可达134px,正常帧间抖动<30)
@@ -1516,6 +1520,12 @@ class MinimapRouteRecorder:
         self._role_anchor_polys = {}    # 本帧识别到(过阈)的各锚点缩小多边形{key:([(x,y)...],score)},供蒙板画框
         self._role_search_box = None    # 本帧局部跟踪搜索范围框(x0,y0,x1,y1);全图重搜时=None(不画)
         self._role_predict_box = None  # 蒙板:黄色预测框(动作感知预测搜索范围)
+        # [2026-09-27] 预测速度自动学习(EMA平滑,每次有效位移都学)
+        self._pred_learn_vx = 400.0   # 学到的走路速度 px/s(初值400)
+        self._pred_learn_vy = 120.0   # 学到的爬梯速度 px/s(初值120)
+        self._pred_learn_tp = 250     # 学到的瞬移距离 px(初值250)
+        self._pred_learn_last_pos = None  # 上一次学习采样位置
+        self._pred_learn_last_t = 0      # 上一次学习采样时间
         # === 梯子特征模板（随方案永久存盘，内存仅为运行时副本，权威在 data/route_xxx_ladder_tpl.json）===
         self._ladder_templates = []     # [{id,img,width,height}]
         # 人工上梯起跳定位(随梯子方案存盘,正数px,废速度自学;用户2026-09-21):rj=跑跳离梯心多远带速起跳 / vl=直跳还差多远松键滑入
@@ -4408,7 +4418,8 @@ class MinimapRouteRecorder:
                 row = tk.Frame(self._role_anchor_frame); row.pack(fill="x", pady=2)
                 has = self._role_has_anchor(key)
                 locked = (key == "pet2" and not self._role_has_anchor("pet1")) or \
-                         (key == "pet3" and not self._role_has_anchor("pet2"))  # 宠物名按顺序解锁
+                         (key == "pet3" and not self._role_has_anchor("pet2")) or \
+                         (key == "skill2" and not self._role_has_anchor("skill1"))  # 宠物名/技能特效按顺序解锁
                 def do_cap(k=key):
                     win.update(); self._capture_role_anchor(k)  # 采集器内部会withdraw/恢复并回调刷新
                 def do_rm(k=key):
@@ -6946,8 +6957,8 @@ class MinimapRouteRecorder:
                         if len(_ys) >= 3:  # 至少3个黄色像素才算
                             _cx2 = int(round(_xs.mean())) + _x0
                             _cy2 = int(round(_ys.mean())) + _y0
-                            if getattr(self, 'frame_count', 0) % 10 == 0:
-                                _debug_log("[光点] 光门模糊重捕=(%d,%d) 上次=(%d,%d) 黄像素=%d" % (_cx2, _cy2, _lx, _ly, len(_ys)))
+                            # [2026-09-27关闭] 光门模糊重捕日志(每秒15条,log=98ms帧率降到24)
+                            # if getattr(self, 'frame_count', 0) % 10 == 0: ...
                             return (_cx2 + int(getattr(self, '_dot_center_off_x', 0) or 0),
                                     _cy2 + int(getattr(self, '_dot_center_off_y', 0) or 0))
             except Exception:
@@ -14584,14 +14595,14 @@ class MinimapRouteRecorder:
             return None
         self._role_search_box = _roi  # 蒙板可见: 此刻正在黑框ROI内重搜真锚点(黑框只圈范围、不当坐标)
         _best = None  # (优先级, -分, key, loc, score): name=0 脸/后脑=1 宠物=2, 同级取分高
-        for _k in ("name", "face_r", "back", "pet1", "pet2", "pet3"):
+        for _k in ("name", "face_r", "back", "skill1", "skill2", "pet1", "pet2", "pet3"):
             try:
                 _s, _loc, _face = self._role_match_in(frame, _k, _roi)
             except Exception:
                 continue
             if _loc is None or _s < thr:
                 continue
-            _pr = 0 if _k == "name" else (1 if _k in ("face_r", "back") else 2)
+            _pr = ROLE_ANCHOR_PRIORITY.get(_k, 9)
             _cand = (_pr, -float(_s), _k, _loc, float(_s))
             if _best is None or _cand[:2] < _best[:2]:
                 _best = _cand
@@ -14631,21 +14642,21 @@ class MinimapRouteRecorder:
         _kj = bool(key_pressed(VK_JUMP))  # 跳
         # 瞬移后摇期：瞬时位移=面板瞬移距离（方向=上一次移动方向/朝向）
         if now_ms < getattr(self, '_combat_tp_post_until', 0):
-            tp_dist = int(getattr(self, '_combat_tp_distance', 250) or 250)
+            tp_dist = int(getattr(self, '_pred_learn_tp', 250) or 250)  # 用学到的瞬移距离
             tp_dir = getattr(self, '_combat_last_tp_dir', 0)
             if tp_dir != 0:
                 return (last_x + tp_dir * tp_dist, last_y, '瞬移%d' % (tp_dir * tp_dist))
         # 爬梯中：X钉死（梯子X基本不变），Y垂直移动
         _cs = getattr(self, '_climb_state', 'none')
         if _cs in ('climbing', 'post_jump'):
-            climb_vy = 120.0  # 爬梯速度 px/s
+            climb_vy = getattr(self, '_pred_learn_vy', 120.0)  # 用学到的爬梯速度
             if _ku:
                 return (last_x, int(last_y - climb_vy * dt_s), '上梯')
             if _kd:
                 return (last_x, int(last_y + climb_vy * dt_s), '下梯')
             return (last_x, last_y, '梯上静止')
         # 普通水平移动
-        move_vx = 400.0  # 跑步速度 px/s（保守值，实际约350-450）
+        move_vx = getattr(self, '_pred_learn_vx', 400.0)  # 用学到的走路速度
         if _kl and not _kr:
             return (int(last_x - move_vx * dt_s), last_y, '左走')
         if _kr and not _kl:
@@ -14664,8 +14675,8 @@ class MinimapRouteRecorder:
         if _pred is None or frame is None:
             return None
         _px, _py, _reason = _pred
-        # 预测区半径=固定80px(比黑框40x40大,但比maxmove250小很多,用户2026-09-27:太大)
-        _pr = 80
+        # 预测区半径=固定100px(用户2026-09-27:加大20)
+        _pr = 100
         try:
             _H, _W = frame.shape[:2]
         except Exception:
@@ -14674,9 +14685,10 @@ class MinimapRouteRecorder:
                 min(_W, _px + _pr), min(_H, _py + _pr))
         if _roi[2] <= _roi[0] or _roi[3] <= _roi[1]:
             return None
-        self._role_predict_box = (_roi[0], _roi[1], _roi[2], _roi[3], _reason)  # 蒙板黄色预测框
+        # 预测框向上偏移20显示(用户2026-09-27)
+        self._role_predict_box = (_roi[0], _roi[1] - 20, _roi[2], _roi[3] - 20, _reason)
         _best = None
-        for _k in ("name", "face_r", "back"):
+        for _k in ("name", "face_r", "back", "skill1", "skill2"):
             try:
                 _s, _loc, _face = self._role_match_in(frame, _k, _roi)
             except Exception:
@@ -14715,7 +14727,7 @@ class MinimapRouteRecorder:
             # 脸/后脑→人名基点的固定偏移:启动先读采集数据里上次自动学习固化的off_x/off_y(重启不丢、不用重学);没有再运行时学
             try:
                 _am0 = (self._role_rec or {}).get("anchors", {})
-                for _kk in ("face_r", "back"):
+                for _kk in ("face_r", "back", "skill1", "skill2"):
                     _mm = _am0.get(_kk) or {}
                     _ox, _oy = float(_mm.get("off_x", 0) or 0), float(_mm.get("off_y", 0) or 0)
                     if abs(_ox) > 0.5 or abs(_oy) > 0.5:
@@ -14743,6 +14755,19 @@ class MinimapRouteRecorder:
         maxmove = int(P.get("maxmove", 48)); faststep = int(P.get("faststep", 2)); research = float(P.get("research", 1500))
         now = time.time() * 1000
         last = tr["last"]
+        # [2026-09-27] 每帧计算预测位置并显示预测框(正常定位时也显示,随人物移动;丢点时作为搜索范围)
+        try:
+            _pred = self._predict_char_pos(now)
+            if _pred is not None:
+                _ppx, _ppy, _pwhy = _pred
+                _pr = 100  # 预测框半径±100(用户2026-09-27:加大20)
+                _ppy_off = _ppy - 20  # 向上偏移20(用户2026-09-27)
+                self._role_predict_box = (int(_ppx - _pr), int(_ppy_off - _pr),
+                                          int(_ppx + _pr), int(_ppy_off + _pr), _pwhy)
+            else:
+                self._role_predict_box = None
+        except Exception:
+            self._role_predict_box = None
         # 失配时miss每帧+1、≥faststep就全图=几乎每帧全图(脸还镜像=每帧4次全图匹配),吃满CPU/GIL把主循环绘制拖到
         # 400ms、帧率掉到10~15、动作中更抓不到锚点=死循环。给"miss触发的全图"加350ms最小间隔,期间只跑便宜局部窗,把帧率让回来。
         _FULL_GAP_MS = 350.0
@@ -14785,11 +14810,11 @@ class MinimapRouteRecorder:
                                      min(_Wd, int(_dot_for_roi[0])+_brx_d), min(_Hd, int(_dot_for_roi[1])+_bry_d))
         else:
             self._role_search_box = None
-            self._role_predict_box = None  # 预测框每帧清空
+            # 预测框不在此清空:每帧开头已计算设置(正常定位时也显示)
         # 人名永远第一;其余=冗余兜底(脸/后脑/宠物名1-3),人名丢时谁分高用谁、各带"→人名线"偏移,只显示分高那个。
         # 宠物始终跟人、位置绑定,人名/脸/后脑全被特效挡住时用宠物名兜底定位(用户:采了就要参与定位,不是只在管理窗看分)。
         got = {}
-        _AUX = ("face_r", "back", "pet1", "pet2", "pet3")
+        _AUX = ("face_r", "back", "skill1", "skill2", "pet1", "pet2", "pet3")  # 兜底锚点:脸/后脑>技能特效>宠物名
         # 全图(box=None:周期全图/persistent/光点丢失)只匹配人名一个锚点——6锚点全图(脸还镜像)是头号CPU黑洞,
         # 且会把远处同名文本/特效当人把坐标拽飞(用户2026-09-24);局部窗/黑框小ROI才跑全锚点(小窗极便宜、兜底强)。
         _match_keys = ("name",) if box is None else (("name",) + _AUX)
@@ -14822,19 +14847,9 @@ class MinimapRouteRecorder:
         self._role_anchor_polys = polys
         # 最新一帧各锚点分数/位置/朝向存出来,供「角色识别」管理窗直接显示(管理窗不再自己抓帧全图匹配,避免拖动/关窗时重活交错闪退、也省CPU)
         self._role_last_scores = got
-        if time.time() - getattr(self, '_role_diag_t', 0) > 0.5:
-            self._role_diag_t = time.time()
-            def _locstr(_kk):  # 各锚点质心坐标+脸/后脑到人名的固化偏移,供核对"人名在哪脸在哪差多少"(用户2026-09-18)
-                _g = got.get(_kk)
-                if _g is None or _g[1] is None:
-                    return ""
-                _o = tr.get("off_" + _kk)
-                return " %s=(%d,%d)%s" % (_kk, _g[1][0], _g[1][1],
-                                          (" Δ(%+d,%+d)" % (int(round(_o[0])), int(round(_o[1])))) if _o else "")
-            _debug_log("[角色跟踪] 模式=%s last=%s 分数[%s]%s%s%s" % (
-                "全图" if need_full else "局部", last,
-                " ".join("%s=%.2f" % (kk, got[kk][0]) for kk in got) or "无命中",
-                _locstr("name"), _locstr("face_r"), _locstr("back")))
+        # [2026-09-27关闭] 角色跟踪诊断日志(146字符长,导致蒙板日志缓存频繁失效,log=123ms帧率降到17)
+        # if time.time() - getattr(self, '_role_diag_t', 0) > 0.5:
+        #     ...
         # 定位仲裁:人名优先;人名丢了用脸/后脑里分高者兜底(谁分高谁更可能是真角色),不让定位框丢
         _nv = got.get("name")
         # 爬梯硬态(to_ladder对位/climbing在爬)及跨层结束短窗只认人名(用户2026-09-20):这些姿势脸/后脑/宠物最易误匹配,
@@ -14858,8 +14873,9 @@ class MinimapRouteRecorder:
         # 后脑back只在人物真在梯子上爬(_climb_state==climbing,后脑姿势真实)才学"→人名"偏移;平地/到顶/特效帧后脑在别处误匹配绝不学。
         # 脸face_r【固化不自学·只读盘上(10,61)·不写盘】(用户2026-09-20:脸误匹配污染off+天外误匹配拽飞坐标→锁空梯)。
         _climb_st_learn = getattr(self, '_climb_state', 'none')
-        _learn_anchor_on = {"back": (_climb_st_learn == "climbing")}  # face_r固化不自学、只读盘(2026-09-20)
-        for _kk in ("back",):  # 只后脑在climbing学;脸固化不学(2026-09-20)
+        _learn_anchor_on = {"back": (_climb_st_learn == "climbing"),
+                             "skill1": True, "skill2": True}  # 技能特效任何状态都学偏移(用户2026-09-27)
+        for _kk in ("back", "skill1", "skill2"):  # 后脑在climbing学;技能特效任何状态学;脸固化不学(2026-09-20)
             _g = got.get(_kk)
             # 人名在(已锚定真人)+姿势门控通过时,锚点有≥学习门限可信命中才量"→人名"几何偏移
             if (_nloc is not None and _g is not None and _g[0] >= ROLE_OFF_LEARN_THR and _g[1] is not None
@@ -14881,7 +14897,7 @@ class MinimapRouteRecorder:
                 self._role_rec = self._role_rec or self._load_role_recognize()
                 _amr = self._role_rec.setdefault("anchors", {})
                 _dirty = False
-                for _kk in ("back",):  # face_r固化、运行时永不写盘(2026-09-20)
+                for _kk in ("back", "skill1", "skill2"):  # face_r固化、运行时永不写盘(2026-09-20);技能特效偏移写盘固化
                     _o = tr.get("off_" + _kk)
                     if _o is not None and tr.get("off_n_" + _kk, 0) >= 5:
                         _mmr = _amr.setdefault(_kk, {})
@@ -14896,7 +14912,7 @@ class MinimapRouteRecorder:
             _ploc = _pv[1]
             if _pk == "name" or str(_pk).startswith("pet"):  # 人名直接用;宠物不偏移(在人左右不固定)、直接用命中点托底,保证定位大框不丢
                 _bx, _by = float(_ploc[0]), float(_ploc[1])
-            else:  # 脸/后脑兜底:基点必须落在人名那条线上——有固化/学到的偏移就加(映射回人名位置);连偏移都没学(冷启动)就沿用上一个人名点,绝不裸用脸/后脑自身质心造成基点上下跳
+            else:  # 脸/后脑/技能特效兜底:基点必须落在人名那条线上——有固化/学到的偏移就加(映射回人名位置);连偏移都没学(冷启动)就沿用上一个人名点,绝不裸用锚点自身质心造成基点上下跳
                 _o = tr.get("off_" + _pk)
                 if _o:
                     _bx, _by = float(_ploc[0]) + _o[0], float(_ploc[1]) + _o[1]
@@ -14915,6 +14931,30 @@ class MinimapRouteRecorder:
             tr["last"] = (ax, ay)
             tr["foot"] = (ax, ay)  # 单平台只看X,不做到脚补偿
             tr["miss"] = 0; tr["score"] = ps; tr["last_t"] = now
+            # [2026-09-27] 预测速度自动学习:正确定位后,根据按键状态+实际位移学真实速度
+            try:
+                _llp = getattr(self, '_pred_learn_last_pos', None)
+                _llt = getattr(self, '_pred_learn_last_t', 0)
+                if _llp is not None and _llt > 0 and now - _llt > 50 and now - _llt < 1000:
+                    _dx = ax - _llp[0]; _dy = ay - _llp[1]
+                    _dt = (now - _llt) / 1000.0
+                    _kl2 = bool(key_pressed(VK_LEFT)); _kr2 = bool(key_pressed(VK_RIGHT))
+                    _ku2 = bool(key_pressed(VK_UP)); _kd2 = bool(key_pressed(VK_DOWN))
+                    _cs2 = getattr(self, '_climb_state', 'none')
+                    # 走路:水平移动且不在爬梯
+                    if (_kl2 or _kr2) and _cs2 not in ('climbing', 'post_jump') and abs(_dx) > 3:
+                        _v = abs(_dx) / _dt
+                        if 100 < _v < 1500:
+                            self._pred_learn_vx = self._pred_learn_vx * 0.9 + _v * 0.1
+                    # 爬梯:垂直移动
+                    if _cs2 in ('climbing',) and (_ku2 or _kd2) and abs(_dy) > 2:
+                        _v = abs(_dy) / _dt
+                        if 30 < _v < 500:
+                            self._pred_learn_vy = self._pred_learn_vy * 0.9 + _v * 0.1
+                self._pred_learn_last_pos = (ax, ay)
+                self._pred_learn_last_t = now
+            except Exception:
+                pass
             tr["_miss_t"] = 0; tr["_full_persistent"] = False
             if need_full:
                 tr["last_full"] = now
@@ -17408,11 +17448,8 @@ class MinimapRouteRecorder:
                                                 score=_score, half=_half, pcr=_pcr, std=_std, rounds=_n_rounds,
                                                 rev=_n_rev, sum_eff=_sum_eff, n=len(_hist),
                                                 frame_dt=_frame_dt, real=_real, moving=True, still=False, t=_now_ms)
-                    if _now_ms - _last_log >= 250:
-                        _last_log = _now_ms
-                        _debug_log("[田字诊断] %s%s gap%d%s mt[d%.1f s%.2f] pc[d%.1f r%.2f] std%.0f 半%.2f | 同向%d 反向%d 累计%.0f 样本%d 周期%dms" % (
-                            _dn, _tag, _gap, '(弃权)' if _edge else '', _dd, _score, _pcd, _pcr, _std, _half,
-                            _n_rounds, _n_rev, _sum_eff, len(_hist), _frame_dt))
+                    # [2026-09-27关闭] 田字诊断日志(80字符长,每秒4条,log=130ms帧率降到20)
+                    # if _now_ms - _last_log >= 250: ...
                 else:
                     # 原地档(完全没按方向键 / 仅<100ms轻点转身):沿用上面公共对角检测区(左后上/右后上),二维背景位移;窗内全程无可信位移才判 still=True
                     _axis = None; _d = 0
@@ -17439,10 +17476,8 @@ class MinimapRouteRecorder:
                                                 score=_msc, pcr=_ipr, std=_std, rounds=len(_hist_idle),
                                                 rev=0, sum_eff=0.0, n=len(_hist_idle), frame_dt=_frame_dt,
                                                 real=False, moving=False, still=_still, t=_now_ms)
-                    if _now_ms - _last_log >= 250:
-                        _last_log = _now_ms
-                        _debug_log("[田字诊断] 原地%s gap%d pc[d%.1f,%.1f r%.2f] mt[d%.1f,%.1f s%.2f] std%.0f 静样%d 周期%dms" % (
-                            _itag, _gap, _idx, _idy, _ipr, _imx, _imy, _msc, _std, len(_hist_idle), _frame_dt))
+                    # [2026-09-27关闭] 田字诊断日志(原地版)
+                    # if _now_ms - _last_log >= 250: ...
             except Exception as _fe:
                 try:
                     _debug_log("[田字诊断] 异常:%s" % (_fe,))
@@ -17865,10 +17900,8 @@ class MinimapRouteRecorder:
                         P['probe_dmg'] += 1
                     if _has_dmg:
                         P['gate_dmg'] += 1
-                    _debug_log("[伤害探针] 出手后%dms 对齐=%s 射程内=%s 门开=%s | 探针见字=%s 门控见字=%s n红=%s n橙=%s 最大面积=%s 最大高=%s 顶y=%s 原因=%s 得分=%s 窗=%s" % (
-                        int(_elP), _alignP, _in_skill, _detect_open, _p_hit, _has_dmg,
-                        _pdb.get('n_red'), _pdb.get('n_org'), _pdb.get('max_area'), _pdb.get('max_h'),
-                        _pdb.get('ty'), _pdb.get('reason'), _pdb.get('score'), _pdb.get('win')))
+                    # [2026-09-27关闭] 伤害探针日志(141字符长,无频率控制,F10后log=226ms帧率降到3-5fps,发呆根因)
+                    # _debug_log("[伤害探针] ...
             # 血条A/B命中复算(与combat_logic同口径,垂直180)
             if bars and _bl is not None:
                 P['hpframe'] += 1

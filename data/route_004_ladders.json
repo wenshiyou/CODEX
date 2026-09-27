@@ -1,0 +1,40 @@
+{
+  "ladders": [
+    {
+      "id": 0,
+      "x": 68.0,
+      "y_top": 87.0,
+      "y_bottom": 106.0,
+      "duration_sec": 3.37
+    },
+    {
+      "id": 1,
+      "x": 76.0,
+      "y_top": 74.0,
+      "y_bottom": 86.0,
+      "duration_sec": 2.12
+    },
+    {
+      "id": 2,
+      "x": 156.0,
+      "y_top": 82.0,
+      "y_bottom": 96.0,
+      "duration_sec": 1.86
+    },
+    {
+      "id": 3,
+      "x": 144.0,
+      "y_top": 72.0,
+      "y_bottom": 82.0,
+      "duration_sec": 2.06
+    },
+    {
+      "id": 4,
+      "x": 101.5,
+      "y_top": 72.0,
+      "y_bottom": 100.0,
+      "duration_sec": 3.4
+    }
+  ],
+  "count": 5
+}
