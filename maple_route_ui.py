@@ -694,8 +694,9 @@ LADDER_REC_SAME_COL_X = 8      # 录制覆盖:新录梯与旧录梯|X差|<8视�
 LADDER_MM_MIN_LEN = 5       # 录制梯最小梯身长度(y_bottom-y_top):数据里0/2/3px=起终点重合的误录噪点直接判否,真机可爬梯>=7(2026-09-22锁解永振根因之一)
 LADDER_MM_BAD_COOLDOWN_MS = 2000  # 锁后Y复核否决的梯拉黑时长ms:本次上梯不再选它,逼改选别的合格梯或选空走NOPICK超时回主线,治锁-解永振呆住(2026-09-22)
 LADDER_MM_GOTO_UNLOCK_FRAMES = 2  # 锁后连续几帧Y不合格才解锁重选(与锁梯2帧对称,防光点单帧抖动误解锁)
-LADDER_MM_RUNJUMP_DEFAULT = 7   # 面板默认跑跳起跳人梯X差(小地图单位):6~7带水平速度起跳;面板rj_l/rj_r可调
-LADDER_MM_VERT_DEFAULT = 1      # 面板默认直跳起跳人梯X差(小地图单位):0~1松键原地直跳;面板vl_l/vl_r可调
+LADDER_MM_RUNJUMP_DEFAULT = 6   # 面板默认跑跳起跳人梯X差上限(小地图单位):ad4~6带水平速度起跳;面板rj_l/rj_r可调
+LADDER_MM_RUNJUMP_MIN = 4        # 跑跳下限(小地图单位):ad≥4且≤上限才跑跳,4以下走走路带(用户2026-09-27分三带)
+LADDER_MM_VERT_DEFAULT = 1      # 面板默认直跳起跳人梯X差(小地图单位):ad≤1松键原地直跳;面板vl_l/vl_r可调
 # === 上行小地图末端对位【速度预判制动+末端刹停】(用户2026-09-26定稿,取代定时自然趋近fine;新旧只留一套) ===
 LADDER_MM_ALIGN_ENTRY_DX = 10   # |人梯X差|≤此值进入对位(跑跳窗之上给预判留距离;跑跳跨线仍由goto先判)
 LADDER_MM_SPD_WIN_MS = 200      # 估速窗口ms(取窗内首尾光点位移/真实时间,帧率波动免疫)
@@ -718,10 +719,11 @@ LADDER_MM_DESC_ALIGN_TOL = 1    # 下行方式二:光点对齐录制梯X|差|<=1
 LADDER_MM_NOPICK_TIMEOUT_MS = 1500  # 上行连续多久选不到合格录制梯->放弃回主线打怪(防发呆)
 LADDER_MM_LOCK_FRAMES = 2        # 锁梯:连续几拍选到同一条录制梯(id相同)才锁定,锁后整条上梯不重选(治怪侧side_sign翻向导致左右晃)
 LADDER_MM_LOCK_FORCE_MS = 300    # 候选梯id抖动超过此时仍未2拍稳定=按当前最近强锁(防侧别反复横跳锁不定而呆住)
-LADDER_MM_STILL_DX = 1.0         # 直跳停稳:相邻帧位移<=此值=不滑(小地图px,真机站定抖动标定,先给1)
+LADDER_MM_STILL_DX = 0.5         # 直跳停稳:相邻帧位移<=此值=不滑(小地图px,用户2026-09-27收紧:真停稳必须≈0,治带惯性跳)
+LADDER_MM_KF_STILL_V = 0.5       # 直跳停稳:卡尔曼速度绝对值<=此值(小地图单位/秒)才算真停稳(用户2026-09-27收紧:速度≈0)
 LADDER_MM_STILL_FRAMES = 2       # 直跳停稳帧数(用户2026-09-26:配合80ms观察窗约2帧,80ms后检测对齐才跳、不齐继续点动,goto/coast共用)
-LADDER_MM_ALIGN_OK_DX = 0.6  # 直跳起跳对齐门槛(小地图px,用户2026-09-26):|人梯X差|≤此值(≈0)才跳,治差1上不去
-LADDER_MM_SETTLE_KEY_MS = 80   # 直跳最后一次松方向键后的短观察窗(用户2026-09-26:220太久改80):80ms后检测,对齐就跳、不齐继续点动对准
+LADDER_MM_ALIGN_OK_DX = 1.0  # 直跳起跳对齐门槛(小地图px,用户2026-09-27分三带):ad≤1可准备跳,但必须真停稳(速度≈0)才跳
+LADDER_MM_SETTLE_KEY_MS = 100  # 直跳最后一次松方向键后的短观察窗(用户2026-09-27:80改100,没停稳就跳):100ms后检测,对齐就跳、不齐继续点动对准
 LADDER_MM_APPROACH_FRAMES = 2    # 跑跳需连续几拍朝梯移动才认(防单帧光点抖动误触发)
 LADDER_DIR_X_HALF = 300    # 方向带选梯X左右半宽(屏幕px,用户2026-09-18):只在人左右各300内选梯(原寻怪far_range=500太宽、梯子多会认错);有怪只留怪那侧,怪侧空才放宽两侧
 LADDER_DOT_X_TOL = 2        # 上梯后光点X直配录制梯容差(用户2026-09-15:人抓住梯后光点与梯共用X,|录制梯x-光点x|≤此值=同一把;与录梯覆盖规则"X差<2同一把"一致,真机配不到再议放到3)
@@ -732,6 +734,56 @@ LADDER_GRAB_UP_TOL = 2       # 抓梯成功阈值(镜头滚动原理·用户2026
 LADDER_GRAB_WINDOW_MS = 1000  # 直跳抓梯硬上限(用户2026-09-10:按住↑给足1秒再判成败,450→1000提高上梯成功率);成功靠Y变小实时触发、不用等满
 LADDER_GRAB_FAIL_MIN_MS = 1000 # 直跳起跳后至少这么久才允许"Y落回起跳=没抓住"判失败(用户2026-09-10:一直按住超过1秒再判,220→1000,避免上升/贴梯途中误判)
 LADDER_FAIL_REENTER_MS = 120  # 抓梯失败回主线后的极短冷却(2026-09-10替代原随机300~500:防同帧立刻又选同一梯空跳,又不发呆;本层有怪会被先锁去打)
+
+# === 一维卡尔曼滤波器（小地图光点X平滑+速度估计，2026-09-27自动驾驶自我感知架构） ===
+class _Kalman1D:
+    """轻量一维卡尔曼：状态[x位置, v速度]，匀速模型+测量修正。
+    用途：小地图光点整数坐标平滑（消除量化抖动）、实时速度估计（比帧间差稳）、置信度输出。
+    predict(dt)按匀速模型前推；update(meas, R)用测量修正；confidence=1/迹协方差。"""
+    def __init__(self, x0=0.0, v0=0.0, q=0.5, r=1.0):
+        self.x = float(x0); self.v = float(v0)
+        self.p11, self.p12, self.p22 = 1.0, 0.0, 1.0  # 协方差上三角
+        self.q = float(q)   # 过程噪声（运动模型不确定度）
+        self.r = float(r)   # 测量噪声（光点量化噪声，小地图单位）
+        self.initialized = False
+
+    def reset(self, x0=0.0, v0=0.0):
+        self.x = float(x0); self.v = float(v0)
+        self.p11, self.p12, self.p22 = 1.0, 0.0, 1.0
+        self.initialized = True
+
+    def predict(self, dt):
+        """匀速模型前推：x += v*dt, v不变；协方差传播"""
+        if dt <= 0: return
+        self.x += self.v * dt
+        # P = F P F^T + Q, F=[[1,dt],[0,1]]
+        p11 = self.p11 + 2*self.p12*dt + self.p22*dt*dt + self.q
+        p12 = self.p12 + self.p22*dt
+        p22 = self.p22 + self.q
+        self.p11, self.p12, self.p22 = p11, p12, p22
+
+    def update(self, meas, r=None):
+        """用测量值修正：K=P H^T/(H P H^T+R), 状态+=K*(meas-x)"""
+        rr = float(r) if r is not None else self.r
+        s = self.p11 + rr  # H=[1,0], 创新协方差
+        if s <= 0: return
+        k1 = self.p11 / s   # 位置增益
+        k2 = self.p12 / s   # 速度增益
+        innov = float(meas) - self.x
+        self.x += k1 * innov
+        self.v += k2 * innov
+        # P = (I-KH)P
+        c = 1.0 - k1
+        self.p11 = c * self.p11
+        self.p12 = c * self.p12
+        self.p22 = self.p22 - k2 * self.p12
+
+    @property
+    def confidence(self):
+        """置信度=1/(p11+p22)，协方差越小越可信"""
+        denom = self.p11 + self.p22
+        return 1.0 / denom if denom > 0 else 0.0
+
 # === 梯子【校准直跳·连续眼手同步伺服】(用户2026-09-19定稿,物理替换旧"首次大步70%+三轮定时小步60/50/40+每步固定停120ms"开环碎步,新旧只留一套):
 #   眼=人物线程持续刷人名X(_raw_char_pos原子发布)、B线程(上梯切小ROI高频档)持续刷梯白框X,手=主线keybd_event即时投递不阻塞眼;
 #   主线每帧都拿得到最新人/梯X,故"走的时候就一直看"(闭环),不再"走固定时长→抬手死等→看一眼"。相位只有两个:
@@ -1619,6 +1671,13 @@ class MinimapRouteRecorder:
         self._char_disp_pos_time = 0                 # 上次同步时间戳(ms)
         self._char_disp_vel = (0.0, 0.0)             # 人物最近速度(px/s)，匹配失败宽限期内维持外推
         self._player_map_pos = None        # 玩家小地图坐标，用于判断当前平台（原始值，上梯检测用）
+        self._mm_kf = _Kalman1D(q=0.3, r=0.8)   # 小地图光点X卡尔曼：过程噪声0.3(信任运动模型),测量噪声0.8(光点量化)
+        self._mm_kf_x = None       # 滤波后平滑位置（小地图X）
+        self._mm_kf_v = 0.0        # 滤波后速度（小地图X/秒，朝右为正）
+        self._mm_kf_conf = 0.0     # 置信度
+        self._mm_kf_last_t = 0     # 上一帧时间ms
+        self._mm_kf_lost = 0       # 光点连续丢失帧数（只predict不update）
+
         # Y一秒最低值平滑缓冲（用户2026-09-16定稿）：打怪/选梯/边界用地面Y，过滤起跳峰值；上梯检测仍用原始Y
         # 光点中心一次性微调(小地图块像素,默认0):小地图红十字与游戏黄光点视觉中心固定差多少就填多少;
         # find_player_dot返回前叠加,绿线/梯子/导航/边界全部共用校准后的同一中心(用户2026-09-14)
@@ -5529,8 +5588,16 @@ class MinimapRouteRecorder:
         return False
 
     def _ladder_mm_estimate_speed(self, dir_sign, px, now_ms):
-        """估朝梯速度(小地图px/秒,帧率免疫):维护最近SPD_WIN_MS光点采样,取窗内首尾朝梯位移/真实时间。
-        窗内时间不足MIN_DT沿用上一值(防光点量化夹0算出0或尖峰)。"""
+        """估朝梯速度(小地图px/秒):优先用卡尔曼滤波速度(更稳、无200ms窗口延迟),
+        卡尔曼未初始化或光点丢失过久时回退到200ms窗口首尾位移/真实时间。"""
+        # 优先卡尔曼速度（光点线程100fps维护，朝梯方向取正）
+        _kf_v = getattr(self, '_mm_kf_v', None)
+        _kf_lost = getattr(self, '_mm_kf_lost', 99)
+        if _kf_v is not None and _kf_lost < 5:
+            _v = max(0.0, float(dir_sign) * float(_kf_v))
+            self._ladder_mm_speed_v = _v
+            return _v
+        # 回退：200ms窗口估速（卡尔曼不可用时）
         _hist = getattr(self, '_ladder_mm_spd_hist', None)
         if _hist is None:
             _hist = []; self._ladder_mm_spd_hist = _hist
@@ -5791,16 +5858,15 @@ class MinimapRouteRecorder:
         elif approach < 0:
             self._ladder_mm_approach_streak = 0
         # approach==0(光点量化0帧/coast)保持累计不清零:真机走路约1px/帧且夹0帧;倒退才清零
-        if abs(dpx) <= LADDER_MM_STILL_DX:
+        _kf_v_abs = abs(getattr(self, '_mm_kf_v', 0.0))
+        if abs(dpx) <= LADDER_MM_STILL_DX and _kf_v_abs <= LADDER_MM_KF_STILL_V:
             self._ladder_mm_still_frames += 1
         else:
             self._ladder_mm_still_frames = 0
         prev_ad = getattr(self, '_ladder_mm_prev_ad', None)
-        # ---- 3) 跑跳:只在跨rj下降沿、连续朝梯那一次(用户2026-09-26;删掉`or ad<=rj`兜底,它曾让ad<=rj全程抢先跑跳、直跳永远到不了) ----
-        _cross = (prev_ad is not None and prev_ad > rj and ad <= rj)
-        if (not getattr(self, '_ladder_run_jumped', False)
-                and self._ladder_mm_approach_streak >= LADDER_MM_APPROACH_FRAMES
-                and _cross):
+        # ---- 3) 跑跳:ad在[RUNJUMP_MIN, rj]范围内就跳(用户2026-09-27:不限次数,在属于他的范围内就能跑跳) ----
+        if (ad >= LADDER_MM_RUNJUMP_MIN and ad <= rj
+                and self._ladder_mm_approach_streak >= LADDER_MM_APPROACH_FRAMES):
             self._ladder_mm_prev_px = px; self._ladder_mm_prev_ad = ad
             return self._ladder_mm_start_jump('run', d, py, now_ms, jump_key, vx=approach)
         # ---- 4) 直跳:ad<=vl 且连续停稳 ----
@@ -17077,13 +17143,35 @@ class MinimapRouteRecorder:
                             "height": int(_ma['height'])}
                     _frame = np.array(_sct.grab(_mon))[:, :, :3]
                     _pdot = self.find_player_dot(_frame)
+                    _now_kf = int(time.time() * 1000)
                     if _pdot is not None:
                         self._player_map_pos = _pdot
                         self._map_dot_lost = 0
+                        # === 卡尔曼滤波：光点X平滑+速度估计 ===
+                        _dt_kf = (_now_kf - self._mm_kf_last_t) / 1000.0 if self._mm_kf_last_t > 0 else 0.01
+                        if not self._mm_kf.initialized or self._mm_kf_lost >= 10:
+                            self._mm_kf.reset(float(_pdot[0]), 0.0)  # 首帧或丢失过久，用测量值重置
+                        else:
+                            self._mm_kf.predict(_dt_kf)
+                            self._mm_kf.update(float(_pdot[0]))
+                        self._mm_kf_x = self._mm_kf.x
+                        self._mm_kf_v = self._mm_kf.v
+                        self._mm_kf_conf = self._mm_kf.confidence
+                        self._mm_kf_lost = 0
+                        self._mm_kf_last_t = _now_kf
                     else:
                         # 本帧丢点:绝不钉旧值(用户2026-09-22),光点置None,下游本帧跳过、下帧重检;
                         # 爬梯/下跳进行中由_transit_step入口对climb状态容忍本帧None(不终止整套动作、不松键)。
                         self._player_map_pos = None
+                        # 光点丢失：卡尔曼只predict不update（靠运动模型续推），丢失过久则速度衰减
+                        if self._mm_kf.initialized and self._mm_kf_last_t > 0:
+                            _dt_kf = (_now_kf - self._mm_kf_last_t) / 1000.0
+                            self._mm_kf.predict(min(_dt_kf, 0.1))
+                            self._mm_kf.v *= 0.95  # 丢失时速度衰减，防止预测飞太远
+                            self._mm_kf_x = self._mm_kf.x
+                            self._mm_kf_v = self._mm_kf.v
+                        self._mm_kf_lost += 1
+                        self._mm_kf_last_t = _now_kf
                         if getattr(self, '_auto_refresh', True) and self.hwnd:
                             self._map_dot_lost = getattr(self, '_map_dot_lost', 0) + 1
                             _now_force = time.time()
