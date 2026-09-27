@@ -1515,6 +1515,7 @@ class MinimapRouteRecorder:
         self._role_face = None          # 面部锚点判定的朝向 'L'/'R'(打怪左右决策用)
         self._role_anchor_polys = {}    # 本帧识别到(过阈)的各锚点缩小多边形{key:([(x,y)...],score)},供蒙板画框
         self._role_search_box = None    # 本帧局部跟踪搜索范围框(x0,y0,x1,y1);全图重搜时=None(不画)
+        self._role_predict_box = None  # 蒙板:黄色预测框(动作感知预测搜索范围)
         # === 梯子特征模板（随方案永久存盘，内存仅为运行时副本，权威在 data/route_xxx_ladder_tpl.json）===
         self._ladder_templates = []     # [{id,img,width,height}]
         # 人工上梯起跳定位(随梯子方案存盘,正数px,废速度自学;用户2026-09-21):rj=跑跳离梯心多远带速起跳 / vl=直跳还差多远松键滑入
@@ -11683,6 +11684,27 @@ class MinimapRouteRecorder:
                                 gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
                                 gdi32.Rectangle(hdc, int(_bx0), int(_by0), int(_bx1), int(_by1))
                                 gdi32.SelectObject(hdc, old_rpen)
+                            # === 动作感知预测框(黄色2px,丢失后预测搜索范围) ===
+                            _rpb = data.get('role_predict_box')
+                            if _rpb:
+                                _px0, _py0, _px1, _py1, _preason = _rpb
+                                ppen = gdi32.CreatePen(0, 2, 0x00FFFF)  # 黄色2px=预测框
+                                if ppen:
+                                    gdi_objs.append(ppen)
+                                old_ppen = gdi32.SelectObject(hdc, ppen)
+                                gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
+                                gdi32.Rectangle(hdc, int(_px0), int(_py0), int(_px1), int(_py1))
+                                gdi32.SelectObject(hdc, old_ppen)
+                                # 预测原因文字
+                                _ptxt = "预测:" + str(_preason)
+                                pfont = gdi32.CreateFontW(14, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, "微软雅黑")
+                                if pfont:
+                                    gdi_objs.append(pfont)
+                                old_pfont = gdi32.SelectObject(hdc, pfont)
+                                gdi32.SetTextColor(hdc, 0x00FFFF)
+                                gdi32.SetBkMode(hdc, 1)
+                                gdi32.TextOutW(hdc, int(_px0) + 4, int(_py0) - 16, _ptxt, len(_ptxt))
+                                gdi32.SelectObject(hdc, old_pfont)
                             # 三个角色锚点统一橙色框(用户:不要五颜六色);禁用品红0xFF00FF=蒙板透明色键、画了会被抠空看不见
                             _role_colors = {"name": 0x00A5FF, "face_r": 0x00A5FF, "back": 0x00A5FF,
                                             "pet1": 0x00A5FF, "pet2": 0x00A5FF, "pet3": 0x00A5FF}
@@ -14581,6 +14603,98 @@ class MinimapRouteRecorder:
             _bx, _by = _lx + float(_o[0]), _ly + float(_o[1])
         return int(round(_bx)), int(round(_by)), _k, float(_s)
 
+    def _predict_char_pos(self, now_ms):
+        """【动作感知预测·用户2026-09-27】人物基点丢失时，根据按键状态+上一次位置预测当前人物位置。
+        预测只用于搜索范围中心，绝不直接当坐标用；找到真锚点才采信。
+        返回 (pred_x, pred_y, reason) 或 None（无上次位置/无有效按键）。"""
+        tr = getattr(self, '_role_track', None)
+        if not tr or not tr.get('last'):
+            return None
+        last_x, last_y = tr['last']
+        last_t = tr.get('last_t', 0.0)
+        if last_t <= 0:
+            return None
+        dt_ms = max(0, now_ms - last_t)
+        if dt_ms <= 0:
+            return (last_x, last_y, '刚丢')
+        dt_s = dt_ms / 1000.0
+        # 按键状态：方向键实时读（keybd_event发的键也能读到）
+        _kl = bool(key_pressed(VK_LEFT))
+        _kr = bool(key_pressed(VK_RIGHT))
+        _ku = bool(key_pressed(VK_UP))
+        _kd = bool(key_pressed(VK_DOWN))
+        _kj = bool(key_pressed(VK_SPACE))  # 跳
+        # 瞬移后摇期：瞬时位移=面板瞬移距离（方向=上一次移动方向/朝向）
+        if now_ms < getattr(self, '_combat_tp_post_until', 0):
+            tp_dist = int(getattr(self, '_combat_tp_distance', 250) or 250)
+            tp_dir = getattr(self, '_combat_last_tp_dir', 0)
+            if tp_dir != 0:
+                return (last_x + tp_dir * tp_dist, last_y, '瞬移%d' % (tp_dir * tp_dist))
+        # 爬梯中：X钉死（梯子X基本不变），Y垂直移动
+        _cs = getattr(self, '_climb_state', 'none')
+        if _cs in ('climbing', 'post_jump'):
+            climb_vy = 120.0  # 爬梯速度 px/s
+            if _ku:
+                return (last_x, int(last_y - climb_vy * dt_s), '上梯')
+            if _kd:
+                return (last_x, int(last_y + climb_vy * dt_s), '下梯')
+            return (last_x, last_y, '梯上静止')
+        # 普通水平移动
+        move_vx = 400.0  # 跑步速度 px/s（保守值，实际约350-450）
+        if _kl and not _kr:
+            return (int(last_x - move_vx * dt_s), last_y, '左走')
+        if _kr and not _kl:
+            return (int(last_x + move_vx * dt_s), last_y, '右走')
+        # 跳跃腾空：水平保持速度，Y不预测（上下范围内搜）
+        if _kj and (_kl or _kr):
+            return (int(last_x + (1 if _kr else -1) * move_vx * dt_s), last_y, '跑跳')
+        # 无有效按键：静止
+        return (last_x, last_y, '静止')
+
+    def _research_anchor_around_predict(self, frame, tr, thr, now_ms):
+        """【预测区重捕·用户2026-09-27】黑框重捕失败后，用动作感知预测位置为中心开ROI重搜真锚点。
+        预测位置只当搜索中心，绝不顶替人物坐标；命中过阈才返回(ax,ay,src,score)，否则None。
+        蒙板显示黄色预测框，方便核对预测是否准确。"""
+        _pred = self._predict_char_pos(now_ms)
+        if _pred is None or frame is None:
+            return None
+        _px, _py, _reason = _pred
+        # 预测区半径=面板maxmove（统一跳变限制值），比黑框40x40大很多
+        P = self._role_rec.get("params", ROLE_TRACK_DEFAULT) if self._role_rec else ROLE_TRACK_DEFAULT
+        _pr = int(P.get("maxmove", 250) or 250)
+        try:
+            _H, _W = frame.shape[:2]
+        except Exception:
+            return None
+        _roi = (max(0, _px - _pr), max(0, _py - _pr),
+                min(_W, _px + _pr), min(_H, _py + _pr))
+        if _roi[2] <= _roi[0] or _roi[3] <= _roi[1]:
+            return None
+        self._role_predict_box = (_roi[0], _roi[1], _roi[2], _roi[3], _reason)  # 蒙板黄色预测框
+        _best = None
+        for _k in ("name", "face_r", "back"):
+            try:
+                _s, _loc, _face = self._role_match_in(frame, _k, _roi)
+            except Exception:
+                continue
+            if _loc is None or _s < thr:
+                continue
+            _pr2 = 0 if _k == "name" else 1
+            _cand = (_pr2, -float(_s), _k, _loc, float(_s))
+            if _best is None or _cand[:2] < _best[:2]:
+                _best = _cand
+        if _best is None:
+            return None
+        _pr2, _negs, _k, _loc, _s = _best
+        _lx, _ly = float(_loc[0]), float(_loc[1])
+        if _k == "name":
+            _bx, _by = _lx, _ly
+        else:
+            _o = (tr or {}).get("off_" + _k)
+            if not _o:
+                return None
+            _bx, _by = _lx + float(_o[0]), _ly + float(_o[1])
+        return int(round(_bx)), int(round(_by)), _k, float(_s)
 
     def _get_player_screen_pos(self, frame):
         """人物坐标·多锚点局部跟踪(2026-09-13;输出格式不变:脚点(x,y)/从未定位None)。
@@ -14667,6 +14781,7 @@ class MinimapRouteRecorder:
                                      min(_Wd, int(_dot_for_roi[0])+_brx_d), min(_Hd, int(_dot_for_roi[1])+_bry_d))
         else:
             self._role_search_box = None
+            self._role_predict_box = None  # 预测框每帧清空
         # 人名永远第一;其余=冗余兜底(脸/后脑/宠物名1-3),人名丢时谁分高用谁、各带"→人名线"偏移,只显示分高那个。
         # 宠物始终跟人、位置绑定,人名/脸/后脑全被特效挡住时用宠物名兜底定位(用户:采了就要参与定位,不是只在管理窗看分)。
         got = {}
@@ -14785,28 +14900,9 @@ class MinimapRouteRecorder:
                     _bx, _by = float(last[0]), float(last[1])
                 else:
                     _bx, _by = float(_ploc[0]), float(_ploc[1])
-            # 帧间跳变速度闸(用户2026-09-22根治:忙档提到30fps后固定px阈值相对变松,改为按帧间隔dt归一化的速度判据):
-            # 任何定位源、任何帧(局部/全图)、无论分多高,相对上一可信基点的位移速度超ROLE_MAX_SPEED_PX_S一律不采信、continue转黑框ROI重搜。
-            # 30fps下真实跑步/下落/爬梯是连续小步(<60px/帧),误匹配到同名文本是瞬时跳到另一固定文本(实测70~236px=2100~7000px/s)必被拦;
-            # 阈值夹[FLOOR60,CAP150]:高帧战斗≈60px、低帧卡顿≤150px(超大跳变不直接放行);真瞬移(≥250)同样被拦后由_research_anchor_around_dot
-            # 借黑框光点(独立第二源)在新位置ROI重捕,硬拦不影响真瞬移。V_MAX=1800px/s是旧120px@约67ms反推的保守初值,真机按[跳变拦截]日志复核再标定。
-            if last is not None:
-                _dtm = now - tr.get("last_t", 0.0)
-                if _dtm <= 0.0:
-                    _dtm = 1000.0 / 30.0   # 无上一帧时间戳/同帧重入:按忙档30fps标称间隔,阈值落到FLOOR附近
-                _disp_lim = min(ROLE_BIGJUMP_CAP_PX,
-                                max(ROLE_BIGJUMP_FLOOR_PX, ROLE_MAX_SPEED_PX_S * _dtm / 1000.0))
-                _jd = float(np.hypot(_bx - last[0], _by - last[1]))
-                if _jd > _disp_lim:
-                    if now - getattr(self, '_bigjump_log_t', 0.0) > 500.0:
-                        self._bigjump_log_t = now
-                        _debug_log("[角色跟踪] 跳变拦截 d=%.0fpx 限%.0fpx dt=%.0fms v=%.0fpx/s 源=%s(超速度闸转黑框重捕)" % (
-                            _jd, _disp_lim, _dtm, _jd / max(_dtm, 1.0) * 1000.0, _pk))
-                    continue
-            # 大跳变以内:保留原弱匹配小跳变过滤(人名局部窗>maxmove且弱匹配<0.75丢;兜底锚点>80且弱匹配<0.75丢)
+            # 统一跳变限制(用户2026-09-27):删速度闸,强匹配>=0.75不限跳变(确实是同一个人/瞬移),弱匹配<0.75统一用面板maxmove(所有锚点)
             if last is not None and _pv[0] < 0.75:
-                _move_lim = maxmove if _pk == "name" else AUX_ANCHOR_MAX_MOVE
-                if np.hypot(_bx - last[0], _by - last[1]) > _move_lim and (_pk != "name" or not need_full):
+                if np.hypot(_bx - last[0], _by - last[1]) > maxmove:
                     continue
             _pick = (_pk, _pv, _bx, _by); break
         if _pick is not None:
@@ -14838,6 +14934,16 @@ class MinimapRouteRecorder:
             self._role_pos_src = _src2
             self._last_char_match_pos = tr["foot"]; self._last_char_match_time = now
             return tr["foot"]
+        # 【预测区重捕·用户2026-09-27】黑框找不到后，用动作感知预测位置为中心重搜（丢失>300ms才启用，避免刚丢就预测干扰）
+        if now - tr.get("last_t", 0) > 300:
+            _r3 = self._research_anchor_around_predict(frame, tr, thr, now)
+            if _r3 is not None:
+                _ax3, _ay3, _src3, _sc3 = _r3
+                tr["last"] = (_ax3, _ay3); tr["foot"] = (_ax3, _ay3); tr["miss"] = 0; tr["score"] = _sc3; tr["last_t"] = now
+                self._role_pos_src = _src3
+                self._last_char_match_pos = tr["foot"]; self._last_char_match_time = now
+                _debug_log("[预测重捕] 命中 src=%s score=%.2f pos=(%d,%d)" % (_src3, _sc3, _ax3, _ay3))
+                return tr["foot"]
         # 视觉层找不到真锚点一律返回None(用户2026-09-25定稿,不再无限沿用旧点):是否原地钉点交主循环_apply_char_detection按
         # "站桩攻击中丢人名才钉1.5s、非攻击不钉"决定;黑框即刻找、满2秒转全屏只找人名的重捕在上方持续进行,找到真点下一帧即恢复。
         self._role_pos_src = 'none'
@@ -17227,7 +17333,15 @@ class MinimapRouteRecorder:
                 _now_ms = int(time.time() * 1000)
                 _frame_dt = _now_ms - _last_frame_ms if _last_frame_ms else 0
                 _last_frame_ms = _now_ms
-                _ch = getattr(self, '_raw_char_pos', None)
+                # 【田字框定位源改光点·用户2026-09-27】不用游戏窗口基点(_raw_char_pos,不准/丢失时田字框放错),
+                # 改用小地图光点换算的屏幕坐标(lock_screen_from_dot,光点稳定永不丢失)。光点不可用时田字框不检测。
+                _ch = None
+                try:
+                    _dot_pos = self.lock_screen_from_dot()
+                    if _dot_pos is not None:
+                        _ch = (_dot_pos[0], _dot_pos[1])
+                except Exception:
+                    _ch = None
                 with self._wd_lock:
                     _intents = {a: dict(v) for a, v in self._mv_intent.items()}
                 if _ch is None:
@@ -19127,6 +19241,7 @@ class MinimapRouteRecorder:
             # 新角色锚点:识别到的缩小多边形框 + 局部跟踪搜索范围框(每帧由检测线程写入,识别不到就为空)
             self._monster_overlay_data["role_anchor_polys"] = getattr(self, "_role_anchor_polys", {})
             self._monster_overlay_data["role_search_box"] = getattr(self, "_role_search_box", None)
+            self._monster_overlay_data["role_predict_box"] = getattr(self, "_role_predict_box", None)
             # 角色识别黑名单矩形(调试显示开时画红框,让人看到哪片被屏蔽);wnd_proc不能用self,走overlay_data
             self._monster_overlay_data["role_blocklist"] = \
                 (self._role_rec or {}).get("blocklist", []) if self._role_rec else []
