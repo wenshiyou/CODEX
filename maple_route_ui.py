@@ -724,7 +724,7 @@ LADDER_MM_STILL_DX = 0.5         # 直跳停稳:相邻帧位移<=此值=不滑(�
 LADDER_MM_KF_STILL_V = 0.5       # 直跳停稳:卡尔曼速度绝对值<=此值(小地图单位/秒)才算真停稳(用户2026-09-27收紧:速度≈0)
 LADDER_MM_STILL_FRAMES = 2       # 直跳停稳帧数(用户2026-09-26:配合80ms观察窗约2帧,80ms后检测对齐才跳、不齐继续点动,goto/coast共用)
 LADDER_MM_ALIGN_OK_DX = 1.0  # 直跳起跳对齐门槛(小地图px,用户2026-09-27分三带):ad≤1可准备跳,但必须真停稳(速度≈0)才跳
-LADDER_MM_SETTLE_KEY_MS = 100  # 直跳最后一次松方向键后的短观察窗(用户2026-09-27:80改100,没停稳就跳):100ms后检测,对齐就跳、不齐继续点动对准
+LADDER_MM_SETTLE_KEY_MS = 80  # 直跳最后一次松方向键后的短观察窗(用户2026-09-27:100改80,停太久减一点点):80ms后检测,对齐就跳、不齐继续点动对准
 LADDER_MM_APPROACH_FRAMES = 2    # 跑跳需连续几拍朝梯移动才认(防单帧光点抖动误触发)
 LADDER_DIR_X_HALF = 300    # 方向带选梯X左右半宽(屏幕px,用户2026-09-18):只在人左右各300内选梯(原寻怪far_range=500太宽、梯子多会认错);有怪只留怪那侧,怪侧空才放宽两侧
 LADDER_DOT_X_TOL = 2        # 上梯后光点X直配录制梯容差(用户2026-09-15:人抓住梯后光点与梯共用X,|录制梯x-光点x|≤此值=同一把;与录梯覆盖规则"X差<2同一把"一致,真机配不到再议放到3)
@@ -9229,7 +9229,8 @@ class MinimapRouteRecorder:
         scale_x = render_w / w if w > 0 else 1.0  # X缩放比例=渲染宽度/原始宽度
         scale_y = render_h / h if h > 0 else 1.0  # Y缩放比例=渲染高度/原始高度
         # 紫点稳定(用户2026-09-26):最后已知位置保持PURPLE_KEEP_MS,漏检不闪、渐淡;纯显示不碰锁怪
-        if self._player_map_pos and self._player_screen_pos:
+        # 用户2026-09-27:自由模式关闭紫点显示(省CPU+不干扰),仅台子模式显示
+        if self.route_mode != '随机' and self._player_map_pos and self._player_screen_pos:
             COLOR_MONSTER_MAP = (255, 0, 255)  # 紫色BGR
             for (_pmx, _pmy, _pratio) in self._purple_persist_update(int(time.time() * 1000)):
                 _dxs = int(_pmx * scale_x)
@@ -18094,7 +18095,7 @@ class MinimapRouteRecorder:
             return
         _dl = _dlpkt
         if getattr(self, '_roam_active', False):
-            self._roam_end(True)  # 巡游中B锁到怪/跨层目标:先松巡游移动键并起冷却,再走打怪/跨层,杜绝两套移动键同帧
+            self._roam_end(False)  # 巡游中B锁到怪:松巡游移动键,不起冷却(用户2026-09-27新三态:遇怪即去打,打完无怪等5s再走一次)
         t_cx, t_cy = _dl['target']
         t_dist = int(_dl.get('dist') or 0)
         target = (t_dist, t_cx, t_cy)
@@ -18262,7 +18263,7 @@ class MinimapRouteRecorder:
                 and now - getattr(self, '_face_nudge_t', 0) > 300):
             _fvk = 0x27 if needed_facing > 0 else 0x25
             self._send_win_key(_fvk, keyup=False)
-            self._combat_timed_keys.append((_fvk, now + 60))
+            self._combat_timed_keys.append((_fvk, now + 100))
             self._combat_last_face_dir = needed_facing
             self._combat_facing = needed_facing
             self._face_nudge_t = now
@@ -18455,7 +18456,7 @@ class MinimapRouteRecorder:
                         self._release_combat_move()   # 法师落地站定放技能
                     _fvk = VK_RIGHT if _ref_x >= px else VK_LEFT   # 出手前短点朝怪方向掰脸40ms
                     self._send_win_key(_fvk, keyup=False)
-                    self._combat_timed_keys.append((_fvk, now + 60))
+                    self._combat_timed_keys.append((_fvk, now + 100))
                     if _sl_atk:
                         self._press_game_key(_sl_atk)
                         self._attack_last["atk1"] = now
@@ -18513,7 +18514,7 @@ class MinimapRouteRecorder:
                 # 群攻出手前短点朝锁定怪方向40ms(治朝向漂移反打);双向近身群攻也不影响两侧出伤
                 _afvk = VK_RIGHT if t_cx >= px else VK_LEFT
                 self._send_win_key(_afvk, keyup=False)
-                self._combat_timed_keys.append((_afvk, now + 50))  # 用户2026-09-20:40ms经常不转向,改50ms
+                self._combat_timed_keys.append((_afvk, now + 100))  # 用户2026-09-27:50ms经常不转向,改100ms
                 self._press_game_key(aoe_key)
                 # 仍登记出手时刻(站桩输出判定GLOBAL_SKILL_HB_MS用),只是不再拿它当群攻CD门控(用户2026-09-18群攻无CD)
                 self._attack_last["aoe"] = now
