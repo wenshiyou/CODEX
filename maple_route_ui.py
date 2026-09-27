@@ -736,7 +736,7 @@ LADDER_TOP_ARRIVE_TOL = 1  # 爬梯到顶位置门(用户2026-09-23定稿):光�
 # 到顶双判:位置重合±1只是前提,还要【当下后脑不可见】(已翻出梯)才判到顶;位置没到(差>=2)后脑丢失按漏检处理继续爬(用户2026-09-23)
 LADDER_TOP_HOLD_MS = 150    # 到顶多按(用户2026-09-23:200->150):重合±1且后脑当下不可见后继续按住↑/↓150ms再松,立即开主线开打,不干等450ms
 LADDER_GRAB_UP_TOL = 2       # 抓梯成功阈值(镜头滚动原理·用户2026-09-09)：光点Y相对【起跳前站地基准Y】变小≥此值=抓住；只比动作前稳态,不做相邻帧比较
-LADDER_GRAB_WINDOW_MS = 1000  # 直跳抓梯硬上限(用户2026-09-10:按住↑给足1秒再判成败,450→1000提高上梯成功率);成功靠Y变小实时触发、不用等满
+LADDER_GRAB_WINDOW_MS = 500   # 抓梯窗(用户2026-09-27:1000→500,跑跳失败后更快进直跳;成功靠后脑连续2帧实时触发、不用等满)
 LADDER_GRAB_FAIL_MIN_MS = 1000 # 直跳起跳后至少这么久才允许"Y落回起跳=没抓住"判失败(用户2026-09-10:一直按住超过1秒再判,220→1000,避免上升/贴梯途中误判)
 LADDER_FAIL_REENTER_MS = 120  # 抓梯失败回主线后的极短冷却(2026-09-10替代原随机300~500:防同帧立刻又选同一梯空跳,又不发呆;本层有怪会被先锁去打)
 
@@ -5662,8 +5662,10 @@ class MinimapRouteRecorder:
             return False
         if self._ladder_mm_nudge_count >= LADDER_MM_NUDGE_MAX:
             self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
-            self._ladder_mm_align_phase = 'pullback'; self._ladder_mm_align_t = now_ms
-            _debug_log("[对位·小地图] 点动%d次仍不齐(ad=%.2f),拉开重来" % (LADDER_MM_NUDGE_MAX, ad))
+            _debug_log("[对位·小地图] 点动%d次仍不齐(ad=%.2f),放弃回主线清锁重锁(不拉开重来)" % (LADDER_MM_NUDGE_MAX, ad))
+            self._rlog("小地图对位%d次仍不齐,回主线打怪" % LADDER_MM_NUDGE_MAX, LOG_RED, log='exception')
+            self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS
+            self._reset_climb(); self._decide_climb_fail_action()
             return False
         if ad <= LADDER_MM_NUDGE_MAX_DX:
             _nudge_vk = VK_RIGHT if d > 0 else VK_LEFT   # 走过头d翻号→自动调头
