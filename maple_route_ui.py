@@ -5557,7 +5557,7 @@ class MinimapRouteRecorder:
         self._ladder_back_seen_frames = 0
         # 用户2026-09-23:起跳前关B锁(清已锁+决策包),一心上梯不抢怪;到顶/失败由reset重开。
         # 关锁在发跳键前一帧,_press_game_key阻塞120ms期间B线程已用热怪表清完包,不影响起跳。
-        self._set_b_lock_enabled(False, '起跳前关锁一心上梯')
+        # [2026-09-27] 关锁已提前到选梯成功时(_ladder_mm_goto_tick),起跳前不重复关
         self._press_game_key(jump_key, duration=120)
         self._ladder_jump_phase = 'post_jump'
         self._ladder_post_jump_step = 'delay1'
@@ -5822,11 +5822,13 @@ class MinimapRouteRecorder:
                 self._ladder_mm_pick_t = now_ms
             if self._ladder_mm_cand_streak >= LADDER_MM_LOCK_FRAMES:
                 ld = picked; self._ladder_mm_lock_id = cid; self._ladder_mm_pin(ld)
+                self._set_b_lock_enabled(False, '选梯后关锁一心上梯')
                 _debug_log("[选梯·小地图] 连续%d拍同梯,锁定梯id=%s x=%.0f top=%.0f bot=%.0f(光点%.0f,%.0f),整条上梯不重选" % (
                     LADDER_MM_LOCK_FRAMES, cid, ld['x'], ld['y_top'], ld['y_bottom'], px, py))
                 self._rlog("锁定小地图梯id=%s" % str(cid), log='behavior')
             elif now_ms - self._ladder_mm_pick_t >= LADDER_MM_LOCK_FORCE_MS:
                 ld = picked; self._ladder_mm_lock_id = cid; self._ladder_mm_pin(ld)
+                self._set_b_lock_enabled(False, '选梯后关锁一心上梯')
                 _debug_log("[选梯·小地图] 候选抖动%.0fms未稳定,按当前最近强锁梯id=%s(不呆住)" % (LADDER_MM_LOCK_FORCE_MS, cid))
             else:
                 self._key_up(VK_LEFT); self._key_up(VK_RIGHT)  # 未锁不走向,等下拍确认
