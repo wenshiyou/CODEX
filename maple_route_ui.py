@@ -461,7 +461,7 @@ LADDER_PRECISE_STEP_MS = 3        # 高帧自适应每档退避/回升的步长m
 LADDER_PRECISE_MARK_MS = 20       # 高帧下梯子特征白框扫描节流(在识别线程;用户2026-09-15加快30→20≈50Hz,选梯更跟手;CPU有自适应退避兜底)
 # 忙档高帧(用户2026-09-22根因修复):战斗忙档截图/人物/B决策节拍目标30fps,治16fps下窗口人名基点帧间跳变把平层怪误判cross;
 # YOLO/怪模板/血条在B线程另按秒节流、提帧不多跑;跑不完照搬上梯高帧自适应退避、封顶60ms(=旧16fps,最坏退回现状),闲档仍100ms省电。
-PERSON_BUSY_TARGET_MS = 33       # 忙档目标周期≈30fps
+PERSON_BUSY_TARGET_MS = 20       # 忙档目标周期≈50fps(用户2026-09-27:光点/基点刷新提速,上梯对位更跟手;跑不完自适应退避)
 PERSON_BUSY_PERIOD_MAX = 60      # 自适应退避上限=旧忙档周期(机器再慢也只退回16fps现状,不会更差)
 PERSON_BUSY_MIN_SLEEP_MS = 3     # 忙档每轮至少让出的空闲ms(保GIL/主线UI),防吃满一个核(与上梯高帧同值)
 PERSON_BUSY_OVERLOAD_N = 3       # 连续几轮留不出最小空闲=过载,降帧一档
@@ -659,6 +659,8 @@ TELEPORT_SCREEN_TO_MAP_X = 22.0 / 250.0
 PLATFORM_X_EXTEND = 100   # 平台判台X延伸(小地图px):掉台归位判台用(_get_monster_platform,2026-09-26)
 PLATFORM_LOCK_X_TOL = 100  # 平台锁怪X·台端外技能容差(游戏【窗口px】,用户2026-09-26动态锁怪):动态左右距离端外只留100
 MONSTER_MAP_Y_SNAP = 10   # 紫点Y吸到绿线的最大偏差(小地图px,用户2026-09-26):|怪Y-绿线Y|≤10才拉到线上,超过不硬贴防跨层
+PURPLE_KEEP_MS = 800        # 紫点漏检保持ms(用户2026-09-26):最后已知位置短暂保持防闪,超时消失
+PURPLE_MATCH_SCREEN_PX = 60 # 紫点跨帧关联阈值(屏幕px):此距离内视为同一只怪
 ROAM_COOLDOWN_MS = 15000  # 一次巡游结束(遇怪/走完)后冷却,期内不主动巡游(防左右来回晃)
 ROAM_MIN_SIDE_PX = 24     # 远侧距离(小地图px)小于此=已贴边没空间,改短冷却3s不巡游
 ATTACK_Y_UP = 60         # 打怪Y范围·向上：怪比人物高最多60px(人物上方+60内可直打；>60够不着→走近)。用户2026-09-06：80→60
@@ -717,7 +719,9 @@ LADDER_MM_NOPICK_TIMEOUT_MS = 1500  # 上行连续多久选不到合格录制梯
 LADDER_MM_LOCK_FRAMES = 2        # 锁梯:连续几拍选到同一条录制梯(id相同)才锁定,锁后整条上梯不重选(治怪侧side_sign翻向导致左右晃)
 LADDER_MM_LOCK_FORCE_MS = 300    # 候选梯id抖动超过此时仍未2拍稳定=按当前最近强锁(防侧别反复横跳锁不定而呆住)
 LADDER_MM_STILL_DX = 1.0         # 直跳停稳:相邻帧位移<=此值=不滑(小地图px,真机站定抖动标定,先给1)
-LADDER_MM_STILL_FRAMES = 2       # 直跳需连续几拍停稳才原地跳(不在滑行中零速跳)
+LADDER_MM_STILL_FRAMES = 2       # 直跳停稳帧数(用户2026-09-26:配合80ms观察窗约2帧,80ms后检测对齐才跳、不齐继续点动,goto/coast共用)
+LADDER_MM_ALIGN_OK_DX = 0.6  # 直跳起跳对齐门槛(小地图px,用户2026-09-26):|人梯X差|≤此值(≈0)才跳,治差1上不去
+LADDER_MM_SETTLE_KEY_MS = 80   # 直跳最后一次松方向键后的短观察窗(用户2026-09-26:220太久改80):80ms后检测,对齐就跳、不齐继续点动对准
 LADDER_MM_APPROACH_FRAMES = 2    # 跑跳需连续几拍朝梯移动才认(防单帧光点抖动误触发)
 LADDER_DIR_X_HALF = 300    # 方向带选梯X左右半宽(屏幕px,用户2026-09-18):只在人左右各300内选梯(原寻怪far_range=500太宽、梯子多会认错);有怪只留怪那侧,怪侧空才放宽两侧
 LADDER_DOT_X_TOL = 2        # 上梯后光点X直配录制梯容差(用户2026-09-15:人抓住梯后光点与梯共用X,|录制梯x-光点x|≤此值=同一把;与录梯覆盖规则"X差<2同一把"一致,真机配不到再议放到3)
@@ -734,7 +738,7 @@ LADDER_FAIL_REENTER_MS = 120  # 抓梯失败回主线后的极短冷却(2026-09-
 #   approach=按住朝梯方向键连续走,用最近窗内|人梯X差|的收敛速率估"靠近速度",按 速度×制动延迟 提前松手(让人靠惯性正好滑到X差≈0),
 #            制动延迟按每次停稳结果一阶滤波自学、越用越准(只存内存);settle=松手后停稳,连续2帧X差≤10且人名X帧间不再滑=原地直跳,
 #            走过头/没走到最多回approach修正1次。直跳后交_ladder_post_jump_process判后脑/Y,没抓住重入,最多尝试MAX_ROUNDS次回主线打怪。 ===
-LADDER_REALIGN_MAX_ROUNDS = 3     # 直跳尝试上限(用户2026-09-19):每"进一次校准并起跳没抓住"算1次,满3次回主线(旧精修轮次语义废弃)
+LADDER_REALIGN_MAX_ROUNDS = 2     # 直跳尝试上限(用户2026-09-26改2次):2次没抓住就回主线,直接开锁怪、不压制
 LADDER_REALIGN_TOL = 10           # 达标=屏幕|人-梯X差|≤此值(直跳抓取容差)
 LADDER_REALIGN_LOCK_PX = 10       # 方向锁死区:|diff|≤此值的识别抖动不许左右翻向,真走过头/回approach才刷新方向
 LADDER_REALIGN_HOLD_FRAMES = 2    # 停稳需连续帧数(防抖,和正常屏幕直跳一致)
@@ -5463,7 +5467,7 @@ class MinimapRouteRecorder:
             if _move_vk not in self._random_move_keys:
                 self._key_down(_move_vk)
         else:
-            self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
+            self._release_move_conflicts()   # 直跳当帧两套左右(战斗+巡路)全松,治带方向跳(用户2026-09-26)
         if VK_DOWN in self._random_move_keys:
             self._key_up(VK_DOWN)
         self._climb_start_y = py
@@ -5550,6 +5554,7 @@ class MinimapRouteRecorder:
         self._ladder_mm_brake_done = False
         self._ladder_mm_coast_still = 0
         self._ladder_mm_nudge_count = 0
+        self._ladder_mm_last_move_t = 0
         self._ladder_mm_coast_in = None
 
     def _ladder_mm_align_settle(self, d, ad, dir_sign, vl, now_ms):
@@ -5566,7 +5571,7 @@ class MinimapRouteRecorder:
                 _debug_log("[对位·小地图] 滑行自学 入ad=%.2f v=%.0f 实滑%.2f → t_coast=%.0fms" % (
                     _ad_in, _v_in, _coast_dx, self._ladder_mm_coast_ms))
         self._ladder_mm_coast_in = None
-        if ad <= max(float(vl), 0.6):
+        if ad <= LADDER_MM_ALIGN_OK_DX:
             self._ladder_mm_align_phase = ''   # 对齐成功:回goto,下帧停稳vert直跳
             _debug_log("[对位·小地图] 已对齐 ad=%.2f,回goto停稳直跳" % ad)
             return False
@@ -5612,6 +5617,7 @@ class MinimapRouteRecorder:
                 self._ladder_mm_align_phase = 'coast'; self._ladder_mm_align_t = now_ms
                 self._ladder_mm_coast_in = (ad, v); self._ladder_mm_coast_still = 0
                 self._ladder_mm_brake_done = False
+                self._ladder_mm_last_move_t = now_ms
                 _debug_log("[对位·小地图] 预判松键 ad=%.2f v=%.0f d_stop=%.2f(环路%d+滑行%.0f):靠惯性滑入梯底" % (
                     ad, v, d_stop, LADDER_MM_BRAKE_LOOP_MS, self._ladder_mm_coast_ms))
                 return False
@@ -5649,6 +5655,7 @@ class MinimapRouteRecorder:
                 self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
                 self._ladder_mm_align_phase = 'coast'; self._ladder_mm_align_t = now_ms
                 self._ladder_mm_coast_still = 0
+                self._ladder_mm_last_move_t = now_ms
             return False
 
         if ph == 'pullback':
@@ -5797,7 +5804,8 @@ class MinimapRouteRecorder:
             self._ladder_mm_prev_px = px; self._ladder_mm_prev_ad = ad
             return self._ladder_mm_start_jump('run', d, py, now_ms, jump_key, vx=approach)
         # ---- 4) 直跳:ad<=vl 且连续停稳 ----
-        if ad <= vl and self._ladder_mm_still_frames >= LADDER_MM_STILL_FRAMES:
+        if (ad <= LADDER_MM_ALIGN_OK_DX and self._ladder_mm_still_frames >= LADDER_MM_STILL_FRAMES
+                and now_ms - getattr(self, '_ladder_mm_last_move_t', 0) >= LADDER_MM_SETTLE_KEY_MS):
             self._ladder_mm_align_phase = ''
             self._ladder_mm_prev_px = px; self._ladder_mm_prev_ad = ad
             return self._ladder_mm_start_jump('vert', d, py, now_ms, jump_key, vx=approach)
@@ -8045,6 +8053,48 @@ class MinimapRouteRecorder:
                 map_y = best_y
         return (map_x, map_y)
 
+    def _purple_persist_update(self, now_ms):
+        """紫点稳定(纯显示,用户2026-09-26):当前怪屏幕坐标最近邻关联到持久记录并更新小地图位置,
+        漏检记录保持PURPLE_KEEP_MS(渐淡)、超时移除。返回[(map_x,map_y,ratio)],ratio=1实色、随漏检时长变淡。"""
+        if not hasattr(self, '_purple_persist'):
+            self._purple_persist = {}
+            self._purple_seq = 0
+        cur = []
+        if self._monsters and self._player_map_pos and self._player_screen_pos:
+            for (_x1, _y1, _x2, _y2, _sc) in self._monsters:
+                _mcx = (_x1 + _x2) // 2
+                _mcy = _y2
+                _mp = self._get_monster_map_pos_verified(_mcx, _mcy)
+                if _mp:
+                    cur.append((_mcx, _mcy, _mp[0], _mp[1]))
+        used = set()
+        keep = {}
+        for (_mcx, _mcy, _mx, _my) in cur:
+            best = None; bd = 1e9
+            for _key, _rec in self._purple_persist.items():
+                if _key in used:
+                    continue
+                _d = abs(_rec['sx'] - _mcx) + abs(_rec['sy'] - _mcy)
+                if _d < bd:
+                    bd = _d; best = _key
+            if best is not None and bd <= PURPLE_MATCH_SCREEN_PX:
+                _rec = self._purple_persist[best]; used.add(best)
+                _rec.update(sx=_mcx, sy=_mcy, mx=_mx, my=_my, t=now_ms)
+                keep[best] = _rec
+            else:
+                self._purple_seq += 1
+                keep[self._purple_seq] = {'sx': _mcx, 'sy': _mcy, 'mx': _mx, 'my': _my, 't': now_ms}
+        for _key, _rec in self._purple_persist.items():
+            if _key not in keep and now_ms - _rec['t'] <= PURPLE_KEEP_MS:
+                keep[_key] = _rec
+        self._purple_persist = keep
+        out = []
+        for _rec in keep.values():
+            _age = now_ms - _rec['t']
+            _ratio = 1.0 if _age <= 0 else max(0.3, 1.0 - _age / float(PURPLE_KEEP_MS))
+            out.append((_rec['mx'], _rec['my'], _ratio))
+        return out
+
     def _get_monster_platform(self, screen_x, screen_y):
         """【模块B·平台模式判台,2026-09-26定稿】怪屏幕坐标→小地图紫点X,紫点X落在某【选中台】绿线X区间
         再向两侧各固定延伸PLATFORM_X_EXTEND(100,用户2026-09-26最终定稿、不分平台)
@@ -9098,17 +9148,26 @@ class MinimapRouteRecorder:
         # 【模块B】在缩放后的map_display上画怪物紫色点（半径6，清晰可见）
         scale_x = render_w / w if w > 0 else 1.0  # X缩放比例=渲染宽度/原始宽度
         scale_y = render_h / h if h > 0 else 1.0  # Y缩放比例=渲染高度/原始高度
-        if self._monsters and self._player_map_pos and self._player_screen_pos:
+        # 紫点稳定(用户2026-09-26):最后已知位置保持PURPLE_KEEP_MS,漏检不闪、渐淡;纯显示不碰锁怪
+        if self._player_map_pos and self._player_screen_pos:
             COLOR_MONSTER_MAP = (255, 0, 255)  # 紫色BGR
-            for (x1, y1, x2, y2, score) in self._monsters:
-                mcx = (x1 + x2) // 2
-                mcy = y2
-                mpos = self._get_monster_map_pos_verified(mcx, mcy)
-                if mpos:
-                    dx_s = int(mpos[0] * scale_x)
-                    dy_s = int(mpos[1] * scale_y)
-                    if 0 <= dx_s < render_w and 0 <= dy_s < render_h:  # 边界检查用实际渲染尺寸
-                        cv2.circle(map_display, (dx_s, dy_s), 6, COLOR_MONSTER_MAP, -1)
+            for (_pmx, _pmy, _pratio) in self._purple_persist_update(int(time.time() * 1000)):
+                _dxs = int(_pmx * scale_x)
+                _dys = int(_pmy * scale_y)
+                if not (0 <= _dxs < render_w and 0 <= _dys < render_h):
+                    continue
+                if _pratio >= 1.0:
+                    cv2.circle(map_display, (_dxs, _dys), 6, COLOR_MONSTER_MAP, -1)
+                else:
+                    # 漏检保持=真半透明(alpha混合、保持紫色相),不调暗变黑;局部ROI叠加,点少开销极小
+                    _r = 6
+                    _x0 = max(0, _dxs - _r); _x1 = min(render_w, _dxs + _r + 1)
+                    _y0 = max(0, _dys - _r); _y1 = min(render_h, _dys + _r + 1)
+                    _roi = map_display[_y0:_y1, _x0:_x1]
+                    _ov = _roi.copy()
+                    cv2.circle(_ov, (_dxs - _x0, _dys - _y0), _r, COLOR_MONSTER_MAP, -1, cv2.LINE_AA)
+                    cv2.addWeighted(_ov, _pratio, _roi, 1.0 - _pratio, 0, _roi)
+                    map_display[_y0:_y1, _x0:_x1] = _roi
 
         # 平台编号（缩放后画，红色白描边）
         for p in self.platforms:
@@ -16266,7 +16325,7 @@ class MinimapRouteRecorder:
         self._set_b_lock_enabled(True, '上梯失败重锁')   # 建锁时关了B锁,失败开回、B下帧用热怪表重锁同层最近怪
         self._clear_locked_ladder('上梯失败')   # 失败=锁定梯另一自然终点,解绑回正常找怪(先锁下面Y相近的)
         self._release_all_keys()
-        _debug_log("[跨层] 爬梯失败，丢弃目标回正常找怪（先锁下面Y相近的，清完再重新上）")
+        _debug_log("[跨层] 爬梯失败，丢弃目标回正常找怪（直接开锁怪、不压制）")
 
     def _find_platform_intersection(self, pf_a, pf_b):
         """找两条绿线平台的交叉点（用户用法A：底线+上坡线画成两条、交叉=分叉口）
@@ -17039,7 +17098,7 @@ class MinimapRouteRecorder:
             except Exception as _e:
                 if self._detect_running:
                     _debug_log("[小地图线程] 异常:%s" % _e)
-            time.sleep(0.020)
+            time.sleep(0.010)  # 小地图光点10ms=100fps(用户2026-09-27提速,原20ms)
 
     def _flow_loop(self):
         """田字背景迁移检测线程(常开层):框放人物斜上对角(水平朝屏幕内侧300、垂直上抬300,不平齐);人在左半屏挂右上、人在右半屏挂左上。
