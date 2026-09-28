@@ -831,14 +831,14 @@ LADDER_STUCK_SETTLE_MS = 450    # 解卡横跳后落地/重挂观察窗(一次�
 # === 全局卡住哨兵(用户2026-09-28分行定稿,挂监管线程:每类异常独立成行,独立判定/独立解法/互不干扰) ===
 STALL_SENTINEL_OBSERVE = True   # True=观察模式只打日志不动键;真机确认零误报后改False放开恢复动作(用户定的上线方式)
 STALL_WALK_MS = 2000            # 【行2·走路】X意图按住且光点没朝意图方向动持续这么久(用户定2秒)
-STALL_CLIMB_MS = 1500           # 【行1·卡梯】climbing中Y意图按住且光点Y没动持续这么久(用户定1.5秒)
+STALL_CLIMB_MS = 2000           # 【行1·卡梯】在梯上(climbing+后脑可见)光点Y静止满这么久=卡梯(与实装LADDER_STUCK_MS同值2秒)
 STALL_TP_MS = 1000              # 【行3·瞬移】瞬移发出后这么久光点还没朝该轴动过=瞬移没生效(用户定1秒)
 STALL_LOCK_MS = 3000            # 【行4·锁怪】寻怪框内有怪却持续没锁上/B锁开已锁却没出手(用户定3秒)
 STALL_RECOVER_WATCH_MS = 500    # 每次纠偏后的观察窗:窗内光点朝意图方向恢复移动=脱困
 STALL_WALK_BACK_MS = 300        # 【行2·走路】跳了没用后的反向走时长(用户定:跳没用就向反方向走)
 STALL_ALERT_WINDOW_MS = 600000  # 同一行"纠偏失败放弃"统计窗(用户定10分钟)
 STALL_ALERT_MAX = 3             # 窗内达这么多次=弹窗报警说明原因(用户定3次)
-STALL_LADDER_JUMP_EVADE_MS = 2500  # 卡梯横跳发键后哨兵爬梯判定的避让窗(防腾空/落地中Y暂时不动误判)
+STALL_LADDER_RECHECK_MS = 500   # 卡梯横跳发键后的重检等待(用户定:跳完500ms开始重测,还静就再跳,不需要2.5s冻结窗)
 LADDER_STUCK_COOLDOWN_MS = 2500 # 两次横跳解卡之间的冷却
 LADDER_STUCK_MAX_FAILS = 3      # 连续解卡几次仍卡=放弃这把梯回打怪/重选
 JUMP_DOWN_LAND_STABLE_MS = 180   # 下跳落地判定(2026-09-10收紧250→180,治到底后↓多按扑倒)：开始下落后光点Y连续180ms不再增大(≤3px抖动)=落到台子,立刻松↓
@@ -15830,8 +15830,8 @@ class MinimapRouteRecorder:
             for ln in self._stall_lines.values():
                 ln['track'] = None   # 光点丢失:各行基点全清(不冤枉),找回后重记
             return
-        # 行1 卡梯(仅climbing;卡梯横跳后避让窗内冻结本行)
-        self._stall_line_ladder(now, intents, mmp)
+        # 行1 卡梯(已上梯+后脑可见+Y静止2s→原横跳序列;按实际结果判,不看按键意图)
+        self._stall_line_ladder(now, mmp)
         if self._stall_active is not None:
             return
         # 行2 走路(X意图按住即判,不限状态)
@@ -15868,38 +15868,43 @@ class MinimapRouteRecorder:
         # 恢复模式:统一纪律——关锁清锁→关主线→该行独占纠偏
         self._stall_enter(line_key, spec, mmp, now)
 
-    def _stall_line_ladder(self, now, intents, mmp):
-        """行1·卡梯(独立判定,与卡梯横跳的后脑判定互补):climbing中Y意图按住≥MOVE_KEY_MIN_MS且
-        光点Y没动超STALL_CLIMB_MS。解法【按原来的·用户2026-09-28】:触发后直接执行与
-        _wd_check_ladder_stuck完全同款的横跳序列(松方向键→右键100ms→跳80ms→松),不另建状态机、
-        不关锁不关主线;跳完置避让窗+复位原检测器计时(防两条判定连跳两次),并计入行失败统计(10分钟3次弹窗)。"""
+    def _stall_line_ladder(self, now, mmp):
+        """行1·卡梯(用户2026-09-28定稿·按实际结果判,不看按键意图——意图≠事实,按了↑不代表在爬):
+        前提=climbing(已上梯)+后脑可见(确认真挂在梯上);判定=光点Y静止满STALL_CLIMB_MS即卡梯。
+        解法【按原来的实装】:关锁清锁→关主线→松左右+攻击键→执行与_wd_check_ladder_stuck完全同款
+        横跳序列(松方向键→右键100ms→跳80ms→松)→开锁开主线→横跳后STALL_LADDER_RECHECK_MS(500ms)
+        重新检测,还静就再跳,动了就正常(用户定:不需要2.5s冻结窗,不是静就是动)。"""
         ln = self._stall_lines['ladder']
-        if getattr(self, '_climb_state', 'none') != 'climbing' \
-                or now - getattr(self, '_ladder_jump_last_t', 0) < STALL_LADDER_JUMP_EVADE_MS:
-            ln['track'] = None   # 不在climbing/横跳避让窗:基点清空(下次进climbing重记)
+        if getattr(self, '_climb_state', 'none') != 'climbing':
+            ln['track'] = None   # 不在climbing(没上梯):基点清空
             return
-        _it_y = intents.get('y')
-        if not _it_y or now - int(_it_y.get('start_t', 0) or 0) < MOVE_KEY_MIN_MS:
-            ln['track'] = None
+        if now - getattr(self, '_ladder_jump_last_t', 0) < STALL_LADDER_RECHECK_MS:
+            return   # 横跳后500ms观察窗:跳完开始重新检测是不是又静了
+        _bv, _bs = self._back_head_visible()
+        if not _bv:
+            ln['track'] = None   # 后脑不可见=没挂在梯上(可能已掉下/到顶),不判卡梯
             return
-        _dirn = int(_it_y.get('dir') or -1)   # Y轴小地图上为负:向上爬dir=-1
         tr = ln['track']
-        if tr is None or tr.get('dir') != _dirn:
-            ln['track'] = {'t': now, 'bx': float(mmp[0]), 'by': float(mmp[1]), 'dir': _dirn}
+        if tr is None:
+            ln['track'] = {'t': now, 'by': float(mmp[1])}
             return
-        _prog = (float(mmp[1]) - tr['by']) * _dirn   # 朝爬行方向(Y按dir取符号)的净位移
-        if _prog >= MOVE_MIN_MAP_DX:
-            tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))   # 真在爬:滑基准重计时
+        if abs(float(mmp[1]) - tr['by']) >= MOVE_MIN_MAP_DX:
+            tr.update(t=now, by=float(mmp[1]))   # 光点Y在动=正常爬:滑基准重计时
             return
         if now - tr['t'] < STALL_CLIMB_MS:
             return
-        tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))   # 滑基准防同一基点重复触发
+        tr.update(t=now, by=float(mmp[1]))   # 滑基准防同一基点重复触发
         if STALL_SENTINEL_OBSERVE:
-            _debug_log("[哨兵·观察][ladder] 按住爬键光点Y %.0fms没动[观察模式不动键]" % STALL_CLIMB_MS)
+            _debug_log("[哨兵·观察][ladder] 在梯上后脑可见且光点Y静止%.0fms=卡梯[观察模式不动键]" % STALL_CLIMB_MS)
+            self._stall_fail('ladder', now, '爬梯卡住')   # 观察模式也计数(用户:发现3次就报,逼根治)
             return
+        # 恢复模式·行动纪律(用户定顺序):关锁清锁→关主线→松左右+攻击键(不管按没按都松)
+        self._set_b_lock_enabled(False, why='哨兵·爬梯卡住')
+        self._stall_hold_main = True
+        self._release_move_conflicts()
         # 按原来的:与_wd_check_ladder_stuck完全同款横跳时序(松键→右键100ms→跳80ms→松)
-        _debug_log("[哨兵][ladder] 爬梯卡住(Y意图%.0fms光点Y不动),执行原横跳序列" % STALL_CLIMB_MS)
-        self._rlog("爬梯卡住(Y判定),横跳解卡", LOG_RED, log='exception')
+        _debug_log("[哨兵][ladder] 在梯静止%.0fms,执行原横跳序列" % STALL_CLIMB_MS)
+        self._rlog("爬梯卡住(在梯静止),横跳解卡", LOG_RED, log='exception')
         for _vk in (VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT):
             if _vk in self._random_move_keys:
                 self._key_up(_vk)
@@ -15913,12 +15918,16 @@ class MinimapRouteRecorder:
         self._key_up(VK_RIGHT)
         if _jvk is not None:
             self._key_up(_jvk)
-        self._ladder_jump_last_t = now   # 横跳时刻:本行避让窗起点
+        # 行动完:开锁开主线(重锁由B线下一帧用热怪表立即完成)
+        self._stall_hold_main = False
+        if not getattr(self, '_b_lock_enabled', True):
+            self._set_b_lock_enabled(True, why='哨兵·卡梯横跳完成')
+        self._ladder_jump_last_t = now   # 500ms观察窗起点(还静再跳)
         # 复位原后脑检测器计时(与原横跳后动作一致,防两判定背靠背连跳)
         self._ladder_stuck_first_back_t = 0
         self._ladder_stuck_first_back_y = None
         self._ladder_stuck_last_y = None
-        self._stall_fail('ladder', now, '爬梯卡住')   # 计入行失败统计(10分钟3次弹窗)
+        self._stall_fail('ladder', now, '爬梯卡住')   # 触发即计数:10分钟3次弹窗(用户:发现3次就报)
 
     def _stall_line_walk(self, now, intents, mmp):
         """行2·走路(独立判定):X意图按住且光点没朝意图方向动超STALL_WALK_MS。
