@@ -2,13 +2,13 @@
   "minimap": {
     "left": 14,
     "top": 40,
-    "width": 202,
+    "width": 366,
     "height": 235
   },
   "map": {
     "left": 14,
     "top": 123,
-    "width": 202,
+    "width": 366,
     "height": 152
   }
 }

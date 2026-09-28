@@ -12,9 +12,9 @@
     "lock_follow_y": 0,
     "lock_dead_lx": 0,
     "lock_dead_rx": 0,
-    "lock_dead_y": 0,
-    "lock_idle_x": 0,
-    "lock_idle_y": 0,
+    "lock_dead_y": 49,
+    "lock_idle_x": 13,
+    "lock_idle_y": 99,
     "lock_box_rx": 132,
     "lock_box_ry": 136
   },
