@@ -840,6 +840,15 @@ STALL_ALERT_WINDOW_MS = 600000  # 同一行"纠偏失败放弃"统计窗(用户�
 STALL_ALERT_MAX = 3             # 窗内达这么多次=弹窗报警说明原因(用户定3次)
 STALL_LADDER_RECHECK_MS = 500   # 卡梯横跳发键后的重检等待(用户定:跳完500ms开始重测,还静就再跳,不需要2.5s冻结窗)
 STALL_IDLE_MS = 3000            # 【行5·发呆】运行中+不在梯上,光点X/Y都不动满这么久=站台发呆(用户定3秒)
+# === 光屏比率动态学习(用户2026-09-28:小地图光点↔屏幕脚点位移比率,走路/跳/瞬移三套EMA自学习,A/B对比版) ===
+KAL_WIN_MIN_MS = 100            # 采样窗最小ms(太短噪声大)
+KAL_WIN_MAX_MS = 800            # 采样窗最大ms(太长场景可能变了)
+KAL_MIN_SCREEN_DX = 15          # 屏幕位移门槛px(够大才可信防抖动)
+KAL_MIN_DOT_DX = 1              # 光点位移门槛px
+KAL_EMA_ALPHA = 0.2             # EMA新样本权重(老0.8/新0.2,和_pred_learn同思路)
+KAL_OUTLIER_PCT = 0.40          # 新样本比率vs当前k偏差超40%=脏数据丢弃(镜头滚动污染)
+KAL_CENTER_BAN = True           # 镜头防污染:人物屏幕位置在中带(1/3~2/3宽)样本丢弃,边带才学(镜头跟人滚时屏位移被压缩)
+KAL_PAUSE_MS = 5000             # 连续丢弃3样本=镜头滚动频繁期,暂停学习5秒
 LADDER_STUCK_COOLDOWN_MS = 2500 # 两次横跳解卡之间的冷却
 LADDER_STUCK_MAX_FAILS = 3      # 连续解卡几次仍卡=放弃这把梯回打怪/重选
 JUMP_DOWN_LAND_STABLE_MS = 180   # 下跳落地判定(2026-09-10收紧250→180,治到底后↓多按扑倒)：开始下落后光点Y连续180ms不再增大(≤3px抖动)=落到台子,立刻松↓
@@ -1536,7 +1545,14 @@ class MinimapRouteRecorder:
         self._role_face = None          # 面部锚点判定的朝向 'L'/'R'(打怪左右决策用)
         self._role_anchor_polys = {}    # 本帧识别到(过阈)的各锚点缩小多边形{key:([(x,y)...],score)},供蒙板画框
         self._role_search_box = None    # 本帧局部跟踪搜索范围框(x0,y0,x1,y1);全图重搜时=None(不画)
-        self._role_predict_box = None  # 蒙板:黄色预测框(动作感知预测搜索范围)
+        self._role_predict_box = None  # 蒙板:白色预测框(动作感知预测搜索范围·意图版,A/B对比之B)
+        self._dot_predict_box = None   # 蒙板:黄色预测框(光点实测预测·A/B对比之A,用户2026-09-28:两框同时画真机对比谁准)
+        # === 光屏比率动态学习(用户2026-09-28):k=屏幕位移px/光点位移px,分走路/跳/瞬移三套EMA ===
+        self._kal_k = {'walk': None, 'jump': None, 'tp': None}   # 各场景比率(None=没学够,预测回退意图法)
+        self._kal_n = {'walk': 0, 'jump': 0, 'tp': 0}            # 各场景已学样本数(前3个直接采纳冷启动)
+        self._kal_smp = None      # 当前采样对 {'t','sx'(屏X),'dx'(光点X),'scene'};两侧同帧有效才立对
+        self._kal_drop_streak = 0 # 连续脏样本计数(≥3暂停学习KAL_PAUSE_MS)
+        self._kal_pause_until = 0 # 学习暂停截止ms
         # [2026-09-27] 预测速度自动学习(EMA平滑,每次有效位移都学)
         self._pred_learn_vx = 400.0   # 学到的走路速度 px/s(初值400)
         self._pred_learn_vy = 120.0   # 学到的爬梯速度 px/s(初值120)
@@ -11748,6 +11764,26 @@ class MinimapRouteRecorder:
                                 gdi32.SetBkMode(hdc, 1)
                                 gdi32.TextOutW(hdc, int(_px0) + 4, int(_py0) - 16, _ptxt, len(_ptxt))
                                 gdi32.SelectObject(hdc, old_pfont)
+                            # === 光点实测预测框(黄色2px,A/B对比之A·用户2026-09-28:和白框同时画看谁准) ===
+                            _dpb = data.get('dot_predict_box')
+                            if _dpb:
+                                _dx0, _dy0, _dx1, _dy1, _dreason = _dpb
+                                dpen = gdi32.CreatePen(0, 2, 0x00FFFF)  # 黄色2px=光点实测预测框
+                                if dpen:
+                                    gdi_objs.append(dpen)
+                                old_dpen = gdi32.SelectObject(hdc, dpen)
+                                gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷
+                                gdi32.Rectangle(hdc, int(_dx0), int(_dy0), int(_dx1), int(_dy1))
+                                gdi32.SelectObject(hdc, old_dpen)
+                                _dtxt = "光点:" + str(_dreason)
+                                dfont = gdi32.CreateFontW(14, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, "微软雅黑")
+                                if dfont:
+                                    gdi_objs.append(dfont)
+                                old_dfont = gdi32.SelectObject(hdc, dfont)
+                                gdi32.SetTextColor(hdc, 0x00FFFF)
+                                gdi32.SetBkMode(hdc, 1)
+                                gdi32.TextOutW(hdc, int(_dx0) + 4, int(_dy0) - 16, _dtxt, len(_dtxt))
+                                gdi32.SelectObject(hdc, old_dfont)
                             # 三个角色锚点统一橙色框(用户:不要五颜六色);禁用品红0xFF00FF=蒙板透明色键、画了会被抠空看不见
                             _role_colors = {"name": 0x00A5FF, "face_r": 0x00A5FF, "back": 0x00A5FF,
                                             "pet1": 0x00A5FF, "pet2": 0x00A5FF, "pet3": 0x00A5FF}
@@ -14627,6 +14663,105 @@ class MinimapRouteRecorder:
             _bx, _by = _lx + float(_o[0]), _ly + float(_o[1])
         return int(round(_bx)), int(round(_by)), _k, float(_s)
 
+    def _kal_scene_now(self, now_ms):
+        """当前样本归入哪个场景:瞬移后摇窗=tp;跳键按下过(近600ms内)=jump;按住左右=walk;否则None不学。
+        判定读实时按键+瞬移窗,和_predict_char_pos同一套信号源。"""
+        if now_ms < getattr(self, '_combat_tp_post_until', 0):
+            return 'tp'
+        _kl = bool(key_pressed(VK_LEFT)); _kr = bool(key_pressed(VK_RIGHT))
+        _kj = bool(key_pressed(VK_JUMP))
+        _cs = getattr(self, '_climb_state', 'none')
+        if _cs in ('climbing', 'post_jump'):
+            return None   # 爬梯X不动,没有水平位移可学
+        if _kj or (now_ms - getattr(self, '_combat_last_jump', 0) < 600):
+            return 'jump' if (_kl or _kr) else None   # 跳跃位移=跳+方向;原地垂直跳不学(无水平位移)
+        if (_kl or _kr) and not (_kl and _kr):
+            return 'walk'
+        return None
+
+    def _kalman_sample(self, ax, now_ms):
+        """光屏比率采样学习(用户2026-09-28):屏幕脚点X和小地图光点X同帧配对,隔窗相减得样本
+        k=屏Δ/光点Δ,按场景(walk/jump/tp)EMA。防污染:①方向异号丢(小地图无翻转)②比率离群>40%丢
+        ③人物屏X在中带(1/3~2/3宽)丢(镜头跟人滚时屏位移被压缩成假比率)④连丢3个暂停学5秒。
+        采样对中任一侧失效(锚点丢/光点丢)即作废重立。前3个样本直接采纳(冷启动)。"""
+        try:
+            _dot = getattr(self, '_player_map_pos', None)
+            if _dot is None:
+                self._kal_smp = None   # 光点侧失效:正在立的采样对作废
+                return
+            _fw = getattr(self, 'window_rect', None)
+            _fwv = int(_fw.get('width', 1280)) if _fw else 1280
+            _scene = self._kal_scene_now(now_ms)
+            _smp = self._kal_smp
+            if _smp is None or _smp.get('scene') != _scene:
+                # 立新对(首次/场景切换:walk↔jump↔tp分开立,不跨场景相减)
+                if _scene is not None:
+                    self._kal_smp = {'t': now_ms, 'sx': float(ax), 'dx': float(_dot[0]), 'scene': _scene}
+                else:
+                    self._kal_smp = None
+                return
+            _dt = now_ms - _smp['t']
+            _dsx = float(ax) - _smp['sx']        # 屏幕位移(带号)
+            _ddx = float(_dot[0]) - _smp['dx']   # 光点位移(带号)
+            # 本窗结束:滑到新对(不管学没学到,窗口总在滚动)
+            self._kal_smp = {'t': now_ms, 'sx': float(ax), 'dx': float(_dot[0]), 'scene': _scene}
+            if not (KAL_WIN_MIN_MS <= _dt <= KAL_WIN_MAX_MS):
+                return
+            if abs(_dsx) < KAL_MIN_SCREEN_DX or abs(_ddx) < KAL_MIN_DOT_DX:
+                return   # 位移不够大:静着/微动不学(防抖动噪声)
+            # 镜头防污染:人在屏幕中带时镜头跟人滚,屏位移被压缩=假比率,不学(用户2026-09-28)
+            if KAL_CENTER_BAN and (_fwv / 3.0) < ax < (_fwv * 2.0 / 3.0):
+                return
+            if (_dsx < 0) != (_ddx < 0):
+                return   # 方向异号:必有一侧是脏数据(镜头回弹/识别跳变),丢
+            if now_ms < self._kal_pause_until:
+                return   # 暂停窗内只滑窗不学习
+            _k_new = abs(_dsx) / abs(_ddx)
+            _k_cur = self._kal_k.get(_scene)
+            if _k_cur is not None and abs(_k_new - _k_cur) / _k_cur > KAL_OUTLIER_PCT:
+                self._kal_drop_streak += 1
+                if self._kal_drop_streak >= 3:
+                    self._kal_pause_until = now_ms + KAL_PAUSE_MS   # 连丢3个=镜头滚动频繁期,暂停学5秒
+                    self._kal_drop_streak = 0
+                return   # 离群丢弃(不重置streak:连续丢才停)
+            self._kal_drop_streak = 0
+            _n = self._kal_n.get(_scene, 0)
+            if _k_cur is None or _n < 3:
+                self._kal_k[_scene] = _k_new      # 冷启动:前3个直接采纳
+            else:
+                self._kal_k[_scene] = _k_cur * (1.0 - KAL_EMA_ALPHA) + _k_new * KAL_EMA_ALPHA
+            self._kal_n[_scene] = _n + 1
+        except Exception as _e:
+            try:
+                _debug_log("[光屏比率] 采样异常:%s" % _e)
+            except Exception:
+                pass
+
+    def _dot_predict_pos(self, now_ms):
+        """【光点实测预测·A/B对比之A·用户2026-09-28】人物锚点丢失时,用光点实际位移×学到的光屏比率推算
+        人物屏幕位置(事实优先,和白色意图框对比谁准)。预测只当搜索中心不当坐标(纪律同意图版)。
+        返回(pred_x,pred_y,reason)或None(光点丢/没学够比率/影子数据无效→回退意图版)。"""
+        tr = getattr(self, '_role_track', None)
+        if not tr or not tr.get('last'):
+            return None
+        last_x, last_y = tr['last']
+        _sh = getattr(self, '_dot_shadow_pos', None)
+        _dot = getattr(self, '_player_map_pos', None)
+        if _sh is None or _dot is None:
+            return None   # 光点/影子无效:不硬猜
+        _dxd = float(_dot[0]) - float(_sh[0])   # 最近一拍(DOT_SHADOW_LAG_MS=500ms)光点净位移(带号)
+        if abs(_dxd) < DOT_SHADOW_DEAD_PX:
+            return None   # 光点静止:没有可用的位移事实,回退意图版
+        _scene = self._kal_scene_now(now_ms)
+        _k = self._kal_k.get(_scene)
+        if _k is None:
+            # 本场景没学到:按场景优先级借用(跳/走近似,瞬移差异大不借)
+            _k = self._kal_k.get('jump') if _scene == 'walk' else self._kal_k.get('walk')
+        if _k is None:
+            return None   # 借不到:回退意图版
+        _dsx = _dxd * _k   # 光点位移×比率=屏幕位移
+        return (int(last_x + _dsx), int(last_y), '光点%.1fpx×k%.1f' % (_dxd, _k))
+
     def _predict_char_pos(self, now_ms):
         """【动作感知预测·用户2026-09-27】人物基点丢失时，根据按键状态+上一次位置预测当前人物位置。
         预测只用于搜索范围中心，绝不直接当坐标用；找到真锚点才采信。
@@ -14776,6 +14911,19 @@ class MinimapRouteRecorder:
                 self._role_predict_box = None
         except Exception:
             self._role_predict_box = None
+        # [2026-09-28] 光点实测预测黄框(A/B对比之A,和白色意图框同时显示,真机看哪个罩得住人):
+        # 光点位移×学到的光屏比率;光点/影子/比率任一无效本帧不画(回退白框)
+        try:
+            _dpred = self._dot_predict_pos(now)
+            if _dpred is not None:
+                _dpx, _dpy, _dwhy = _dpred
+                _dpr = 100   # 黄框半径与白框一致,只比中心准度
+                self._dot_predict_box = (int(_dpx - _dpr), int(_dpy - _dpr - 20),
+                                         int(_dpx + _dpr), int(_dpy + _dpr - 20), _dwhy)
+            else:
+                self._dot_predict_box = None
+        except Exception:
+            self._dot_predict_box = None
         # 失配时miss每帧+1、≥faststep就全图=几乎每帧全图(脸还镜像=每帧4次全图匹配),吃满CPU/GIL把主循环绘制拖到
         # 400ms、帧率掉到10~15、动作中更抓不到锚点=死循环。给"miss触发的全图"加350ms最小间隔,期间只跑便宜局部窗,把帧率让回来。
         _FULL_GAP_MS = 350.0
@@ -14941,6 +15089,9 @@ class MinimapRouteRecorder:
             tr["miss"] = 0; tr["score"] = ps; tr["last_t"] = now
             # [2026-09-27] 预测速度自动学习:正确定位后,根据按键状态+实际位移学真实速度
             try:
+                # [2026-09-28] 光屏比率学习(用户定稿:小地图走多远↔屏幕走多远自算,不固定,动态EMA):
+                # 同帧两侧坐标都有效就配对,下一帧比上一帧得样本;脏样本(方向异号/离群/镜头中带)丢弃
+                self._kalman_sample(ax, now)
                 _llp = getattr(self, '_pred_learn_last_pos', None)
                 _llt = getattr(self, '_pred_learn_last_t', 0)
                 if _llp is not None and _llt > 0 and now - _llt > 50 and now - _llt < 1000:
@@ -19595,6 +19746,7 @@ class MinimapRouteRecorder:
             self._monster_overlay_data["role_anchor_polys"] = getattr(self, "_role_anchor_polys", {})
             self._monster_overlay_data["role_search_box"] = getattr(self, "_role_search_box", None)
             self._monster_overlay_data["role_predict_box"] = getattr(self, "_role_predict_box", None)
+            self._monster_overlay_data["dot_predict_box"] = getattr(self, "_dot_predict_box", None)  # 黄框:光点实测预测(A/B对比)
             # 角色识别黑名单矩形(调试显示开时画红框,让人看到哪片被屏蔽);wnd_proc不能用self,走overlay_data
             self._monster_overlay_data["role_blocklist"] = \
                 (self._role_rec or {}).get("blocklist", []) if self._role_rec else []
