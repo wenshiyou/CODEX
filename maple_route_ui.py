@@ -14726,7 +14726,8 @@ class MinimapRouteRecorder:
         return (int(_px), int(_py), _rad, _status)
 
     def _research_anchor_around_predict(self, frame, tr, thr, now_ms):
-        """【预测区重捕·用户2026-09-28融合版】黑框重捕失败后,用融合预测位为中心开ROI重搜真锚点。
+        """【融合白框重捕·第一优先·用户2026-09-28定序】锚点丢失>300ms后用融合预测位为中心开ROI重搜真锚点
+        (丢失<300ms白框仍在锚点位、局部窗已覆盖免重复;>300ms白框随光点影子外推,斜向/瞬移方向精度按光点实际走向)。
         预测位只当搜索中心,绝不顶替人物坐标;命中过阈才返回(ax,ay,src,score),否则None。
         半径由融合器按置信度给(刚校准60/常态100/丢失>2s 150),蒙板画融合框核对。"""
         _pred = self._fused_predict_pos(now_ms)
@@ -15028,16 +15029,9 @@ class MinimapRouteRecorder:
         tr["miss"] += 1
         if need_full:
             tr["last_full"] = now
-        # 人名/脸/后脑本帧全丢: 黑框只当搜索范围, 在其ROI内重搜真锚点(同一套off偏移映射), 命中才回真人基点;
-        # 黑框点永不当坐标, 搜不到返回None本帧跳过、不冻结(用户2026-09-20: 治黑框顶替→同层怪误判cross连环锁梯/框外空打)
-        _r2 = self._research_anchor_around_dot(frame, tr, thr)
-        if _r2 is not None:
-            _ax2, _ay2, _src2, _sc2 = _r2
-            tr["last"] = (_ax2, _ay2); tr["foot"] = (_ax2, _ay2); tr["miss"] = 0; tr["score"] = _sc2; tr["last_t"] = now
-            self._role_pos_src = _src2
-            self._last_char_match_pos = tr["foot"]; self._last_char_match_time = now
-            return tr["foot"]
-        # 【预测区重捕·用户2026-09-27】黑框找不到后，用动作感知预测位置为中心重搜（丢失>300ms才启用，避免刚丢就预测干扰）
+        # 人名/脸/后脑本帧全丢(用户2026-09-28定序):先融合白框重捕→再黑框重捕→都缺返回None不钉旧点。
+        # 【融合白框重捕·第一优先】以融合预测位(锚点校准+光点影子外推,方向精度按光点实际走向)为中心重搜;
+        # 丢失<300ms白框仍在锚点位(局部窗已覆盖,免重复),>300ms白框随光点走才启用——斜向/瞬移跟方向靠它。
         if now - tr.get("last_t", 0) > 300:
             _r3 = self._research_anchor_around_predict(frame, tr, thr, now)
             if _r3 is not None:
@@ -15045,10 +15039,21 @@ class MinimapRouteRecorder:
                 tr["last"] = (_ax3, _ay3); tr["foot"] = (_ax3, _ay3); tr["miss"] = 0; tr["score"] = _sc3; tr["last_t"] = now
                 self._role_pos_src = _src3
                 self._last_char_match_pos = tr["foot"]; self._last_char_match_time = now
-                _debug_log("[预测重捕] 命中 src=%s score=%.2f pos=(%d,%d)" % (_src3, _sc3, _ax3, _ay3))
+                _debug_log("[白框重捕] 命中 src=%s score=%.2f pos=(%d,%d)" % (_src3, _sc3, _ax3, _ay3))
                 return tr["foot"]
+        # 【黑框重捕·最后兜底】白框没罩到再用黑框(光点±500绝对映射,有6层位置偏差故降级);
+        # 黑框点永不当坐标,搜不到返回None本帧跳过、不冻结(用户2026-09-20:治黑框顶替→同层怪误判cross连环锁梯/框外空打)。
+        # 打怪攻击中丢失的定点钉1.5s走_apply_char_detection另路,不受此序影响(用户2026-09-28:那条不变)。
+        _r2 = self._research_anchor_around_dot(frame, tr, thr)
+        if _r2 is not None:
+            _ax2, _ay2, _src2, _sc2 = _r2
+            tr["last"] = (_ax2, _ay2); tr["foot"] = (_ax2, _ay2); tr["miss"] = 0; tr["score"] = _sc2; tr["last_t"] = now
+            self._role_pos_src = _src2
+            self._last_char_match_pos = tr["foot"]; self._last_char_match_time = now
+            return tr["foot"]
         # 视觉层找不到真锚点一律返回None(用户2026-09-25定稿,不再无限沿用旧点):是否原地钉点交主循环_apply_char_detection按
-        # "站桩攻击中丢人名才钉1.5s、非攻击不钉"决定;黑框即刻找、满2秒转全屏只找人名的重捕在上方持续进行,找到真点下一帧即恢复。
+        # "站桩攻击中丢人名才钉1.5s、非攻击不钉"决定;白框重捕(>300ms)→黑框重捕(最后兜底)在上方按序持续进行、
+        # 满2秒转全屏只找人名的限频重搜也在上方推进,找到真点下一帧即恢复(用户2026-09-28定序:先白后黑)。
         self._role_pos_src = 'none'
         return None
 
