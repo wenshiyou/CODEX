@@ -405,13 +405,13 @@ ROLE_TRACK_DEFAULT = {
     "maxmove": 48,     # 最大跳变:相邻帧锚点位移超此值判为瞬移到别人身上,丢弃
     "faststep": 2,     # 快速失配:局部窗内连续失配多少帧后切全图搜索
     "research": 1500,  # 全图搜索间隔(ms):局部跟丢后限频全屏找回,避免每帧全屏拖帧
-    # 2026-09-16:黑框偏移(分状态分左右固定补偿,存盘永久)
-    "lock_follow_lx": 30,  # 跟随态向左 x
-    "lock_follow_rx": 30,  # 跟随态向右 x
-    "lock_follow_y": 70,   # 跟随态 y
+    # 2026-09-28:黑框偏移默认全零(用户定:清掉后台固定值,补偿只在面板调、存盘生效;原默认30/30/70/0/0/70/0/0)
+    "lock_follow_lx": 0,   # 跟随态向左 x
+    "lock_follow_rx": 0,   # 跟随态向右 x
+    "lock_follow_y": 0,    # 跟随态 y
     "lock_dead_lx": 0,     # 死区向左 x
     "lock_dead_rx": 0,     # 死区向右 x
-    "lock_dead_y": 70,     # 死区 y
+    "lock_dead_y": 0,      # 死区 y
     "lock_idle_x": 0,      # 站立不动 x
     "lock_idle_y": 0,      # 站立不动 y
     "lock_box_rx": 500,    # 黑框X半径(用户2026-09-23:放大到500)
