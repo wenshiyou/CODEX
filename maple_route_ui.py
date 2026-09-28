@@ -14911,17 +14911,23 @@ class MinimapRouteRecorder:
                 self._role_predict_box = None
         except Exception:
             self._role_predict_box = None
-        # [2026-09-28] 光点实测预测黄框(A/B对比之A,和白色意图框同时显示,真机看哪个罩得住人):
-        # 光点位移×学到的光屏比率;光点/影子/比率任一无效本帧不画(回退白框)
+        # [2026-09-28] 光点实测预测黄框(A/B对比·用户定:常显+框比白框大30防重叠看不清;测试期先原样):
+        # 光点位移×学到的光屏比率;比率没学到/光点静止时画在last位置标注"学习中"占位,保证黄框常显可对比
         try:
             _dpred = self._dot_predict_pos(now)
             if _dpred is not None:
                 _dpx, _dpy, _dwhy = _dpred
-                _dpr = 100   # 黄框半径与白框一致,只比中心准度
+                _dpr = 130   # 黄框半径130>白框100(用户2026-09-28:大一圈防两框重叠看不到)
                 self._dot_predict_box = (int(_dpx - _dpr), int(_dpy - _dpr - 20),
                                          int(_dpx + _dpr), int(_dpy + _dpr - 20), _dwhy)
             else:
-                self._dot_predict_box = None
+                # 常显占位:预测条件不满足(没学到k/光点静)也画,中心=上次人物位置,标注学习进度
+                _lx, _ly = (last[0], last[1]) if last else (0, 0)
+                _dpr = 130
+                _dwhy = "学k中:走%d跳%d瞬%d" % (self._kal_n.get('walk', 0),
+                                              self._kal_n.get('jump', 0), self._kal_n.get('tp', 0))
+                self._dot_predict_box = (int(_lx - _dpr), int(_ly - _dpr - 20),
+                                         int(_lx + _dpr), int(_ly + _dpr - 20), _dwhy)
         except Exception:
             self._dot_predict_box = None
         # 失配时miss每帧+1、≥faststep就全图=几乎每帧全图(脸还镜像=每帧4次全图匹配),吃满CPU/GIL把主循环绘制拖到
