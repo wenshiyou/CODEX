@@ -13,7 +13,7 @@ class FakeSelf:
     _kreg_collect = R._kreg_collect
     _blue_box_size = R._blue_box_size
     def __init__(self):
-        self._kreg = {'pts': [], 'k': None, 'fit_t': 0, 'log_t': 0}
+        self._kreg = {'pts': [], 'k': None, 'fit_t': 0, 'log_t': 0, 'fits': 0, 'locked': False}
         self._camera_state = 'deadzone'
         self._player_map_pos = (100.0, 60.0)
         self._target_window_size = (1280, 800)
@@ -99,3 +99,36 @@ assert abs(fs._kreg['k'] - TRUE_K2) < 1.0, fs._kreg['k']
 print("case8 ±3px噪声下k误差<1.0: k=%.2f OK" % fs._kreg['k'])
 
 print("=== ALL 8 PASS ===")
+
+# case9 锁定:R2≥0.95好拟合累计5次→locked,k不再变
+fs = FakeSelf()
+for rnd in range(6):
+    dots = [100 + i*0.8 for i in range(40)]
+    scr = [400 + (d-100)*TRUE_K2 for d in dots]
+    feed(fs, dots, scr, t0=NOW + rnd*30000)
+assert fs._kreg['locked'] is True, fs._kreg
+k_locked = fs._kreg['k']
+dots = [100 + i*0.8 for i in range(40)]
+scr = [400 + (d-100)*50.0 for d in dots]      # 喂离谱数据也不该变
+feed(fs, dots, scr, t0=NOW + 200000)
+assert fs._kreg['k'] == k_locked, "锁定后k不该变"
+print("case9 lock-after-5-good-fits OK")
+
+# case10 离开死区清窗(防跨镜头混拟合)
+fs = FakeSelf()
+dots = [100 + i*0.8 for i in range(12)]
+scr = [400 + (d-100)*TRUE_K2 for d in dots]
+feed(fs, dots, scr)
+assert len(fs._kreg['pts']) > 0
+fs._camera_state = 'following'
+R._kreg_collect(fs, 500.0, NOW + 5000)
+assert fs._kreg['pts'] == [], "离开死区必须清窗"
+print("case10 leave-deadzone-clears-window OK")
+
+# case11 短基线不拟合(光点跨度<8或屏跨度<80)
+fs = FakeSelf()
+dots = [100 + i*0.15 for i in range(30)]        # 光点跨度4.5<8
+scr = [400 + (d-100)*TRUE_K2 for d in dots]     # 屏跨度67<80
+feed(fs, dots, scr)
+assert fs._kreg['k'] is None, "短基线不该出k"
+print("case11 short-baseline-rejected OK")

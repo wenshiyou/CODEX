@@ -853,11 +853,13 @@ KAL_PAUSE_MS = 5000             # 连续丢弃3样本=镜头滚动频繁期,暂�
 KREG_WIN_MS = 3000              # 回归滑窗ms:只取最近3秒死区样本(镜头钉死期,屏幕位移=真实位移)
 KREG_PT_MIN_MS = 40             # 采样最小间隔ms(防同点堆样本稀释基线)
 KREG_MAX_PTS = 80               # 滑窗样本上限
-KREG_MIN_DOT_SPAN = 3           # 光点X基线跨度≥此值才拟合(站死区不动=没基线,不拟合)
-KREG_MIN_SCR_SPAN = 20          # 屏幕X基线跨度≥此px才拟合
+KREG_MIN_DOT_SPAN = 8           # 光点X基线跨度≥此值才拟合(2026-09-28真机抖动教训:3px短基线上锚点±3px噪声能把斜率搅飞,提门槛宁缺勿滥)
+KREG_MIN_SCR_SPAN = 80          # 屏幕X基线跨度≥此px才拟合(同上,20→80)
 KREG_R2_MIN = 0.90              # 拟合R²低于此=直线不成立(惯性漂移污染/换图混线),整窗丢弃重采
-KREG_EMA = 0.30                 # k_auto平滑:新拟合占30%(稳定显示,不逐帧跳)
-KREG_JUMP_CLR = 15             # 相邻样本光点跳变>此px=换图/重定位,清窗重采
+KREG_EMA = 0.15                 # k_auto平滑:新拟合占15%(0.3→0.15,锁定前过渡更稳)
+KREG_R2_LOCK = 0.95             # 锁定门槛:R²≥0.95的好拟合累计KREG_LOCK_FITS次→k冻结绿框定死(用户真机反馈"变来变去"根修)
+KREG_LOCK_FITS = 5              # 好拟合累计次数达标即锁定;换图跳变/手标绿框保存均解锁重学
+KREG_JUMP_CLR = 15             # 相邻样本光点跳变>此px=换图/重定位,清窗重采并解锁重学
 # === 融合预测器(用户2026-09-28定稿:白黄合一,预测-校正一体框,不依赖黑框绝对映射) ===
 FP_SNAP_DX = 150                # 锚点校准吸附阈值px:锚点与预测位差>150=有未注入的跳变,直接吸附;≤150小步EMA收拢
 FP_EMA = 0.30                   # 锚点校准时每帧收拢比例(不跳变,平滑跟手)
@@ -1567,7 +1569,8 @@ class MinimapRouteRecorder:
         self._kal_pause_until = 0 # 学习暂停截止ms
         self._kal_tp_seen_t = 0   # 融合器已注入过的瞬移pending时刻(防重复注入)
         # === 绿框大小自动标定(死区回归;k_auto收敛后bw/bh=窗口÷k,手标值仅作初值/回退) ===
-        self._kreg = {'pts': [], 'k': None, 'fit_t': 0, 'log_t': 0}   # pts=[(t,屏X,光点X)...] k=EMA平滑比例(None=未标定)
+        # locked:R²≥0.95好拟合累计满5次→k冻结绿框定死(换图跳变/手标保存解锁重学);fits=好拟合累计数
+        self._kreg = {'pts': [], 'k': None, 'fit_t': 0, 'log_t': 0, 'fits': 0, 'locked': False}
         # [2026-09-27] 预测速度自动学习(EMA平滑,每次有效位移都学)
         self._pred_learn_vx = 400.0   # 学到的走路速度 px/s(初值400)
         self._pred_learn_vy = 120.0   # 学到的爬梯速度 px/s(初值120)
@@ -13965,9 +13968,12 @@ class MinimapRouteRecorder:
             self._blue_box = None
 
     def _save_blue_box(self):
-        """保存蓝色框校准配置"""
+        """保存蓝色框校准配置(2026-09-28:手标绿框=用户明确重标,k标定解锁重学,手标值作新初值)"""
         if not self._blue_box:
             return
+        self._kreg = {'pts': [], 'k': None, 'fit_t': 0, 'log_t': 0, 'fits': 0, 'locked': False}
+        _debug_log("[K标定] 手标绿框已保存:标定解锁重学(新初值=%dx%d)" % (
+            self._blue_box.get('width', 0), self._blue_box.get('height', 0)))
         try:
             with open(BLUE_BOX_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._blue_box, f, indent=2)
@@ -14689,12 +14695,18 @@ class MinimapRouteRecorder:
         return _bw, _bh, True
 
     def _kreg_collect(self, ax, now_ms):
-        """绿框大小死区回归标定(用户2026-09-28定稿):镜头钉死期屏X与光点X严格线性,
+        """绿框大小死区回归标定(用户2026-09-28定稿+真机抖动修复版):镜头钉死期屏X与光点X严格线性,
         长基线最小二乘拟合 屏X=k×光点X+b → k=真实比例(屏幕px/光点px),bw_auto=窗口宽÷k。
-        只在camera_state=='deadzone'且锚点本帧有效时采(跟随区屏位移被镜头吃=假样本);
-        跨度不足不拟合;R²<0.90整窗丢(惯性漂移污染/换图混线自动暴露);光点跳变>15px清窗重采。"""
+        真机修复三点:①离开死区即清窗(镜头挪过=截距作废,两期样本混拟合会把斜率拉飞=绿框变来变去主犯);
+        ②基线门槛提高(光点≥8/屏幕≥80,短基线坏拟合是抖动帮凶);③R²≥0.95好拟合累计5次→k锁定绿框定死,
+        换图跳变/手标绿框保存才解锁重学。"""
         try:
+            kr = self._kreg
+            if kr.get('locked'):
+                return   # 已锁定:绿框大小定死,不再拟合(用户:学准就该固定)
             if getattr(self, '_camera_state', '') != 'deadzone':
+                if kr['pts']:
+                    kr['pts'].clear()   # 离开死区:旧窗作废,防跨镜头期样本混拟合拉飞斜率
                 return
             _dot = getattr(self, '_player_map_pos', None)
             if _dot is None:
@@ -14702,10 +14714,9 @@ class MinimapRouteRecorder:
             _win = getattr(self, '_target_window_size', None) or (0, 0)
             if _win[0] <= 0:
                 return
-            kr = self._kreg
             _pts = kr['pts']
             if _pts and abs(float(_dot[0]) - _pts[-1][2]) > KREG_JUMP_CLR:
-                _pts.clear()   # 换图/重定位跳变:旧样本作废,清窗重采
+                _pts.clear()   # 换图/重定位跳变:清窗重采
             if not _pts or now_ms - _pts[-1][0] >= KREG_PT_MIN_MS:
                 _pts.append((now_ms, float(ax), float(_dot[0])))
             while _pts and now_ms - _pts[0][0] > KREG_WIN_MS:
@@ -14733,12 +14744,22 @@ class MinimapRouteRecorder:
             _k_old = kr.get('k')
             kr['k'] = _k_fit if _k_old is None else _k_old * (1.0 - KREG_EMA) + _k_fit * KREG_EMA
             kr['r2'] = _r2
+            _pts.clear()   # 本窗已消化:清窗,下一窗用新基线重新攒(防同一段位移反复拟合虚增好拟合数)
+            if _r2 >= KREG_R2_LOCK:
+                kr['fits'] = kr.get('fits', 0) + 1
+                if kr['fits'] >= KREG_LOCK_FITS:
+                    kr['locked'] = True
+                    _bw_l, _bh_l, _ = self._blue_box_size()
+                    _debug_log("[K标定] 已锁定: k=%.2f 绿框定死(%d,%d),换图/重标绿框自动解锁" % (
+                        kr['k'], _bw_l, _bh_l))
+                    return
             if now_ms - kr.get('log_t', 0) >= 2000:   # 标定日志限频2秒
                 kr['log_t'] = now_ms
                 _bw_a, _bh_a, _auto = self._blue_box_size()
                 _bb = self._blue_box or {}
-                _debug_log("[K标定] k=%.2f R2=%.2f 绿框自动(%d,%d) 手标(%s,%s)" % (
-                    kr['k'], _r2, _bw_a, _bh_a, _bb.get('width'), _bb.get('height')))
+                _debug_log("[K标定] k=%.2f R2=%.2f 好拟合%d/%d 绿框自动(%d,%d) 手标(%s,%s)" % (
+                    kr['k'], _r2, kr.get('fits', 0), KREG_LOCK_FITS, _bw_a, _bh_a,
+                    _bb.get('width'), _bb.get('height')))
         except Exception as _e:
             try:
                 _debug_log("[K标定] 异常:%s" % _e)
