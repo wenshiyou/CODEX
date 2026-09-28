@@ -9057,14 +9057,15 @@ class MinimapRouteRecorder:
             return
 
 
-    def _putcn(self, frame, text, x, y, color=(255, 255, 255)):
+    def _putcn(self, frame, text, x, y, color=(255, 255, 255), font=None):
         """用PIL中文字体画文本，位置与cv2.putText的基线(x,y)完全一致(anchor='ls')：
         不乱码、且不改动原位置（解决'方案名/倍率中文'乱码，避免乱动已排好的布局）。
         [CPU优化2026-09-07] 只对文字包围盒小ROI做BGR<->RGB转换(实测整画布2.87ms->小ROI0.13ms,快21倍)；
         原实现每画一个词都把整个461x900画布来回转色+全图拷贝，draw内十余处叠加成每帧约32ms的主循环大头。"""
         try:
             H, W = frame.shape[:2]
-            bb = self._log_font.getbbox(text, anchor="ls")  # 相对基线锚点(x,y)的包围盒,上方为负
+            _f = font or self._log_font
+            bb = _f.getbbox(text, anchor="ls")  # 相对基线锚点(x,y)的包围盒,上方为负
             pad = 2
             X0 = max(0, x + bb[0] - pad); Y0 = max(0, y + bb[1] - pad)
             X1 = min(W, x + bb[2] + pad); Y1 = min(H, y + bb[3] + pad)
@@ -9072,7 +9073,7 @@ class MinimapRouteRecorder:
                 return
             roi = frame[Y0:Y1, X0:X1]
             _pil = Image.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
-            ImageDraw.Draw(_pil).text((x - X0, y - Y0), text, font=self._log_font,
+            ImageDraw.Draw(_pil).text((x - X0, y - Y0), text, font=_f,
                                       fill=(color[2], color[1], color[0]), anchor="ls")
             frame[Y0:Y1, X0:X1] = cv2.cvtColor(np.array(_pil), cv2.COLOR_RGB2BGR)
         except Exception:
@@ -9337,6 +9338,26 @@ class MinimapRouteRecorder:
                 cv2.line(map_display, (_dcx - 6, _dcy), (_dcx + 6, _dcy), (0, 0, 255), 1)  # 红十字横
                 cv2.line(map_display, (_dcx, _dcy - 6), (_dcx, _dcy + 6), (0, 0, 255), 1)  # 红十字竖
                 cv2.circle(map_display, (_dcx, _dcy), 2, (0, 0, 255), -1)                 # 中心红实心点
+
+        # 田字背景迁移检测框(已从游戏窗口迁来·用户2026-09-28):_flow_boxes为小地图块坐标,乘scale_x/y到map_display;
+        # 矩形+十字,颜色:绿=真动/红=背景在动/黄=确认静止/青=弃权未定。标签加深色底条+simhei,杜绝中文糊在地图纹理上乱码。
+        _flow_lab_font = self._load_cn_font(13)
+        for (_fx1, _fy1, _fx2, _fy2, _fclr, _flab) in list(getattr(self, '_flow_boxes', [])):
+            _cB, _cG, _cR = (_fclr >> 16) & 255, (_fclr >> 8) & 255, _fclr & 255
+            _fcol = (int(_cB), int(_cG), int(_cR))
+            _bx1 = int(_fx1 * scale_x); _by1 = int(_fy1 * scale_y)
+            _bx2 = int(_fx2 * scale_x); _by2 = int(_fy2 * scale_y)
+            cv2.rectangle(map_display, (_bx1, _by1), (_bx2, _by2), _fcol, 1)
+            _bcx = (_bx1 + _bx2) // 2; _bcy = (_by1 + _by2) // 2
+            cv2.line(map_display, (_bcx, _by1), (_bcx, _by2), _fcol, 1)
+            cv2.line(map_display, (_bx1, _bcy), (_bx2, _bcy), _fcol, 1)
+            _ty = _by1 - 17
+            if _ty < 0: _ty = _by2 + 3      # 框上方放不下就放框下方
+            _tb = _flow_lab_font.getbbox(_flab, anchor="ls")
+            cv2.rectangle(map_display,
+                          (_bx1 + 2 + _tb[0] - 1, _ty + _tb[1] - 1),
+                          (_bx1 + 2 + _tb[2] + 1, _ty + _tb[3] + 1), (0, 0, 0), -1)
+            self._putcn(map_display, _flab, _bx1 + 2, _ty, (255, 255, 255), font=_flow_lab_font)
 
         # 光点锁定可视化框已移除（与校准/正常模式绿框重复，保留后者即可）
         # 随机模式运行状态（已被倍率显示替代）
@@ -11790,26 +11811,7 @@ class MinimapRouteRecorder:
                             except Exception:
                                 pass
 
-                            # 田字背景迁移检测框(诊断·detect_flow发布):身后吊框;绿=3轮同向真动/黄=贴边弃权/白=有效不足3轮
-                            try:
-                                for (_fx1, _fy1, _fx2, _fy2, _fclr, _flab) in list(getattr(self, '_flow_boxes', [])):
-                                    _fp = gdi32.CreatePen(0, 2, _fclr)
-                                    if _fp: gdi_objs.append(_fp)
-                                    _ofp = gdi32.SelectObject(hdc, _fp)
-                                    gdi32.SelectObject(hdc, gdi32.GetStockObject(5))  # 空刷只描边
-                                    gdi32.Rectangle(hdc, int(_fx1), int(_fy1), int(_fx2), int(_fy2))
-                                    _mxx = (int(_fx1) + int(_fx2)) // 2; _myy = (int(_fy1) + int(_fy2)) // 2
-                                    gdi32.MoveToEx(hdc, _mxx, int(_fy1), None); gdi32.LineTo(hdc, _mxx, int(_fy2))
-                                    gdi32.MoveToEx(hdc, int(_fx1), _myy, None); gdi32.LineTo(hdc, int(_fx2), _myy)
-                                    gdi32.SelectObject(hdc, _ofp)
-                                    _ff = gdi32.CreateFontW(14, 0, 0, 0, 400, 0, 0, 0, 134, 3, 2, 1, 49, "微软雅黑")
-                                    if _ff: gdi_objs.append(_ff)
-                                    _off = gdi32.SelectObject(hdc, _ff)
-                                    gdi32.SetTextColor(hdc, _fclr); gdi32.SetBkMode(hdc, 1)
-                                    gdi32.TextOutW(hdc, int(_fx1) + 2, int(_fy1) - 16, _flab, len(_flab))
-                                    gdi32.SelectObject(hdc, _off)
-                            except Exception:
-                                pass
+                            # 田字背景迁移检测框已迁移到小地图map_display(用户2026-09-28),游戏窗口蒙板不再绘制
                             # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
                             # 注：和人物特征点写法完全一样，不用self（wnd_proc回调中self会导致异常）
                             for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
@@ -17242,7 +17244,7 @@ class MinimapRouteRecorder:
         """相邻两帧匹配区(都是MxM灰度、锚人物随动,M=160)。返回dict:
         dd=matchTemplate沿轴位移带号(正=内容下移/右移);score峰值;half=顺按键方向半区迁移相关;
         pcd/pcr=phaseCorrelate沿轴位移/响应(不受搜索半径限,互证);std=纹理强度(低=纯色/UI会假0)。"""
-        _M = roi.shape[0]; _tsz = 48; _t0 = (_M - _tsz) // 2; _hm = _M // 2
+        _M = roi.shape[0]; _tsz = max(8, _M // 2); _t0 = (_M - _tsz) // 2; _hm = _M // 2   # 框15时模板8,搜索半径约4
         _std = float(roi.std())
         _tpl = prev[_t0:_t0 + _tsz, _t0:_t0 + _tsz]
         _res = cv2.matchTemplate(roi, _tpl, cv2.TM_CCOEFF_NORMED)
@@ -17276,7 +17278,7 @@ class MinimapRouteRecorder:
             (_px, _py), _pr = cv2.phaseCorrelate(np.float32(prev) * _win, np.float32(roi) * _win)
         except Exception:
             pass
-        _tsz = 48; _t0 = (_M - _tsz) // 2
+        _tsz = max(8, _M // 2); _t0 = (_M - _tsz) // 2   # 框15时模板8
         _tpl = prev[_t0:_t0 + _tsz, _t0:_t0 + _tsz]
         _res = cv2.matchTemplate(roi, _tpl, cv2.TM_CCOEFF_NORMED)
         _, _mv, _, _ml = cv2.minMaxLoc(_res)
@@ -17351,12 +17353,12 @@ class MinimapRouteRecorder:
             time.sleep(0.010)  # 小地图光点10ms=100fps(用户2026-09-27提速,原20ms)
 
     def _flow_loop(self):
-        """田字背景迁移检测线程(常开层):框放人物斜上对角(水平朝屏幕内侧300、垂直上抬300,不平齐);人在左半屏挂右上、人在右半屏挂左上。
-        移动档按有效键轴(x/y)算背景位移、原地档(无有效移动键)二维判静止;静止结论 still 参与主循环原地钉基点。采集匹配区160、显示田字120。"""
-        FLOW_BOX, FLOW_MATCH, FLOW_TAIL_GAP, FLOW_MIN_GAP, FLOW_MARGIN = 120, 160, 300, 160, 24
-        FLOW_CORNER_UP = 300  # 田字框对角定位垂直上抬:框放人物斜上对角(水平朝屏幕内侧300、垂直上抬300),不平齐(平齐全是怪/特效);人在左半屏挂右上、人在右半屏挂左上,上下不换侧(用户2026-09-24)
+        """田字背景迁移检测线程(常开层)·已迁移到小地图(用户2026-09-28):检测框40×40,与光点同水平线、
+        朝小地图内侧离光点40px(光点偏左挂右/偏右挂左),检测小地图背景帧间变化;移动档按有效键轴算背景位移、
+        原地档二维判静止。框画在小地图map_display上(块坐标)。"""
+        FLOW_BOX, FLOW_TAIL_GAP, FLOW_MARGIN = 50, 40, 4   # 检测框=显示框50;框中心离光点40;块内边距4
         FLOW_WIN_MS, FLOW_MIN_ROUNDS, FLOW_MATCH_THR, FLOW_MIN_D = 300, 3, 0.5, 1.0
-        _hd = FLOW_BOX // 2; _hm = FLOW_MATCH // 2
+        _hd = FLOW_BOX // 2     # 匹配区半宽20(匹配框=显示框)
         _last_seq = -1
         _prev = {}
         _hist = []
@@ -17374,24 +17376,23 @@ class MinimapRouteRecorder:
                 _now_ms = int(time.time() * 1000)
                 _frame_dt = _now_ms - _last_frame_ms if _last_frame_ms else 0
                 _last_frame_ms = _now_ms
-                # 【田字框定位源改光点·用户2026-09-27】不用游戏窗口基点(_raw_char_pos,不准/丢失时田字框放错),
-                # 改用小地图光点换算的屏幕坐标(lock_screen_from_dot,光点稳定永不丢失)。光点不可用时田字框不检测。
-                _ch = None
-                try:
-                    _dot_pos = self.lock_screen_from_dot()
-                    if _dot_pos is not None:
-                        _ch = (_dot_pos[0], _dot_pos[1])
-                except Exception:
-                    _ch = None
+                # 检测画面=小地图块(从全帧裁map_area_rect);锚=小地图光点(块坐标),不再用游戏窗口/lock_screen_from_dot。
+                _mrect = getattr(self, 'map_area_rect', None)
+                _dot = getattr(self, '_player_map_pos', None)
                 with self._wd_lock:
                     _intents = {a: dict(v) for a, v in self._mv_intent.items()}
-                if _ch is None:
+                if not _mrect or _dot is None:
                     _prev.clear(); _hist = []; _hist_idle = []
                     with self._flow_lock:
                         self._flow_boxes = []; self._flow_state = {}
                     time.sleep(0.012); continue
                 _fh, _fw = _frame.shape[:2]
-                _px, _py = int(_ch[0]), int(_ch[1])
+                _ax0, _ay0 = int(_mrect['left']), int(_mrect['top'])
+                _ax1 = min(_ax0 + int(_mrect['width']), _fw)
+                _ay1 = min(_ay0 + int(_mrect['height']), _fh)
+                _mapblk = _frame[_ay0:_ay1, _ax0:_ax1]
+                _bh, _bw = _mapblk.shape[:2]
+                _px, _py = int(_dot[0]), int(_dot[1])
                 # 有效移动轴:方向键须持续按住>=MOVE_KEY_MIN_MS;更短(出手掰脸转身60ms)是轻点、不算移动(用户2026-09-24)
                 _eff = {a: v for a, v in _intents.items()
                         if _now_ms - int(v.get('start_t', 0) or 0) >= MOVE_KEY_MIN_MS}
@@ -17399,16 +17400,17 @@ class MinimapRouteRecorder:
                 if _last_moving != _moving:
                     _hist = []; _hist_idle = []   # 移动<->原地模式切换,两套历史各自清零不串判
                     _last_moving = _moving
-                # 田字框选侧只看人物在屏幕左/右(用户2026-09-24):人在左半屏->框挂右上方、人在右半屏->框挂左上方(始终朝屏幕内侧、不吊出屏),与移动朝向无关;垂直恒定上抬,上下不换侧
-                _xdir = -1 if _px < (_fw / 2.0) else 1   # 人在左(_xdir-1)->cx=px+GAP框在右;人在右(+1)->cx=px-GAP框在左
+                # 框与光点同水平线、朝小地图内侧离光点40:光点偏块中心左(_xdir-1)->框挂右(cx=px+40);偏右->挂左。
+                _xdir = -1 if _px < (_bw / 2.0) else 1
                 _cx = _px - _xdir * FLOW_TAIL_GAP
-                _cy = _py - FLOW_CORNER_UP            # 恒定上抬300=右上方/左上方对角,上下不换侧
-                _cx = max(FLOW_MARGIN + _hm, min(_cx, _fw - FLOW_MARGIN - _hm))
-                _cy = max(FLOW_MARGIN + _hm, min(_cy, _fh - FLOW_MARGIN - _hm))
+                _cy = _py                            # 同水平线,不上抬(用户2026-09-28)
+                _cx = max(FLOW_MARGIN + _hd, min(_cx, _bw - FLOW_MARGIN - _hd))
+                _cy = max(FLOW_MARGIN + _hd, min(_cy, _bh - FLOW_MARGIN - _hd))
                 _gap = int(abs(_cx - _px))
-                _edge = (abs(_cx - _px) < FLOW_MIN_GAP) or (abs(_py - _cy) < FLOW_MIN_GAP)  # 身后或上方放不下被夹回身边=贴边弃权
-                _mx1, _my1, _mx2, _my2 = _cx - _hm, _cy - _hm, _cx + _hm, _cy + _hm
-                _x1, _y1, _x2, _y2 = _cx - _hd, _cy - _hd, _cx + _hd, _cy + _hd
+                # 贴边弃权:框被夹回、中心离光点不足32(放不下40框);垂直同线不判(原斜上方逻辑已去)
+                _edge = abs(_cx - _px) < (FLOW_TAIL_GAP - 8)
+                _mx1, _my1, _mx2, _my2 = _cx - _hd, _cy - _hd, _cx + _hd, _cy + _hd
+                _x1, _y1, _x2, _y2 = _mx1, _my1, _mx2, _my2   # 匹配框=显示框40
                 if _moving:
                     if 'y' in _eff:
                         _axis = 'y'; _d = int(_eff['y'].get('dir', 1) or 1)
@@ -17416,8 +17418,8 @@ class MinimapRouteRecorder:
                         _axis = 'x'; _d = int(_eff['x'].get('dir', 1) or 1)
                     _dd = _score = _half = _pcd = _pcr = _std = 0.0
                     _n_rounds = _n_rev = 0; _sum_eff = 0.0
-                    if (not _edge) and _mx1 >= 0 and _my1 >= 0 and _mx2 <= _fw and _my2 <= _fh:
-                        _roi = cv2.cvtColor(_frame[_my1:_my2, _mx1:_mx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
+                    if (not _edge) and _mx1 >= 0 and _mx2 <= _bw and _my2 <= _bh:
+                        _roi = cv2.cvtColor(_mapblk[_my1:_my2, _mx1:_mx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
                         _std = float(_roi.std())
                         if _axis in _prev:
                             if _hist and (_hist[-1][1] != _axis or _hist[-1][2] != _d):
@@ -17434,11 +17436,9 @@ class MinimapRouteRecorder:
                         _prev[_axis] = _roi
                     else:
                         _edge = True
-                    _dn = ('下' if _d > 0 else '上') if _axis == 'y' else ('右' if _d > 0 else '左')
                     _real = (_n_rounds >= FLOW_MIN_ROUNDS)
                     _clr = 0x00FFFF if _edge else (0x00FF00 if _real else 0x00FFFFFF)
-                    _tag = '边' if _edge else ('真动' if _real else '测')
-                    _lab = "田%s%s %d/%d %.2f" % (_dn, _tag, _n_rounds, len(_hist), _score)
+                    _lab = ('向上..' if _d > 0 else '向下..') if _axis == 'y' else ('向左..' if _d > 0 else '向右..')
                     with self._flow_lock:
                         self._flow_boxes = [(_x1, _y1, _x2, _y2, _clr, _lab)]
                         self._flow_state = dict(axis=_axis, dir=_d, gap=_gap, edge=_edge, dd=_dd, pcd=_pcd,
@@ -17453,7 +17453,7 @@ class MinimapRouteRecorder:
                     _idx = _idy = _ipr = _imx = _imy = _msc = _std = 0.0
                     _still = None
                     if not _edge:
-                        _roi = cv2.cvtColor(_frame[_my1:_my2, _mx1:_mx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
+                        _roi = cv2.cvtColor(_mapblk[_my1:_my2, _mx1:_mx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
                         _std = float(_roi.std())
                         if 'idle' in _prev:
                             _hist_idle = [e for e in _hist_idle if _now_ms - e[0] <= FLOW_WIN_MS]
@@ -17464,9 +17464,11 @@ class MinimapRouteRecorder:
                             if _ni >= FLOW_MIN_ROUNDS:
                                 _still = False if _nm > 0 else True
                         _prev['idle'] = _roi
-                    _itag = '边' if _edge else ('静' if _still is True else ('动' if _still is False else '?'))
-                    _clr = 0x00FFFF if (_edge or _still is None) else (0xFFFF00 if _still else 0x0000FF)  # 青=确认静止 红=背景在动 黄=弃权/未定
-                    _lab = "田原%s %d" % (_itag, len(_hist_idle))
+                    _clr = 0x00FFFF if (_edge or _still is None) else (0xFFFF00 if _still else 0x0000FF)  # 黄=确认静止 红=背景在动 青=弃权/未定
+                    if _still is False and (abs(_idx) >= 1.0 or abs(_idy) >= 1.0):
+                        _lab = ('向下..' if _idy < 0 else '向上..') if abs(_idy) >= abs(_idx) else ('向右..' if _idx < 0 else '向左..')
+                    else:
+                        _lab = '静止..' 
                     with self._flow_lock:
                         self._flow_boxes = [(_x1, _y1, _x2, _y2, _clr, _lab)]
                         self._flow_state = dict(axis=None, dir=0, gap=_gap, edge=_edge, dd=_idx, pcd=_idy,
