@@ -905,7 +905,7 @@ BG_DETECT_DEFAULT_REGIONS = [
     {"x": 1222, "y": 309, "w": 43, "h": 28},  # 右上(原右中y409向上移100→309,2026-09-16不变)
 ]
 BG_DIFF_THRESHOLD = 20.0      # 该框两帧间"发生变化的像素占比(%)"超过此值判定在动(2026-09-16:原30%不敏感,调到20%,背景微动也判动)
-BG_MOTION_MIN_REGIONS = 2     # 至少几个区域在动才判定镜头在跟随(用户规则2026-09-16:三点里二个在动就算动,只有一个动就算停)
+BG_MOTION_MIN_REGIONS = 3     # 至少几个区域在动才判定镜头在跟随(用户规则2026-09-28改3:三个都动才算动,有一个不动就是静;原2/3易把纹理静止区误判跟随)
 BG_STILL_FRAMES_TO_DEADZONE = 3  # 连续几帧不动才切到死区状态
 BG_DETECT_REGIONS_FILE = os.path.join(DATA_DIR, "bg_detect_regions.json")  # 检测框位置持久化
 
@@ -11679,7 +11679,7 @@ class MinimapRouteRecorder:
                             _rsb = data.get('role_search_box')
                             if _rsb:
                                 _bx0, _by0, _bx1, _by1 = _rsb
-                                rpen = gdi32.CreatePen(0, 1, 0x000000)  # 黑色1px=黑框ROI(光点±500)
+                                rpen = gdi32.CreatePen(0, 2, 0x000000)  # 黑色2px=黑框ROI(光点±500,2026-09-28加粗与白框同粗)
                                 if rpen:
                                     gdi_objs.append(rpen)
                                 old_rpen = gdi32.SelectObject(hdc, rpen)
@@ -14315,7 +14315,7 @@ class MinimapRouteRecorder:
                 if self._player_map_pos:
                     self._last_follow_dot_pos = (self._player_map_pos[0], self._player_map_pos[1])
         else:
-            # 有一个点停(motion<2)：前馈衰减渐变（2→0约10帧折中，2026-09-16:5帧太激进易抖,30帧太慢），10帧后切死区
+            # 有一个点停(motion<3,用户2026-09-28定三区域全动才算动)：前馈衰减渐变（2→0约10帧折中，2026-09-16:5帧太激进易抖,30帧太慢），10帧后切死区
             self._follow_frame_count = 0  # 重置跟随计数器
             self._stop_frame_count += 1  # 停止帧数递增
             # 前馈衰减渐变：10帧内从2线性减到0
