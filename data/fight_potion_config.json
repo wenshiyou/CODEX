@@ -28,5 +28,7 @@
   "far_range_y_down": "320",
   "hp_value": "35",
   "teleport_key": "d",
-  "teleport_distance": "250"
+  "teleport_distance": "250",
+  "slope_jump_y_min": "-25",
+  "slope_jump_y_max": "-180"
 }
