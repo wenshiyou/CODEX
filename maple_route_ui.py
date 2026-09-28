@@ -839,6 +839,7 @@ STALL_WALK_BACK_MS = 300        # 【行2·走路】跳了没用后的反向走�
 STALL_ALERT_WINDOW_MS = 600000  # 同一行"纠偏失败放弃"统计窗(用户定10分钟)
 STALL_ALERT_MAX = 3             # 窗内达这么多次=弹窗报警说明原因(用户定3次)
 STALL_LADDER_RECHECK_MS = 500   # 卡梯横跳发键后的重检等待(用户定:跳完500ms开始重测,还静就再跳,不需要2.5s冻结窗)
+STALL_IDLE_MS = 2000            # 【行5·发呆】运行中+不在梯上,光点X/Y都不动满这么久=站台发呆(用户定2秒)
 LADDER_STUCK_COOLDOWN_MS = 2500 # 两次横跳解卡之间的冷却
 LADDER_STUCK_MAX_FAILS = 3      # 连续解卡几次仍卡=放弃这把梯回打怪/重选
 JUMP_DOWN_LAND_STABLE_MS = 180   # 下跳落地判定(2026-09-10收紧250→180,治到底后↓多按扑倒)：开始下落后光点Y连续180ms不再增大(≤3px抖动)=落到台子,立刻松↓
@@ -1589,9 +1590,9 @@ class MinimapRouteRecorder:
         self._ladder_stuck_fails = 0           # 本轮爬梯连续横跳解卡失败次数
         # === 全局卡住哨兵(用户2026-09-28分行定稿,挂监管线程:每类异常独立成行,互不干扰) ===
         # 行定义统一: {'track':{...}滑动静止基点或场景基点,'state':None或恢复状态机,'fails':[]纠偏失败时间戳表(弹窗统计)}
-        # 行键: 'ladder'=卡梯,'walk'=走路,'tp'=瞬移,'lock'=锁怪;_stall_active=当前独占纠偏的行名(None=空闲)
+        # 行键: 'ladder'=卡梯,'walk'=走路,'tp'=瞬移,'lock'=锁怪,'idle'=站台发呆(只取证报警,不动键)
         self._stall_lines = {k: {'track': None, 'state': None, 'fails': []}
-                             for k in ('ladder', 'walk', 'tp', 'lock')}
+                             for k in ('ladder', 'walk', 'tp', 'lock', 'idle')}
         self._stall_active = None            # 正在独占纠偏的行名;其余行在此期间全部冻结(不检测不动作,防行间打架)
         self._stall_hold_main = False        # 关主线令:True=主循环暂停主线(并入_aux_busy),哨兵独占纠偏不抢键
         self._stall_alert_msg = None         # 弹窗令(监管线程只置,主循环消费弹_tk窗:tk必须主线程,2026-09-03教训)
@@ -15844,6 +15845,10 @@ class MinimapRouteRecorder:
             return
         # 行4 锁怪(有怪不锁/锁了不打;不依赖光点位置,依赖怪表/锁状态)
         self._stall_line_lock(now)
+        if self._stall_active is not None:
+            return
+        # 行5 站台发呆(不在梯+XY全静2s+没出手;只取证报警不纠偏,跑最末防打扰前四行)
+        self._stall_line_idle(now, mmp)
 
     def _stall_slide_or_fire(self, line_key, mmp, now, limit_ms, cond_msg, spec):
         """行的公共骨架(仅行1/行2用):光点朝预期方向动过(MOVE_MIN_MAP_DX)就滑基准重计时;超limit_ms没动=触发。
@@ -15862,6 +15867,7 @@ class MinimapRouteRecorder:
         if now - tr['t'] < limit_ms:
             return
         tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))   # 滑基准防同一基点重复触发
+        self._stall_fail(line_key, now, cond_msg)   # 触发即计数(用户:发现3次就报,观察模式也计,逼根治)
         if STALL_SENTINEL_OBSERVE:
             _debug_log("[哨兵·观察][%s] %s 触发[观察模式不动键]" % (line_key, cond_msg))
             return
@@ -15894,9 +15900,9 @@ class MinimapRouteRecorder:
         if now - tr['t'] < STALL_CLIMB_MS:
             return
         tr.update(t=now, by=float(mmp[1]))   # 滑基准防同一基点重复触发
+        self._stall_fail('ladder', now, '爬梯卡住')   # 触发即计数(观察模式也计,发现3次就报逼根治)
         if STALL_SENTINEL_OBSERVE:
             _debug_log("[哨兵·观察][ladder] 在梯上后脑可见且光点Y静止%.0fms=卡梯[观察模式不动键]" % STALL_CLIMB_MS)
-            self._stall_fail('ladder', now, '爬梯卡住')   # 观察模式也计数(用户:发现3次就报,逼根治)
             return
         # 恢复模式·行动纪律(用户定顺序):关锁清锁→关主线→松左右+攻击键(不管按没按都松)
         self._set_b_lock_enabled(False, why='哨兵·爬梯卡住')
@@ -15927,7 +15933,6 @@ class MinimapRouteRecorder:
         self._ladder_stuck_first_back_t = 0
         self._ladder_stuck_first_back_y = None
         self._ladder_stuck_last_y = None
-        self._stall_fail('ladder', now, '爬梯卡住')   # 触发即计数:10分钟3次弹窗(用户:发现3次就报)
 
     def _stall_line_walk(self, now, intents, mmp):
         """行2·走路(独立判定):X意图按住且光点没朝意图方向动超STALL_WALK_MS。
@@ -15968,6 +15973,7 @@ class MinimapRouteRecorder:
             return
         tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))
         _dn = ('右' if _dirn > 0 else '左') if _ax == 'x' else ('下' if _dirn > 0 else '上')
+        self._stall_fail('tp', now, '瞬移没朝%s动' % _dn)   # 触发即计数(观察模式也计)
         if STALL_SENTINEL_OBSERVE:
             _debug_log("[哨兵·观察][tp] 瞬移发出%.0fms光点没朝%s动[观察模式不动键]" % (STALL_TP_MS, _dn))
             return
@@ -16027,8 +16033,71 @@ class MinimapRouteRecorder:
         self._set_b_lock_enabled(True, why='哨兵·%s·重锁' % _kind)  # 立即重开:B线下一帧用热怪表重锁
         self._stall_fail('lock', now, _kind)   # 记行失败统计(10分钟3次弹窗)
 
+    def _stall_line_idle(self, now, mmp):
+        """行5·站台发呆(用户2026-09-28定稿·取证报警行,只诊断绝不纠偏——原因未查明前乱动会掩盖现场):
+        前提=运行中+后脑不可见(不在梯上,不看Y不看climb状态);判定=光点X和Y【两个都不动】满STALL_IDLE_MS(2s)
+        且期间没出手(打怪站桩是正常动作,不能误报)。触发=红字日志+计行失败(10分钟3次弹窗带现场快照,
+        供定位根因:没锁怪/锁了不打/锁乱跳定不下/状态机卡死等)。"""
+        ln = self._stall_lines['idle']
+        _bv, _bs = self._back_head_visible()
+        if _bv:
+            ln['track'] = None   # 在梯上:归卡梯行管,本行不判
+            return
+        tr = ln['track']
+        if tr is None:
+            ln['track'] = {'t': now, 'bx': float(mmp[0]), 'by': float(mmp[1]), 'strike': 0}
+            return
+        _moved = (abs(float(mmp[0]) - tr['bx']) >= MOVE_MIN_MAP_DX
+                  or abs(float(mmp[1]) - tr['by']) >= MOVE_MIN_MAP_DX)
+        if _moved:
+            tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]), strike=0)   # 任意一轴动过=不静:滑基准重计时
+            return
+        # 两个都不动:累计期间出手次数(出过手=正常打怪站桩,清基点不判)
+        if getattr(self, '_combat_target_attacked', False) and self._combat_first_strike_time \
+                and now - getattr(self, '_combat_first_strike_time', 0) < STALL_IDLE_MS:
+            tr.update(t=now, strike=1)
+            return
+        if now - tr['t'] < STALL_IDLE_MS:
+            return
+        tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))   # 滑基准防同一基点重复触发
+        _still_s = (now - tr['t']) / 1000.0
+        if STALL_SENTINEL_OBSERVE:
+            _debug_log("[哨兵·观察][idle] 站台发呆:不在梯且光点XY全静%.0fms[观察模式]" % STALL_IDLE_MS)
+        else:
+            _debug_log("[哨兵][idle] 站台发呆:不在梯且光点XY全静%.0fms(只取证不纠偏)" % STALL_IDLE_MS)
+        self._rlog("[哨兵] 站台发呆(静止%.1fs):%s" % (_still_s + STALL_IDLE_MS / 1000.0,
+                                                     self._stall_diag_text(mmp, now)), LOG_RED, log='exception')
+        self._stall_fail('idle', now, '站台发呆')
+
+    def _stall_diag_text(self, mmp, now):
+        """现场快照(用户2026-09-28:弹窗说明必须写清楚卡住状态,好从根上排查):光点坐标+在梯状态+
+        climb_state与后脑是否矛盾+锁怪三态(没锁但框内有怪/锁了没出手/换锁频繁)+框内怪数+按住的键。"""
+        try:
+            _bv, _bs = self._back_head_visible()
+            _cs = getattr(self, '_climb_state', 'none')
+            _locked = getattr(self, '_b_lock', None)
+            _lt = getattr(self, '_b_lock_time', 0)
+            _fs = getattr(self, '_combat_first_strike_time', 0)
+            _mons = getattr(self, '_monsters', [])
+            _held = sorted(getattr(self, '_combat_held_keys', set()) | set(getattr(self, '_random_move_keys', [])))
+            _held_names = {0x25: '左', 0x26: '上', 0x27: '右', 0x28: '下'}.get  # VK翻译
+            _held_txt = '/'.join(_held_names(v, hex(v)) for v in _held) or '无'
+            if _locked is None:
+                _lock_txt = '没锁' + ('(框内%d只怪可锁!)' % len(_mons) if _mons else '(框内无怪)')
+            elif not _fs:
+                _lock_txt = '锁了(%d,%d)已%.1fs一直没出手!' % (_locked[0], _locked[1], (now - _lt) / 1000.0)
+            else:
+                _lock_txt = '锁了且在打(正常)'
+            return "光点(%.0f,%.0f) 在梯:%s climb=%s%s 锁怪:%s 按键:%s" % (
+                mmp[0], mmp[1], '是' if _bv else '否', _cs,
+                ('←与后脑矛盾!' if _cs == 'climbing' and not _bv else ''),
+                _lock_txt, _held_txt)
+        except Exception as e:
+            return "(快照异常:%s)" % e
+
     def _stall_enter(self, line_key, spec, mmp, now):
-        """行进入独占纠偏(统一纪律,用户2026-09-28):关锁清锁→关主线→建该行状态机。spec含
+        """行进入独占纠偏(统一纪律·用户2026-09-28定序):①关锁清锁 ②关主线 ③松左右+攻击键
+        (不管有没有按住都松,_release_move_conflicts统一清) →④建该行状态机。spec含
         kind/axis/dir/vk/jump_key/steps(该行专属纠偏步骤序列)。"""
         self._stall_active = line_key
         self._stall_lines[line_key]['state'] = {
@@ -16036,9 +16105,10 @@ class MinimapRouteRecorder:
             'jump_key': spec.get('jump_key', ''), 'steps': spec['steps'],
             'step_i': 0, 'phase': 'start', 't': now, 'back_vk': None,
             'bx': float(mmp[0]), 'by': float(mmp[1])}
-        self._set_b_lock_enabled(False, why='哨兵·%s卡住' % spec['kind'])
-        self._stall_hold_main = True
-        self._rlog("[哨兵] %s卡住,关锁关主线纠偏" % spec['kind'], LOG_RED, log='exception')
+        self._set_b_lock_enabled(False, why='哨兵·%s卡住' % spec['kind'])   # ①关锁清锁(当场清已锁)
+        self._stall_hold_main = True                                          # ②关主线(主循环并入_aux_busy)
+        self._release_move_conflicts()                                        # ③松左右+攻击键(不管按没按都松)
+        self._rlog("[哨兵] %s卡住,关锁清锁关主线纠偏" % spec['kind'], LOG_RED, log='exception')
 
     def _wd_stall_tick(self, now):
         """独占行状态机推进(监管线程,每100ms一拍)。每行专属步骤序列按序执行,每个步骤:
@@ -16143,8 +16213,10 @@ class MinimapRouteRecorder:
             self._stall_fail(line_key, now, why)
 
     def _stall_fail(self, line_key, now, why):
-        """行失败统计(用户2026-09-28):同一行STALL_ALERT_WINDOW_MS(10分钟)内纠偏失败达STALL_ALERT_MAX(3)次
-        =置弹窗令(主循环消费,弹项目风格窗口说明原因;tk弹窗必须主线程,2026-09-03教训)+全量复位(松全部方向键清意图)。"""
+        """行失败统计(用户2026-09-28定稿:同问题【发现/触发】即计数,观察模式也计,凑满3次弹窗=暴露根因
+        逼根治,不是纠偏失败才报):同一行STALL_ALERT_WINDOW_MS(10分钟)内达STALL_ALERT_MAX(3)次
+        =置弹窗令(主循环消费弹项目风格窗口,带完整现场快照好排查;tk必须主线程,2026-09-03教训)
+        +全量复位(松全部方向键清意图)。"""
         ln = self._stall_lines[line_key]
         ln['fails'].append(now)
         ln['fails'] = [_t for _t in ln['fails'] if now - _t <= STALL_ALERT_WINDOW_MS]
@@ -16163,11 +16235,16 @@ class MinimapRouteRecorder:
             self._wd_clear_intent(None)
         except Exception:
             pass
-        _reason = {'ladder': '爬梯反复卡住(按爬键光点不动)', 'walk': '走路反复卡住(按方向光点不动)',
-                   'tp': '瞬移反复没生效(发出后光点不动)', 'lock': '锁怪反复异常(有怪不锁/锁了不打)'}
-        self._stall_alert_msg = ("哨兵报警:%s\n10分钟内已连续%d次纠偏失败。\n已全量复位(松键清意图),请人工观察游戏状态。" % (
-            _reason.get(line_key, line_key), STALL_ALERT_MAX))
-        self._rlog("[哨兵] %s 10分钟内%d次失败,已置弹窗报警" % (line_key, STALL_ALERT_MAX), LOG_RED, log='exception')
+        _reason = {'ladder': '爬梯反复卡住(在梯上静止不动)', 'walk': '走路反复卡住(按方向光点不动)',
+                   'tp': '瞬移反复没生效(发出后光点不动)', 'lock': '锁怪反复异常(有怪不锁/锁了不打)',
+                   'idle': '站台反复发呆(不在梯且XY全静,没锁/锁了不打/锁乱跳待查)'}
+        _diag = ''
+        _mmp = getattr(self, '_player_map_pos', None)
+        if _mmp is not None:
+            _diag = "\n现场:%s" % self._stall_diag_text(_mmp, now)
+        self._stall_alert_msg = ("哨兵报警:%s\n10分钟内已发现%d次(发现即计数,逼根治)。\n%s\n已全量复位(松键清意图),请按现场快照排查根因。" % (
+            _reason.get(line_key, line_key), STALL_ALERT_MAX, _diag))
+        self._rlog("[哨兵] %s 10分钟内发现%d次,已置弹窗报警(带现场快照)" % (line_key, STALL_ALERT_MAX), LOG_RED, log='exception')
         _debug_log("[哨兵][%s] 弹窗令已置" % line_key)
 
     def _move_watchdog_loop(self):
