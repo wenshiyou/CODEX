@@ -16,7 +16,6 @@ mru.key_pressed = lambda vk: KP.get(vk, False)
 class FakeSelf:
     _kal_scene_now = R._kal_scene_now
     _kalman_sample = R._kalman_sample
-    _dot_predict_pos = R._dot_predict_pos
     _dot_shadow_update = R._dot_shadow_update
     def __init__(self):
         self._kal_k = {'walk': None, 'jump': None, 'tp': None}
@@ -44,15 +43,7 @@ assert fs._kal_k['walk'] is not None and 15 < fs._kal_k['walk'] < 25, fs._kal_k[
 assert fs._kal_n['walk'] >= 5
 print("case1 walk k converge OK k=%.1f n=%d" % (fs._kal_k['walk'], fs._kal_n['walk']))
 
-# case2 镜头中带不学(屏X在1/3~2/3宽=426~853之间)
-fs = FakeSelf()
-KP.clear(); KP[VK_R] = True
-fs._player_map_pos = (100.0, 50.0)
-R._kalman_sample(fs, 600, NOW)          # 屏X=600在中带
-fs._player_map_pos = (102.0, 50.0)
-R._kalman_sample(fs, 640, NOW + 500)    # 屏X=640仍中带
-assert fs._kal_k['walk'] is None and fs._kal_n['walk'] == 0
-print("case2 center-band no-learn OK")
+# case2 已废弃删除:中带硬丢(KAL_CENTER_BAN)语义已改降权,中带防污染职责移交kreg回归+离群门(case4覆盖)
 
 # case3 方向异号丢弃
 fs = FakeSelf()
@@ -89,41 +80,6 @@ R._kalman_sample(fs, 320, NOW + 300)    # 瞬移:光点5px屏120px,k=24
 assert fs._kal_k['tp'] is not None and 20 < fs._kal_k['tp'] < 28, fs._kal_k
 assert fs._kal_k['walk'] == 20.0        # walk没被动
 print("case5 scene isolation OK")
-
-# case6 黄框预测: 光点位移×k=屏幕位移
-fs = FakeSelf()
-fs._kal_k['walk'] = 20.0; fs._kal_n['walk'] = 5
-KP.clear(); KP[VK_R] = True
-fs._role_track = {'last': (600, 500)}
-fs._player_map_pos = (110.0, 50.0)
-fs._dot_shadow_pos = (100.0, 50.0)      # 500ms内光点向右10px
-p = R._dot_predict_pos(fs, NOW)
-assert p is not None and p[0] == 600 + 10*20 and p[1] == 500, p
-assert '光点' in p[2] and 'k20.0' in p[2]
-print("case6 dot predict OK:", p)
-
-# case7 预测回退: 光点静止/没学到比率/光点丢→None(走白框)
-fs = FakeSelf()
-fs._kal_k['walk'] = 20.0
-fs._dot_shadow_pos = (100.0, 50.0); fs._player_map_pos = (100.0, 50.0)  # 静止
-assert R._dot_predict_pos(fs, NOW) is None
-fs._player_map_pos = None   # 光点丢
-assert R._dot_predict_pos(fs, NOW) is None
-fs2 = FakeSelf()            # 没学到任何比率
-fs2._kal_k = {'walk': None, 'jump': None, 'tp': None}
-fs2._dot_shadow_pos = (100.0, 50.0); fs2._player_map_pos = (105.0, 50.0)
-assert R._dot_predict_pos(fs2, NOW) is None
-print("case7 fallback-to-intent OK")
-
-# case8 场景借用: walk没学到时借jump的k
-fs = FakeSelf()
-fs._kal_k['walk'] = None; fs._kal_k['jump'] = 18.0
-KP.clear(); KP[VK_R] = True
-fs._role_track = {'last': (600, 500)}
-fs._player_map_pos = (103.0, 50.0); fs._dot_shadow_pos = (100.0, 50.0)
-p = R._dot_predict_pos(fs, NOW)
-assert p is not None and p[0] == 600 + 3*18, p
-print("case8 borrow jump-k OK")
 
 # case9 光点丢时采样对作废(防脏跨窗)
 fs = FakeSelf()

@@ -849,6 +849,15 @@ KAL_EMA_ALPHA = 0.2             # EMA新样本权重(老0.8/新0.2,和_pred_lear
 KAL_OUTLIER_PCT = 0.40          # 新样本比率vs当前k偏差超40%=脏数据丢弃(镜头滚动污染主防线)
 KAL_CENTER_BAN = False          # 中带样本处置(用户2026-09-28实测修正):True=直接丢(实测人恒在中带→k永远学不到);False=降权保留,镜头污染交给离群门挡
 KAL_PAUSE_MS = 5000             # 连续丢弃3样本=镜头滚动频繁期,暂停学习5秒
+# === 绿框大小自动标定(用户2026-09-28定稿:死区镜头钉死,屏ΔX/光点ΔX=真实比例;长基线回归1~2%精度,逐样本EMA太噪弃用) ===
+KREG_WIN_MS = 3000              # 回归滑窗ms:只取最近3秒死区样本(镜头钉死期,屏幕位移=真实位移)
+KREG_PT_MIN_MS = 40             # 采样最小间隔ms(防同点堆样本稀释基线)
+KREG_MAX_PTS = 80               # 滑窗样本上限
+KREG_MIN_DOT_SPAN = 3           # 光点X基线跨度≥此值才拟合(站死区不动=没基线,不拟合)
+KREG_MIN_SCR_SPAN = 20          # 屏幕X基线跨度≥此px才拟合
+KREG_R2_MIN = 0.90              # 拟合R²低于此=直线不成立(惯性漂移污染/换图混线),整窗丢弃重采
+KREG_EMA = 0.30                 # k_auto平滑:新拟合占30%(稳定显示,不逐帧跳)
+KREG_JUMP_CLR = 15             # 相邻样本光点跳变>此px=换图/重定位,清窗重采
 # === 融合预测器(用户2026-09-28定稿:白黄合一,预测-校正一体框,不依赖黑框绝对映射) ===
 FP_SNAP_DX = 150                # 锚点校准吸附阈值px:锚点与预测位差>150=有未注入的跳变,直接吸附;≤150小步EMA收拢
 FP_EMA = 0.30                   # 锚点校准时每帧收拢比例(不跳变,平滑跟手)
@@ -1557,6 +1566,8 @@ class MinimapRouteRecorder:
         self._kal_drop_streak = 0 # 连续脏样本计数(≥3暂停学习KAL_PAUSE_MS)
         self._kal_pause_until = 0 # 学习暂停截止ms
         self._kal_tp_seen_t = 0   # 融合器已注入过的瞬移pending时刻(防重复注入)
+        # === 绿框大小自动标定(死区回归;k_auto收敛后bw/bh=窗口÷k,手标值仅作初值/回退) ===
+        self._kreg = {'pts': [], 'k': None, 'fit_t': 0, 'log_t': 0}   # pts=[(t,屏X,光点X)...] k=EMA平滑比例(None=未标定)
         # [2026-09-27] 预测速度自动学习(EMA平滑,每次有效位移都学)
         self._pred_learn_vx = 400.0   # 学到的走路速度 px/s(初值400)
         self._pred_learn_vy = 120.0   # 学到的爬梯速度 px/s(初值120)
@@ -14139,7 +14150,7 @@ class MinimapRouteRecorder:
         r = getattr(self, 'map_area_rect', None)
         if not self._blue_box or not r or r.get("width", 0) <= 0:
             return None
-        bw, bh = self._blue_box["width"], self._blue_box["height"]
+        bw, bh, _auto = self._blue_box_size()   # 2026-09-28:绿框大小k标定自动版,未标定回退手标
         mw, mh = r["width"], r["height"]
         box_x = int(mx - bw // 2)
         box_y = int(my - bh // 2)
@@ -14191,7 +14202,7 @@ class MinimapRouteRecorder:
         elif self._blue_box and self._player_map_pos:
             # 正常模式：跟随=以光点为中心+到边贴边；死区=冻结绿框(镜头不动)。与lock_screen共用算框方法，两框一致
             px, py = self._player_map_pos
-            bw, bh = self._blue_box["width"], self._blue_box["height"]
+            bw, bh, _auto = self._blue_box_size()   # 2026-09-28:绿框画自动标定尺寸,肉眼可验收标得准不准
             follow_pos = self._calc_blue_box_pos(px, py)
             if follow_pos is not None:
                 frozen_pos = self._blue_box_deadzone_pos
@@ -14407,7 +14418,7 @@ class MinimapRouteRecorder:
                 return None
         if self._blue_box:
             # 跟随(following)：绿框以光点为中心+到边贴边；死区(deadzone,镜头不动)：绿框冻结，光点在固定框内归一化
-            bw, bh = self._blue_box["width"], self._blue_box["height"]
+            bw, bh, _auto = self._blue_box_size()   # 2026-09-28:比例用k标定自动值(手标偏大=两边向中间挤的根因),未标定回退手标
             follow_pos = self._calc_blue_box_pos(mx, my)
             if follow_pos is None:
                 return None
@@ -14420,7 +14431,7 @@ class MinimapRouteRecorder:
                 # 边缘钳制
                 _r = getattr(self, 'map_area_rect', None)
                 if _r and self._blue_box:
-                            _bw, _bh = self._blue_box["width"], self._blue_box["height"]
+                            _bw, _bh = bw, bh   # 钳制用有效尺寸(与缩放同源,2026-09-28自动标定版)
                             _mw, _mh = _r["width"], _r["height"]
                             box_x = max(18, min(box_x, _mw - 21 - _bw))
                             box_y = max(3, min(box_y, _mh - 21 - _bh))
@@ -14662,8 +14673,78 @@ class MinimapRouteRecorder:
             except Exception:
                 pass
 
-# -*- coding: utf-8 -*-
-# 融合预测器(替换_dot_predict_pos+_predict_char_pos两方法,由拼接脚本合入)
+    def _blue_box_size(self):
+        """绿框有效尺寸(用户2026-09-28定稿):k_auto已标定→bw/bh=窗口÷k(等比例渲染,X标定两轴齐);
+        未标定/k物理不合理(屏幕px/光点px,真实约5~40)→回退手标。返回(bw,bh,是否自动)。"""
+        _bb = self._blue_box or {}
+        _mw = int(_bb.get('width', 0) or 0)
+        _mh = int(_bb.get('height', 0) or 0)
+        _k = self._kreg.get('k')
+        _wr = getattr(self, '_target_window_size', None) or (0, 0)
+        # k物理区间5~40(窗口÷bw:1280÷200≈6.4~1280÷32=40,绿框真实32~200光点px);越界=坏标定,回退手标不硬钳
+        if _k is None or _k < 5.0 or _k > 40.0 or _wr[0] <= 0 or _wr[1] <= 0 or _mw <= 0 or _mh <= 0:
+            return _mw, _mh, False
+        _bw = int(round(_wr[0] / _k))
+        _bh = int(round(_bw * (_mh / float(_mw))))   # 等比例渲染:高随宽同k换算(不单独用窗口高,防宽高比失真)
+        return _bw, _bh, True
+
+    def _kreg_collect(self, ax, now_ms):
+        """绿框大小死区回归标定(用户2026-09-28定稿):镜头钉死期屏X与光点X严格线性,
+        长基线最小二乘拟合 屏X=k×光点X+b → k=真实比例(屏幕px/光点px),bw_auto=窗口宽÷k。
+        只在camera_state=='deadzone'且锚点本帧有效时采(跟随区屏位移被镜头吃=假样本);
+        跨度不足不拟合;R²<0.90整窗丢(惯性漂移污染/换图混线自动暴露);光点跳变>15px清窗重采。"""
+        try:
+            if getattr(self, '_camera_state', '') != 'deadzone':
+                return
+            _dot = getattr(self, '_player_map_pos', None)
+            if _dot is None:
+                return
+            _win = getattr(self, '_target_window_size', None) or (0, 0)
+            if _win[0] <= 0:
+                return
+            kr = self._kreg
+            _pts = kr['pts']
+            if _pts and abs(float(_dot[0]) - _pts[-1][2]) > KREG_JUMP_CLR:
+                _pts.clear()   # 换图/重定位跳变:旧样本作废,清窗重采
+            if not _pts or now_ms - _pts[-1][0] >= KREG_PT_MIN_MS:
+                _pts.append((now_ms, float(ax), float(_dot[0])))
+            while _pts and now_ms - _pts[0][0] > KREG_WIN_MS:
+                _pts.pop(0)
+            if len(_pts) < 8:
+                return
+            _ds = [p[2] for p in _pts]
+            _ss = [p[1] for p in _pts]
+            if (max(_ds) - min(_ds)) < KREG_MIN_DOT_SPAN or (max(_ss) - min(_ss)) < KREG_MIN_SCR_SPAN:
+                return   # 基线不够长,斜率不可信
+            _n = float(len(_pts))
+            _mx = sum(_ds) / _n; _my = sum(_ss) / _n
+            _sxx = sum((x - _mx) ** 2 for x in _ds)
+            _sxy = sum((x - _mx) * (y - _my) for x, y in zip(_ds, _ss))
+            if _sxx <= 1e-6:
+                return
+            _k_fit = _sxy / _sxx
+            _b_fit = _my - _k_fit * _mx
+            _syy = sum((y - _my) ** 2 for y in _ss)
+            _sse = sum((y - (_k_fit * x + _b_fit)) ** 2 for x, y in zip(_ds, _ss))
+            _r2 = 1.0 - _sse / _syy if _syy > 1e-6 else 0.0
+            if _r2 < KREG_R2_MIN or _k_fit <= 1.0:
+                _pts.clear()   # 直线不成立:整窗丢重采
+                return
+            _k_old = kr.get('k')
+            kr['k'] = _k_fit if _k_old is None else _k_old * (1.0 - KREG_EMA) + _k_fit * KREG_EMA
+            kr['r2'] = _r2
+            if now_ms - kr.get('log_t', 0) >= 2000:   # 标定日志限频2秒
+                kr['log_t'] = now_ms
+                _bw_a, _bh_a, _auto = self._blue_box_size()
+                _bb = self._blue_box or {}
+                _debug_log("[K标定] k=%.2f R2=%.2f 绿框自动(%d,%d) 手标(%s,%s)" % (
+                    kr['k'], _r2, _bw_a, _bh_a, _bb.get('width'), _bb.get('height')))
+        except Exception as _e:
+            try:
+                _debug_log("[K标定] 异常:%s" % _e)
+            except Exception:
+                pass
+
     def _fused_predict_pos(self, now_ms):
         """【融合预测器·用户2026-09-28白黄合一】一个持续预测位,锚点只校准不接管,不依赖黑框绝对映射。
         预测位=校准点(锚点新鲜时每帧刷=贴人,不超前)+自校准以来光点位移×k(事实通道,一次减法不累积
@@ -14995,6 +15076,7 @@ class MinimapRouteRecorder:
                 # [2026-09-28] 光屏比率学习(用户定稿:小地图走多远↔屏幕走多远自算,不固定,动态EMA):
                 # 同帧两侧坐标都有效就配对,下一帧比上一帧得样本;脏样本(方向异号/离群/镜头中带)丢弃
                 self._kalman_sample(ax, now)
+                self._kreg_collect(ax, now)   # 绿框大小死区回归标定(屏X=k×光点X+b长基线拟合)
                 _llp = getattr(self, '_pred_learn_last_pos', None)
                 _llt = getattr(self, '_pred_learn_last_t', 0)
                 if _llp is not None and _llt > 0 and now - _llt > 50 and now - _llt < 1000:

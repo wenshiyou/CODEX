@@ -16,11 +16,13 @@ DEAD = mru.DOT_SHADOW_DEAD_PX  # 2
 class FakeSelf:
     _calc_blue_box_pos = R._calc_blue_box_pos
     lock_screen_from_dot = R.lock_screen_from_dot
+    _blue_box_size = R._blue_box_size
     def __init__(self):
         self.map_area_rect = {'left': 14, 'top': 123, 'width': 200, 'height': 150}
         self._player_map_pos = (100.0, 60.0)
         self._target_window_size = (1280, 800)
         self._blue_box = {'width': 20, 'height': 15}
+        self._kreg = {'pts': [], 'k': None, 'fit_t': 0, 'log_t': 0}
         self._blue_box_deadzone_pos = None
         self._camera_state = 'following'
         self._dot_shadow_pos = (100.0, 60.0)

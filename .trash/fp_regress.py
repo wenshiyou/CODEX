@@ -10,7 +10,7 @@ mru._debug_log = lambda m: None
 KP = {}
 mru.key_pressed = lambda vk: KP.get(vk, False)
 assert mru.KAL_CENTER_BAN is False
-assert mru.FP_RAD_BASE == 100 and mru.FP_RAD_TIGHT == 60 and mru.FP_RAD_WIDE == 150
+assert mru.FP_RAD_BASE == 110 and mru.FP_RAD_TIGHT == 70 and mru.FP_RAD_WIDE == 160
 
 VK = dict(up=0x26, down=0x28, left=0x25, right=0x27)
 
@@ -109,7 +109,7 @@ fs._role_track = {'last': (600, 500), 'last_t': NOW}
 p0 = R._fused_predict_pos(fs, NOW)
 p1 = R._fused_predict_pos(fs, NOW + 1000)                 # 丢失1s
 p2 = R._fused_predict_pos(fs, NOW + 3000)                 # 丢失3s
-assert p0[2] == 60 and p1[2] == 100 and p2[2] == 150, (p0[2], p1[2], p2[2])
+assert p0[2] == 70 and p1[2] == 110 and p2[2] == 160, (p0[2], p1[2], p2[2])
 print("case8 radius三档 OK")
 
 # case9 无锚点返回None+清态
