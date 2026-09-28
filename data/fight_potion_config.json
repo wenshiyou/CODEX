@@ -30,5 +30,5 @@
   "teleport_key": "d",
   "teleport_distance": "250",
   "slope_jump_y_min": "-25",
-  "slope_jump_y_max": "-180"
+  "slope_jump_y_max": "-200"
 }
