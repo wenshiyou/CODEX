@@ -14452,30 +14452,32 @@ class MinimapRouteRecorder:
             mode = "全图"
         sx = int(offset_x * scale_x)
         sy = int(offset_y * scale_y)
-        # 2026-09-16:X补偿按左右方向分开(光点本帧左移用LEFT,右移用RIGHT);Y共用。都是正数。
-        # 2026-09-16:方向直接读物理键kl/kr(GetAsyncKeyState实测能读到keybd_event发的键);md=None时也能用
-        _kl = key_pressed(VK_LEFT); _kr = key_pressed(VK_RIGHT)
-        _dir = 0  # 0=停, -1=左, 1=右
-        if _kl:
-            _dir = -1
-        elif _kr:
-            _dir = 1
-        self._off_prev_mx = mx
-        # [2026-09-27关闭] 黑框方向日志每10帧一次,怪多时频繁触发蒙板日志缓存失效,占绘制130ms/秒
-        # if getattr(self, 'frame_count', 0) % 10 == 0:
-        #     _debug_log("[黑框方向] state=%s mx=%d md=%s kl=%d kr=%d dir=%d 用%s" % (
-        #         self._camera_state, mx, getattr(self,'_combat_move_dir',None), _kl, _kr, _dir,
-        #         '左' if _dir < 0 else '右'))
-        if self._camera_state == "deadzone":
-            if _dir < 0: sx -= self.DEAD_LEFT_X      # 向左走:黑框偏右,向左补(减)
-            elif _dir > 0: sx += self.DEAD_RIGHT_X   # 向右走:黑框偏左,向右补(加)
-            else: sx += self.IDLE_X                 # 站立不动:手动调
-            sy += self.DEAD_Y if _dir != 0 else self.IDLE_Y
+        # 2026-09-28(用户定稿):状态判定影子化——方向不再读按键(意图≠事实:按住却卡住/没按被推开都错分类),
+        # 用光点影子(最近500ms实际位移):向左→左面板值,向右→右面板值;
+        # 静=死区直接压过镜头检测用站立值(人停后镜头惯性滚动时检测滞后,不误套跟随值);
+        # 动=按镜头检测分区(死区/跟随区);影子无效(光点丢)回退按键判定。
+        _dv = getattr(self, '_dot_dir_vec', (0.0, 0.0))
+        _sh_ok = getattr(self, '_dot_shadow_pos', None) is not None
+        if _sh_ok:
+            _mv_x = abs(_dv[0]) >= DOT_SHADOW_DEAD_PX
+            _moving = _mv_x or abs(_dv[1]) >= DOT_SHADOW_DEAD_PX
+            _dir = (-1 if _dv[0] < 0 else 1) if _mv_x else 0
         else:
-            if _dir < 0: sx -= self.FOLLOW_LEFT_X    # 向左走:黑框偏右,向左补(减)
-            elif _dir > 0: sx += self.FOLLOW_RIGHT_X  # 向右走:黑框偏左,向右补(加)
-            else: sx += self.IDLE_X                 # 站立不动:手动调
-            sy += self.FOLLOW_Y if _dir != 0 else self.IDLE_Y
+            _kl = key_pressed(VK_LEFT); _kr = key_pressed(VK_RIGHT)
+            _dir = -1 if (_kl and not _kr) else (1 if (_kr and not _kl) else 0)
+            _moving = _dir != 0
+        self._off_prev_mx = mx
+        if not _moving:
+            sx += self.IDLE_X                      # 静=死区:站立X(用户定,不分跟随/死区)
+            sy += self.IDLE_Y                      # 站立Y
+        elif self._camera_state == "deadzone":
+            if _dir < 0: sx -= self.DEAD_LEFT_X    # 影子向左:套死区左X
+            elif _dir > 0: sx += self.DEAD_RIGHT_X # 影子向右:套死区右X
+            sy += self.DEAD_Y                      # 死区Y(含垂直移动:爬梯时_dir=0只加Y)
+        else:
+            if _dir < 0: sx -= self.FOLLOW_LEFT_X  # 影子向左:套跟随左X
+            elif _dir > 0: sx += self.FOLLOW_RIGHT_X  # 影子向右:套跟随右X
+            sy += self.FOLLOW_Y                    # 跟随Y
         # 2026-09-16:速度前馈整段删除(跟随时真光点识别串到小亮点、算不到真实位移,补偿全是白算),全用固定偏移
         # 去掉EMA平滑：直接用当前帧坐标，反应更快不延迟（用户要求跟手，抖动可接受）
         # 临时测速2026-09-16:每秒打印光点位移→屏幕速度(小地图px×scale),定"按速度比例补偿"用
