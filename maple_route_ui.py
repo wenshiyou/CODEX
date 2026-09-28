@@ -853,9 +853,9 @@ KAL_PAUSE_MS = 5000             # 连续丢弃3样本=镜头滚动频繁期,暂�
 FP_SNAP_DX = 150                # 锚点校准吸附阈值px:锚点与预测位差>150=有未注入的跳变,直接吸附;≤150小步EMA收拢
 FP_EMA = 0.30                   # 锚点校准时每帧收拢比例(不跳变,平滑跟手)
 FP_ANCHOR_FRESH_MS = 150        # 锚点新鲜窗口ms:last_t在此内=本帧有锚点(校准模式),超了=丢失(推算模式)
-FP_RAD_BASE = 100               # 融合框基础半径(与旧白框一致)
-FP_RAD_TIGHT = 60               # 锚点刚校准过(高置信)收窄,搜得快
-FP_RAD_WIDE = 150               # 丢失超2秒/瞬移后放大,防跟不上
+FP_RAD_BASE = 110               # 融合框基础半径(用户2026-09-28整体加大10:100→110)
+FP_RAD_TIGHT = 70               # 锚点刚校准过(高置信)收窄,搜得快(60→70)
+FP_RAD_WIDE = 160               # 丢失超2秒/瞬移后放大,防跟不上(150→160)
 LADDER_STUCK_COOLDOWN_MS = 2500 # 两次横跳解卡之间的冷却
 LADDER_STUCK_MAX_FAILS = 3      # 连续解卡几次仍卡=放弃这把梯回打怪/重选
 JUMP_DOWN_LAND_STABLE_MS = 180   # 下跳落地判定(2026-09-10收紧250→180,治到底后↓多按扑倒)：开始下落后光点Y连续180ms不再增大(≤3px抖动)=落到台子,立刻松↓
@@ -14741,8 +14741,8 @@ class MinimapRouteRecorder:
                 min(_W, _px + _pr), min(_H, _py + _pr))
         if _roi[2] <= _roi[0] or _roi[3] <= _roi[1]:
             return None
-        # 预测框向上偏移20显示(用户2026-09-27)
-        self._role_predict_box = (_roi[0], _roi[1] - 20, _roi[2], _roi[3] - 20, _reason)
+        # 预测框向上偏移35显示(用户2026-09-28:再上移15,原20)
+        self._role_predict_box = (_roi[0], _roi[1] - 35, _roi[2], _roi[3] - 35, _reason)
         _best = None
         for _k in ("name", "face_r", "back", "skill1", "skill2"):
             try:
@@ -14817,7 +14817,7 @@ class MinimapRouteRecorder:
             _fpred = self._fused_predict_pos(now)
             if _fpred is not None:
                 _fpx, _fpy, _fpr, _fpwhy = _fpred
-                _fpy_off = _fpy - 20  # 向上偏移20(同旧框)
+                _fpy_off = _fpy - 35  # 向上偏移35(用户2026-09-28:再上移15,原20)
                 self._role_predict_box = (int(_fpx - _fpr), int(_fpy_off - _fpr),
                                           int(_fpx + _fpr), int(_fpy_off + _fpr), _fpwhy)
             else:
