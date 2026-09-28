@@ -727,6 +727,11 @@ LADDER_MM_LOCK_FORCE_MS = 300    # 候选梯id抖动超过此时仍未2拍稳定
 LADDER_MM_STILL_DX = 0.5         # 直跳停稳:相邻帧位移<=此值=不滑(小地图px,用户2026-09-27收紧:真停稳必须≈0,治带惯性跳)
 LADDER_MM_KF_STILL_V = 0.5       # 直跳停稳:卡尔曼速度绝对值<=此值(小地图单位/秒)才算真停稳(用户2026-09-27收紧:速度≈0)
 LADDER_MM_STILL_FRAMES = 2       # 直跳停稳帧数(用户2026-09-26:配合80ms观察窗约2帧,80ms后检测对齐才跳、不齐继续点动,goto/coast共用)
+# === 影子光点指南针(用户2026-09-28,替代田字背景迁移检测) ===
+DOT_SHADOW_LAG_MS = 500          # "慢一拍"时长ms:影子=此毫秒数前的光点位置(用户定稿500)
+DOT_SHADOW_DEAD_PX = 2           # 静止死区(小地图块px):当前光点与影子的偏差<X/Y均小于此值判静止(影子与光点重叠、不画箭头)
+DOT_SHADOW_RESET_PX = 30         # 单帧跳变阈值(小地图块px):相邻两样本偏差超此值=换图/小地图重定位,清历史防影子飞出假方向
+DOT_SHADOW_COLOR = (255, 255, 0) # 影子空心圆颜色BGR青色(与游戏黄光点/红十字区分)
 LADDER_MM_ALIGN_OK_DX = 1.0  # 直跳起跳对齐门槛(小地图px,用户2026-09-27分三带):ad≤1可准备跳,但必须真停稳(速度≈0)才跳
 LADDER_MM_SETTLE_KEY_MS = 80  # 直跳最后一次松方向键后的短观察窗(用户2026-09-27:100改80,停太久减一点点):80ms后检测,对齐就跳、不齐继续点动对准
 LADDER_MM_APPROACH_FRAMES = 2    # 跑跳需连续几拍朝梯移动才认(防单帧光点抖动误触发)
@@ -1615,10 +1620,10 @@ class MinimapRouteRecorder:
         # 独立后台线程,只监测不发键;v1观察版只打行为日志(异常红字),不挂起主线、不执行修复。
         self._wd_lock = threading.RLock()  # 监管状态锁:用可重入RLock(同线程嵌套acquire不自死锁,跨线程仍互斥);监管线程判停滞/主线按键对账都要抢它,曾因锁内嵌套with导致整UI未响应
         self._mv_intent = {}               # 当前移动意图 {'x':intent,'y':intent},水平/垂直独立记账可同时存在;intent=dict{dir,src,seg_t,seg_x,seg_y,reported...}
-        self._flow_thread = None            # 田字背景迁移检测线程(常开层 detect_flow),独立线程只发布结果、不压主线
-        self._flow_lock = threading.RLock() # 田字检测发布锁
-        self._flow_boxes = []               # 蒙板田字画框 [(x1,y1,x2,y2,colorref,label)]
-        self._flow_state = {}               # 最新诊断结果(轴/方向/位移/同向轮数/置信/贴边),别的线程只读
+        # === 影子光点指南针(用户2026-09-28,替代已删除的田字背景迁移检测) ===
+        self._dot_hist = []            # 光点位置环缓存 [(t_ms,x,y)],小地图100fps线程维护,只留DOT_SHADOW_LAG_MS窗口内样本
+        self._dot_shadow_pos = None    # 影子位置=DOT_SHADOW_LAG_MS前的光点位置(小地图块坐标);光点丢失帧置None不钉旧值
+        self._dot_dir_vec = (0.0, 0.0) # 实际移动方向向量(dx,dy)=当前光点-影子(小地图块px);死区内=(0,0)即静止
         self._wd_thread = None             # 监管线程句柄
         self._wd_running = False           # 监管线程运行标志
         self._wd_log_last = {}             # 同类监管日志去重 {key:t}
@@ -9339,25 +9344,30 @@ class MinimapRouteRecorder:
                 cv2.line(map_display, (_dcx, _dcy - 6), (_dcx, _dcy + 6), (0, 0, 255), 1)  # 红十字竖
                 cv2.circle(map_display, (_dcx, _dcy), 2, (0, 0, 255), -1)                 # 中心红实心点
 
-        # 田字背景迁移检测框(已从游戏窗口迁来·用户2026-09-28):_flow_boxes为小地图块坐标,乘scale_x/y到map_display;
-        # 矩形+十字,颜色:绿=真动/红=背景在动/黄=确认静止/青=弃权未定。标签加深色底条+simhei,杜绝中文糊在地图纹理上乱码。
-        _flow_lab_font = self._load_cn_font(13)
-        for (_fx1, _fy1, _fx2, _fy2, _fclr, _flab) in list(getattr(self, '_flow_boxes', [])):
-            _cB, _cG, _cR = (_fclr >> 16) & 255, (_fclr >> 8) & 255, _fclr & 255
-            _fcol = (int(_cB), int(_cG), int(_cR))
-            _bx1 = int(_fx1 * scale_x); _by1 = int(_fy1 * scale_y)
-            _bx2 = int(_fx2 * scale_x); _by2 = int(_fy2 * scale_y)
-            cv2.rectangle(map_display, (_bx1, _by1), (_bx2, _by2), _fcol, 1)
-            _bcx = (_bx1 + _bx2) // 2; _bcy = (_by1 + _by2) // 2
-            cv2.line(map_display, (_bcx, _by1), (_bcx, _by2), _fcol, 1)
-            cv2.line(map_display, (_bx1, _bcy), (_bx2, _bcy), _fcol, 1)
-            _ty = _by1 - 17
-            if _ty < 0: _ty = _by2 + 3      # 框上方放不下就放框下方
-            _tb = _flow_lab_font.getbbox(_flab, anchor="ls")
-            cv2.rectangle(map_display,
-                          (_bx1 + 2 + _tb[0] - 1, _ty + _tb[1] - 1),
-                          (_bx1 + 2 + _tb[2] + 1, _ty + _tb[3] + 1), (0, 0, 0), -1)
-            self._putcn(map_display, _flab, _bx1 + 2, _ty, (255, 255, 255), font=_flow_lab_font)
+        # 影子光点指南针(用户2026-09-28,替代已删除的田字背景迁移检测):影子=DOT_SHADOW_LAG_MS前的光点位置,
+        # 画青色空心圆;影子→光点画箭头指向实际移动方向(光点-影子=位移向量);静止(死区内)影子与光点重叠、不画箭头。
+        # 坐标空间:影子/光点都是小地图块原始像素,乘scale_x/y落到map_display(和红十字同一画法)。
+        _sh = getattr(self, '_dot_shadow_pos', None)
+        if _sh is not None and player_pos is not None:
+            _sh_dx = float(player_pos[0]) - float(_sh[0])   # 块坐标位移(死区判定用,不受显示缩放影响)
+            _sh_dy = float(player_pos[1]) - float(_sh[1])
+            _shx = int(_sh[0] * scale_x); _shy = int(_sh[1] * scale_y)
+            if 0 <= _shx < render_w and 0 <= _shy < render_h:
+                cv2.circle(map_display, (_shx, _shy), 4, DOT_SHADOW_COLOR, 1)  # 影子空心圆(青)
+            if (abs(_sh_dx) >= DOT_SHADOW_DEAD_PX or abs(_sh_dy) >= DOT_SHADOW_DEAD_PX):
+                _shx2 = int(player_pos[0] * scale_x); _shy2 = int(player_pos[1] * scale_y)
+                cv2.line(map_display, (_shx, _shy), (_shx2, _shy2), DOT_SHADOW_COLOR, 1)  # 影子→光点连线
+                _adxp = _shx2 - _shx; _adyp = _shy2 - _shy
+                _adlen = (_adxp * _adxp + _adyp * _adyp) ** 0.5
+                if _adlen >= 6:   # 线够长才画箭头头部(太短两翼会挤成一团)
+                    _aux = _adxp / _adlen; _auy = _adyp / _adlen
+                    _apx = -_auy; _apy = _aux            # 单位向量的垂直分量
+                    cv2.line(map_display, (_shx2, _shy2),
+                             (int(_shx2 - 5 * _aux + 3 * _apx), int(_shy2 - 5 * _auy + 3 * _apy)),
+                             DOT_SHADOW_COLOR, 1)
+                    cv2.line(map_display, (_shx2, _shy2),
+                             (int(_shx2 - 5 * _aux - 3 * _apx), int(_shy2 - 5 * _auy - 3 * _apy)),
+                             DOT_SHADOW_COLOR, 1)
 
         # 光点锁定可视化框已移除（与校准/正常模式绿框重复，保留后者即可）
         # 随机模式运行状态（已被倍率显示替代）
@@ -11811,7 +11821,6 @@ class MinimapRouteRecorder:
                             except Exception:
                                 pass
 
-                            # 田字背景迁移检测框已迁移到小地图map_display(用户2026-09-28),游戏窗口蒙板不再绘制
                             # 怪物特征单独匹配点（紫色小点+数字编号，方便发现哪个特征误判）
                             # 注：和人物特征点写法完全一样，不用self（wnd_proc回调中self会导致异常）
                             for (fx, fy, fid, fconf) in data.get('monster_feature_matches', []):
@@ -17233,61 +17242,6 @@ class MinimapRouteRecorder:
             if _slack > 0:
                 time.sleep(_slack / 1000.0)
 
-    def _flow_corr(self, a, b):
-        """两块同尺寸灰度的归一化相关[-1,1](田字半区迁移命中分,不依赖绝对亮度)。"""
-        aa = a.astype(np.float32); bb = b.astype(np.float32)
-        aa = aa - aa.mean(); bb = bb - bb.mean()
-        _den = float(np.sqrt((aa * aa).sum() * (bb * bb).sum())) + 1e-6
-        return float((aa * bb).sum() / _den)
-
-    def _flow_match(self, prev, roi, axis, d):
-        """相邻两帧匹配区(都是MxM灰度、锚人物随动,M=160)。返回dict:
-        dd=matchTemplate沿轴位移带号(正=内容下移/右移);score峰值;half=顺按键方向半区迁移相关;
-        pcd/pcr=phaseCorrelate沿轴位移/响应(不受搜索半径限,互证);std=纹理强度(低=纯色/UI会假0)。"""
-        _M = roi.shape[0]; _tsz = max(8, _M // 2); _t0 = (_M - _tsz) // 2; _hm = _M // 2   # 框15时模板8,搜索半径约4
-        _std = float(roi.std())
-        _tpl = prev[_t0:_t0 + _tsz, _t0:_t0 + _tsz]
-        _res = cv2.matchTemplate(roi, _tpl, cv2.TM_CCOEFF_NORMED)
-        _, _mv, _, _ml = cv2.minMaxLoc(_res)
-        _dx = _ml[0] - _t0; _dy = _ml[1] - _t0
-        if axis == 'y':
-            _half = self._flow_corr(prev[_hm:_M, :], roi[0:_hm, :]) if d > 0 else self._flow_corr(prev[0:_hm, :], roi[_hm:_M, :])
-            _dd = _dy
-        else:
-            _half = self._flow_corr(prev[:, _hm:_M], roi[:, 0:_hm]) if d > 0 else self._flow_corr(prev[:, 0:_hm], roi[:, _hm:_M])
-            _dd = _dx
-        _pcd = _pcr = 0.0
-        try:
-            _w = np.hanning(_M).astype(np.float32); _win = _w[:, None] * _w[None, :]
-            (_px, _py), _pr = cv2.phaseCorrelate(np.float32(prev) * _win, np.float32(roi) * _win)
-            _pcd = _py if axis == 'y' else _px; _pcr = float(_pr)
-        except Exception:
-            pass
-        return dict(dd=float(_dd), score=float(_mv), half=float(_half), pcd=float(_pcd), pcr=_pcr, std=_std)
-
-    def _flow_idle_match(self, prev, roi):
-        """田字·原地档相邻帧背景位移(检测区锚人物正上方、无有效移动键时用)。phaseCorrelate算二维亚像素位移为主、
-        matchTemplate二维峰值互证。返回(moved,dx,dy,resp,mx,my,mscore,std,trusted):moved=背景可信平移>=1px
-        (=人被动位移/腾空/掉落,不是原地);trusted=本帧纹理/响应足以采信,纯色低响应帧不计入静止样本。"""
-        _M = roi.shape[0]
-        _IDLE_MIN_D, _IDLE_THR, _IDLE_TRUST, _IDLE_MIN_STD = 1.0, 0.5, 0.4, 8.0
-        _std = float(roi.std())
-        _w = np.hanning(_M).astype(np.float32); _win = _w[:, None] * _w[None, :]
-        _px = _py = 0.0; _pr = 0.0
-        try:
-            (_px, _py), _pr = cv2.phaseCorrelate(np.float32(prev) * _win, np.float32(roi) * _win)
-        except Exception:
-            pass
-        _tsz = max(8, _M // 2); _t0 = (_M - _tsz) // 2   # 框15时模板8
-        _tpl = prev[_t0:_t0 + _tsz, _t0:_t0 + _tsz]
-        _res = cv2.matchTemplate(roi, _tpl, cv2.TM_CCOEFF_NORMED)
-        _, _mv, _, _ml = cv2.minMaxLoc(_res)
-        _mx = _ml[0] - _t0; _my = _ml[1] - _t0
-        _dm = max(abs(_px), abs(_py), abs(_mx), abs(_my))
-        _moved = _dm >= _IDLE_MIN_D and (_pr >= _IDLE_THR or float(_mv) >= _IDLE_THR)
-        _trusted = (_pr >= _IDLE_TRUST or float(_mv) >= _IDLE_THR) and _std > _IDLE_MIN_STD
-        return bool(_moved), float(_px), float(_py), float(_pr), float(_mx), float(_my), float(_mv), _std, bool(_trusted)
-
     def _minimap_loop(self):
         """小地图单独线程(用户2026-09-21定稿):自己mss只截小地图区域(map_area_rect),高频find_player_dot发布_player_map_pos。
         不被全屏截图60ms周期拖着,光点20ms=50fps零延时更新(和熊猫精灵固定点检测一样)。蒙板/平台录/梯录后续挂这里。"""
@@ -17311,6 +17265,8 @@ class MinimapRouteRecorder:
                     if _pdot is not None:
                         self._player_map_pos = _pdot
                         self._map_dot_lost = 0
+                        # 影子光点指南针更新(用户2026-09-28):独立方法,便于不实例化GUI直接单测
+                        self._dot_shadow_update(_pdot, _now_kf)
                         # === 卡尔曼滤波：光点X平滑+速度估计 ===
                         _dt_kf = (_now_kf - self._mm_kf_last_t) / 1000.0 if self._mm_kf_last_t > 0 else 0.01
                         if not self._mm_kf.initialized or self._mm_kf_lost >= 10:
@@ -17327,6 +17283,7 @@ class MinimapRouteRecorder:
                         # 本帧丢点:绝不钉旧值(用户2026-09-22),光点置None,下游本帧跳过、下帧重检;
                         # 爬梯/下跳进行中由_transit_step入口对climb状态容忍本帧None(不终止整套动作、不松键)。
                         self._player_map_pos = None
+                        self._dot_shadow_pos = None    # 影子同步隐藏(光点都没有,方向无从谈起);历史保留,时间窗裁剪自愈
                         # 光点丢失：卡尔曼只predict不update（靠运动模型续推），丢失过久则速度衰减
                         if self._mm_kf.initialized and self._mm_kf_last_t > 0:
                             _dt_kf = (_now_kf - self._mm_kf_last_t) / 1000.0
@@ -17352,137 +17309,28 @@ class MinimapRouteRecorder:
                     _debug_log("[小地图线程] 异常:%s" % _e)
             time.sleep(0.010)  # 小地图光点10ms=100fps(用户2026-09-27提速,原20ms)
 
-    def _flow_loop(self):
-        """田字背景迁移检测线程(常开层)·已迁移到小地图(用户2026-09-28):检测框40×40,与光点同水平线、
-        朝小地图内侧离光点40px(光点偏左挂右/偏右挂左),检测小地图背景帧间变化;移动档按有效键轴算背景位移、
-        原地档二维判静止。框画在小地图map_display上(块坐标)。"""
-        FLOW_BOX, FLOW_TAIL_GAP, FLOW_MARGIN = 50, 40, 4   # 检测框=显示框50;框中心离光点40;块内边距4
-        FLOW_WIN_MS, FLOW_MIN_ROUNDS, FLOW_MATCH_THR, FLOW_MIN_D = 300, 3, 0.5, 1.0
-        _hd = FLOW_BOX // 2     # 匹配区半宽20(匹配框=显示框)
-        _last_seq = -1
-        _prev = {}
-        _hist = []
-        _hist_idle = []      # 原地档(无有效移动键)背景静止窗 [(t,moved)]
-        _last_moving = None  # 上一帧移动/原地模式,切换时清两套历史不串判
-        _last_frame_ms = 0
-        _last_log = 0
-        while getattr(self, '_detect_running', False):
-            try:
-                _frame = self._latest_frame
-                _seq = getattr(self, '_latest_frame_seq', 0)
-                if _frame is None or _seq == _last_seq:
-                    time.sleep(0.008); continue
-                _last_seq = _seq
-                _now_ms = int(time.time() * 1000)
-                _frame_dt = _now_ms - _last_frame_ms if _last_frame_ms else 0
-                _last_frame_ms = _now_ms
-                # 检测画面=小地图块(从全帧裁map_area_rect);锚=小地图光点(块坐标),不再用游戏窗口/lock_screen_from_dot。
-                _mrect = getattr(self, 'map_area_rect', None)
-                _dot = getattr(self, '_player_map_pos', None)
-                with self._wd_lock:
-                    _intents = {a: dict(v) for a, v in self._mv_intent.items()}
-                if not _mrect or _dot is None:
-                    _prev.clear(); _hist = []; _hist_idle = []
-                    with self._flow_lock:
-                        self._flow_boxes = []; self._flow_state = {}
-                    time.sleep(0.012); continue
-                _fh, _fw = _frame.shape[:2]
-                _ax0, _ay0 = int(_mrect['left']), int(_mrect['top'])
-                _ax1 = min(_ax0 + int(_mrect['width']), _fw)
-                _ay1 = min(_ay0 + int(_mrect['height']), _fh)
-                _mapblk = _frame[_ay0:_ay1, _ax0:_ax1]
-                _bh, _bw = _mapblk.shape[:2]
-                _px, _py = int(_dot[0]), int(_dot[1])
-                # 有效移动轴:方向键须持续按住>=MOVE_KEY_MIN_MS;更短(出手掰脸转身60ms)是轻点、不算移动(用户2026-09-24)
-                _eff = {a: v for a, v in _intents.items()
-                        if _now_ms - int(v.get('start_t', 0) or 0) >= MOVE_KEY_MIN_MS}
-                _moving = bool(_eff)
-                if _last_moving != _moving:
-                    _hist = []; _hist_idle = []   # 移动<->原地模式切换,两套历史各自清零不串判
-                    _last_moving = _moving
-                # 框与光点同水平线、朝小地图内侧离光点40:光点偏块中心左(_xdir-1)->框挂右(cx=px+40);偏右->挂左。
-                _xdir = -1 if _px < (_bw / 2.0) else 1
-                _cx = _px - _xdir * FLOW_TAIL_GAP
-                _cy = _py                            # 同水平线,不上抬(用户2026-09-28)
-                _cx = max(FLOW_MARGIN + _hd, min(_cx, _bw - FLOW_MARGIN - _hd))
-                _cy = max(FLOW_MARGIN + _hd, min(_cy, _bh - FLOW_MARGIN - _hd))
-                _gap = int(abs(_cx - _px))
-                # 贴边弃权:框被夹回、中心离光点不足32(放不下40框);垂直同线不判(原斜上方逻辑已去)
-                _edge = abs(_cx - _px) < (FLOW_TAIL_GAP - 8)
-                _mx1, _my1, _mx2, _my2 = _cx - _hd, _cy - _hd, _cx + _hd, _cy + _hd
-                _x1, _y1, _x2, _y2 = _mx1, _my1, _mx2, _my2   # 匹配框=显示框40
-                if _moving:
-                    if 'y' in _eff:
-                        _axis = 'y'; _d = int(_eff['y'].get('dir', 1) or 1)
-                    else:
-                        _axis = 'x'; _d = int(_eff['x'].get('dir', 1) or 1)
-                    _dd = _score = _half = _pcd = _pcr = _std = 0.0
-                    _n_rounds = _n_rev = 0; _sum_eff = 0.0
-                    if (not _edge) and _mx1 >= 0 and _mx2 <= _bw and _my2 <= _bh:
-                        _roi = cv2.cvtColor(_mapblk[_my1:_my2, _mx1:_mx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
-                        _std = float(_roi.std())
-                        if _axis in _prev:
-                            if _hist and (_hist[-1][1] != _axis or _hist[-1][2] != _d):
-                                _hist = []
-                            _hist = [e for e in _hist if _now_ms - e[0] <= FLOW_WIN_MS]
-                            _r = self._flow_match(_prev[_axis], _roi, _axis, _d)
-                            _dd, _score, _half = _r['dd'], _r['score'], _r['half']
-                            _pcd, _pcr, _std = _r['pcd'], _r['pcr'], _r['std']
-                            _effv = -(_d * _dd)
-                            _hist.append((_now_ms, _axis, _d, _effv, _score, _half))
-                            _n_rounds = sum(1 for e in _hist if e[3] >= FLOW_MIN_D and e[4] >= FLOW_MATCH_THR)
-                            _n_rev = sum(1 for e in _hist if e[3] <= -FLOW_MIN_D and e[4] >= FLOW_MATCH_THR)
-                            _sum_eff = sum(e[3] for e in _hist)
-                        _prev[_axis] = _roi
-                    else:
-                        _edge = True
-                    _real = (_n_rounds >= FLOW_MIN_ROUNDS)
-                    _clr = 0x00FFFF if _edge else (0x00FF00 if _real else 0x00FFFFFF)
-                    _lab = ('向上..' if _d > 0 else '向下..') if _axis == 'y' else ('向左..' if _d > 0 else '向右..')
-                    with self._flow_lock:
-                        self._flow_boxes = [(_x1, _y1, _x2, _y2, _clr, _lab)]
-                        self._flow_state = dict(axis=_axis, dir=_d, gap=_gap, edge=_edge, dd=_dd, pcd=_pcd,
-                                                score=_score, half=_half, pcr=_pcr, std=_std, rounds=_n_rounds,
-                                                rev=_n_rev, sum_eff=_sum_eff, n=len(_hist),
-                                                frame_dt=_frame_dt, real=_real, moving=True, still=False, t=_now_ms)
-                    # [2026-09-27关闭] 田字诊断日志(80字符长,每秒4条,log=130ms帧率降到20)
-                    # if _now_ms - _last_log >= 250: ...
-                else:
-                    # 原地档(完全没按方向键 / 仅<100ms轻点转身):沿用上面公共对角检测区(左后上/右后上),二维背景位移;窗内全程无可信位移才判 still=True
-                    _axis = None; _d = 0
-                    _idx = _idy = _ipr = _imx = _imy = _msc = _std = 0.0
-                    _still = None
-                    if not _edge:
-                        _roi = cv2.cvtColor(_mapblk[_my1:_my2, _mx1:_mx2], cv2.COLOR_BGR2GRAY).astype(np.float32)
-                        _std = float(_roi.std())
-                        if 'idle' in _prev:
-                            _hist_idle = [e for e in _hist_idle if _now_ms - e[0] <= FLOW_WIN_MS]
-                            _imv, _idx, _idy, _ipr, _imx, _imy, _msc, _std, _trusted = self._flow_idle_match(_prev['idle'], _roi)
-                            if _trusted:
-                                _hist_idle.append((_now_ms, _imv))
-                            _ni = len(_hist_idle); _nm = sum(1 for e in _hist_idle if e[1])
-                            if _ni >= FLOW_MIN_ROUNDS:
-                                _still = False if _nm > 0 else True
-                        _prev['idle'] = _roi
-                    _clr = 0x00FFFF if (_edge or _still is None) else (0xFFFF00 if _still else 0x0000FF)  # 黄=确认静止 红=背景在动 青=弃权/未定
-                    if _still is False and (abs(_idx) >= 1.0 or abs(_idy) >= 1.0):
-                        _lab = ('向下..' if _idy < 0 else '向上..') if abs(_idy) >= abs(_idx) else ('向右..' if _idx < 0 else '向左..')
-                    else:
-                        _lab = '静止..' 
-                    with self._flow_lock:
-                        self._flow_boxes = [(_x1, _y1, _x2, _y2, _clr, _lab)]
-                        self._flow_state = dict(axis=None, dir=0, gap=_gap, edge=_edge, dd=_idx, pcd=_idy,
-                                                score=_msc, pcr=_ipr, std=_std, rounds=len(_hist_idle),
-                                                rev=0, sum_eff=0.0, n=len(_hist_idle), frame_dt=_frame_dt,
-                                                real=False, moving=False, still=_still, t=_now_ms)
-                    # [2026-09-27关闭] 田字诊断日志(原地版)
-                    # if _now_ms - _last_log >= 250: ...
-            except Exception as _fe:
-                try:
-                    _debug_log("[田字诊断] 异常:%s" % (_fe,))
-                except Exception:
-                    pass
-                time.sleep(0.03)
+    def _dot_shadow_update(self, pdot, now_ms):
+        """影子光点指南针更新(用户2026-09-28,替代已删除的田字背景迁移检测)。
+        环缓存光点位置,影子=DOT_SHADOW_LAG_MS前的位置;偏差向量=光点实际移动方向
+        (比帧间比对抗镜头滚动抖动:比的是500ms前后两个稳态点,不是相邻帧)。
+        参数:pdot=本帧光点(小地图块坐标);now_ms=当前毫秒时间戳。"""
+        _dhist = self._dot_hist
+        if _dhist:
+            _pt, _pxh, _pyh = _dhist[-1]
+            # 相邻样本跳变过大=换图/小地图重定位,清历史重录,防影子留在旧图位置出假方向
+            if (abs(pdot[0] - _pxh) > DOT_SHADOW_RESET_PX
+                    or abs(pdot[1] - _pyh) > DOT_SHADOW_RESET_PX):
+                _dhist.clear()
+        _dhist.append((now_ms, float(pdot[0]), float(pdot[1])))
+        while _dhist and now_ms - _dhist[0][0] > DOT_SHADOW_LAG_MS:
+            _dhist.pop(0)   # 窗口外旧样本出队(环缓存只留一拍)
+        if len(_dhist) >= 2:
+            _st, _sxh, _syh = _dhist[0]
+            self._dot_shadow_pos = (_sxh, _syh)
+            self._dot_dir_vec = (float(pdot[0]) - _sxh, float(pdot[1]) - _syh)
+        else:
+            self._dot_shadow_pos = None   # 窗口内样本不足(刚清过历史/刚找回首帧):无影子不瞎出
+            self._dot_dir_vec = (0.0, 0.0)
 
     def _person_loop(self):
         """人物识别线程(多线程重构·用户定稿·三地基线程之一):自己【不截图】,只从截图线程帧槽取最新一帧,
@@ -17751,13 +17599,10 @@ class MinimapRouteRecorder:
         if not (self._person_thread and self._person_thread.is_alive()):
             self._person_thread = threading.Thread(target=self._person_loop, daemon=True, name="detect_person")
             self._person_thread.start()
-        if not (self._flow_thread and self._flow_thread.is_alive()):
-            self._flow_thread = threading.Thread(target=self._flow_loop, daemon=True, name="detect_flow")
-            self._flow_thread.start()
         if not (getattr(self, '_minimap_thread', None) and self._minimap_thread.is_alive()):
             self._minimap_thread = threading.Thread(target=self._minimap_loop, daemon=True, name="detect_minimap")
             self._minimap_thread.start()
-        print("[识别线程] 常开层启动: 截图+人物+田字背景流+小地图(绑定窗口常开)")
+        print("[识别线程] 常开层启动: 截图+人物+小地图(绑定窗口常开,含影子光点指南针)")
 
     def _start_runtime_detection(self):
         # 运行层(方案B):怪物识别(模板+YOLO+血条)+移动监管+边界守护,点"开始运行"才启动、停止即停(幂等,主循环按_running收敛)
