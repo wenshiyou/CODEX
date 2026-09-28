@@ -828,6 +828,16 @@ LADDER_STUCK_DOT_DY = 2.0       # 光点Y(小地图px)变化小于此=没动(卡
 LADDER_STUCK_SIDE_MS = 120      # 解卡:固定按右方向键时长
 LADDER_STUCK_JUMP_MS = 120      # 解卡:跳键保持时长
 LADDER_STUCK_SETTLE_MS = 450    # 解卡横跳后落地/重挂观察窗(一次腾空约360ms+余量)
+# === 全局卡住哨兵(用户2026-09-28最后兜底层,挂在监管线程:检测"本要向哪动却静止") ===
+STALL_SENTINEL_OBSERVE = True   # True=观察模式只打红字日志不动键;真机确认零误报后改False放开恢复动作(用户定的上线方式)
+STALL_WALK_MS = 2000            # 走路卡住:X意图按住且光点没朝意图方向动持续这么久(用户定2秒)
+STALL_CLIMB_MS = 1500           # 爬梯卡住:climbing中Y意图按住且光点Y没动持续这么久(用户定1.5秒,比走路严一档)
+STALL_TP_MS = 1000              # 瞬移卡住:瞬移发出后这么久光点还没朝该轴动过=瞬移没生效(用户定1秒)
+STALL_RECOVER_TRIES = 2         # 纠偏(松键重按+跳)最多试几次,仍不动=放弃本段/目标回主线重选
+STALL_RECOVER_WATCH_MS = 500    # 每次纠偏后的观察窗:窗内光点朝意图方向恢复移动=脱困
+STALL_L2_WINDOW_MS = 60000      # L3兜底统计窗:窗内"连试失败放弃"达STALL_L2_MAX次=上层反复撞墙,全量复位+红字报警
+STALL_L2_MAX = 3
+STALL_LADDER_JUMP_EVADE_MS = 2500  # 卡梯横跳发键后哨兵爬梯判定的避让窗(防横跳腾空/落地中Y暂时不动误判)
 LADDER_STUCK_COOLDOWN_MS = 2500 # 两次横跳解卡之间的冷却
 LADDER_STUCK_MAX_FAILS = 3      # 连续解卡几次仍卡=放弃这把梯回打怪/重选
 JUMP_DOWN_LAND_STABLE_MS = 180   # 下跳落地判定(2026-09-10收紧250→180,治到底后↓多按扑倒)：开始下落后光点Y连续180ms不再增大(≤3px抖动)=落到台子,立刻松↓
@@ -1576,6 +1586,12 @@ class MinimapRouteRecorder:
         self._ladder_stuck_last_y = None       # 监管:上一次光点Y(小地图),动了就更新
         self._ladder_stuck_motion_since = 0    # 监管:光点Y静止起始ms
         self._ladder_stuck_fails = 0           # 本轮爬梯连续横跳解卡失败次数
+        # === 全局卡住哨兵(用户2026-09-28,挂监管线程) ===
+        self._stall_track = {}                 # 每轴滑动静止追踪 {'x'/'y'/'tp':{'t','bx','by','dir',...}}:动过就滑基准重计时
+        self._stall_state = None               # 哨兵恢复状态机 None/{'kind','axis','dir','vk','jump_key','phase','tries','t','bx','by'}
+        self._stall_hold_main = False          # 关主线令:True=主循环暂停主线(并入_aux_busy),哨兵独占纠偏不抢键
+        self._stall_l2_hist = []               # "连试失败放弃"时间戳表(L3兜底统计,只留STALL_L2_WINDOW_MS内)
+        self._ladder_jump_last_t = 0           # 卡梯横跳最近一次发键时刻(哨兵爬梯判定避让窗用)
         self._ladder_stuck_cooldown_until = 0  # 解卡失败后再试冷却截止ms
         # === 打怪区域·小地图边界(用户2026-09-11:左右=手划竖线,上下=点选平台绿线定上下限) ===
         self._bound_lines = None        # 左右竖线·小地图块像素坐标 {'l','r'};None=尚未初始化(首次按小地图尺寸给默认)
@@ -15543,6 +15559,9 @@ class MinimapRouteRecorder:
             intents = {a: dict(v) for a, v in self._mv_intent.items()}
         mmp = getattr(self, '_player_map_pos', None)
         in_gate = now < self._wd_jump_gate_until
+        # 全局卡住哨兵(用户2026-09-28):恢复状态机优先(纠偏进行中不再检测),然后检测"本要向哪动却静止"
+        self._wd_stall_tick(now)
+        self._wd_check_global_stall(now, intents, mmp, in_gate)
         # 原地左右横跳探测不依赖当前intent(换向间隙intent可能已clear),独立先判,只记录报异常栏、不置令不干预
         self._wd_check_antijitter(now, mmp, in_gate)
         if not intents:
@@ -15775,6 +15794,7 @@ class MinimapRouteRecorder:
                         if _jvk is not None:
                             self._key_up(_jvk)
                         _debug_log("[监管线] 横跳完成,重置计时继续检测")
+                        self._ladder_jump_last_t = now   # 记横跳时刻,哨兵爬梯判定避让窗用(防腾空误判)
                         # 重置第一次后脑计时,继续检测(一直卡一直跳)
                         self._ladder_stuck_first_back_t = 0
                         self._ladder_stuck_first_back_y = None
@@ -15786,6 +15806,211 @@ class MinimapRouteRecorder:
                 _debug_log("[监管线] 爬梯卡住检测异常: %s" % e)
             except Exception:
                 pass
+
+    def _wd_check_global_stall(self, now, intents, mmp, in_gate):
+        """全局卡住哨兵(用户2026-09-28最后兜底层,挂监管线程):检测"本要向哪动却静止"——
+        ①爬梯:climbing中Y意图按住≥STALL_CLIMB_MS光点Y没动(与_wd_check_ladder_stuck后脑判定互补:那条认
+        "后脑在梯+Y不动",本条认"按了爬键Y就该动",后脑识别不到的卡梯也能抓到,两条独立判定更准);
+        ②走路:X意图按住≥STALL_WALK_MS光点没朝意图方向动;③瞬移:发出≥STALL_TP_MS光点还没朝该轴动=没生效。
+        观察模式(STALL_SENTINEL_OBSERVE=True)只打日志不动键;恢复模式第一时间关锁怪关主线,由_wd_stall_tick
+        独占纠偏(用户流程:先纠正行为,再清锁重锁开主线)。全程只读+try自保护,绝不崩监管线程。"""
+        try:
+            if self._stall_state is not None or in_gate:
+                return   # 恢复进行中/跳后静默窗不检测
+            if mmp is None:
+                self._stall_track.clear()   # 光点丢失不判(不冤枉),基点全清等找回重记
+                return
+            # ① 爬梯卡住(仅climbing中;卡梯横跳后STALL_LADDER_JUMP_EVADE_MS内避让,防腾空/落地误判)
+            if getattr(self, '_climb_state', 'none') == 'climbing' \
+                    and now - getattr(self, '_ladder_jump_last_t', 0) >= STALL_LADDER_JUMP_EVADE_MS:
+                _it_y = intents.get('y')
+                if _it_y and now - int(_it_y.get('start_t', 0) or 0) >= MOVE_KEY_MIN_MS:
+                    self._stall_track_axis('y', _it_y, mmp, now, STALL_CLIMB_MS, '爬梯')
+                else:
+                    self._stall_track.pop('y', None)
+            else:
+                self._stall_track.pop('y', None)
+            # ② 走路卡住(X意图按住即判,不限定状态:巡路/追怪/靠近都该动)
+            _it_x = intents.get('x')
+            if _it_x and now - int(_it_x.get('start_t', 0) or 0) >= MOVE_KEY_MIN_MS:
+                self._stall_track_axis('x', _it_x, mmp, now, STALL_WALK_MS, '走路')
+            else:
+                self._stall_track.pop('x', None)
+            # ③ 瞬移卡住(零侵入读现有_combat_tp_pending,不改瞬移发键处)
+            self._stall_check_tp(now, mmp)
+        except Exception as e:
+            try:
+                _debug_log("[哨兵] 检测异常:%s" % e)
+            except Exception:
+                pass
+
+    def _stall_track_axis(self, key, it, mmp, now, limit_ms, kind):
+        """哨兵单轴滑动静止追踪:光点朝意图方向动过≥MOVE_MIN_MAP_DX就滑基准重计时(和_check_move_blocked
+        同款防误判);超limit_ms没动=卡住触发。key='x'/'y';it含dir;kind仅日志用。"""
+        tr = self._stall_track.get(key)
+        if tr is None or tr.get('dir') != it.get('dir'):
+            # 首见/换向:记基点开始计时
+            self._stall_track[key] = {'t': now, 'bx': float(mmp[0]), 'by': float(mmp[1]),
+                                      'dir': it.get('dir')}
+            return
+        _prog = ((mmp[0] - tr['bx']) * tr['dir']) if key == 'x' else ((mmp[1] - tr['by']) * tr['dir'])
+        if _prog >= MOVE_MIN_MAP_DX:
+            tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))   # 真在朝意图方向动:滑基准重计时
+            return
+        if now - tr['t'] < limit_ms:
+            return
+        # 到点=卡住:先滑基准防同一基点重复触发,再按观察/恢复模式分流
+        tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))
+        _dirn = int(tr['dir'] or 1)
+        if key == 'x':
+            _vk = VK_RIGHT if _dirn > 0 else VK_LEFT
+            _dn = '右' if _dirn > 0 else '左'
+        else:
+            _vk = VK_UP if _dirn < 0 else VK_DOWN   # Y轴小地图上为负:dir=-1是向上爬
+            _dn = '上' if _dirn < 0 else '下'
+        if STALL_SENTINEL_OBSERVE:
+            self._wd_log('stall_%s' % key,
+                         "[哨兵·观察] %s卡住:按住朝%s %.0fms光点没动[观察模式不动键]" % (kind, _dn, limit_ms))
+            return
+        # 恢复模式:第一时间关锁怪+关主线,进独占纠偏(用户2026-09-28:先纠正行为,再清锁重锁开主线)
+        self._stall_enter_recover(kind, key, _dirn, _vk, mmp, now)
+
+    def _stall_check_tp(self, now, mmp):
+        """哨兵瞬移卡住检测(零侵入读现有_combat_tp_pending):pending首次被看见记基点;
+        ≥STALL_TP_MS光点沿瞬移轴还没动过≥MOVE_MIN_MAP_DX=瞬移没生效。观察模式只日志;
+        恢复模式清pending(作废这次校验,纠偏后主线850ms节流自然重发)+进纠偏。"""
+        pen = getattr(self, '_combat_tp_pending', None)
+        if pen is None:
+            self._stall_track.pop('tp', None)
+            return
+        tr = self._stall_track.get('tp')
+        if tr is None or tr.get('t_ref') != pen.get('t'):
+            # 新的一笔瞬移:记基点重新计时
+            self._stall_track['tp'] = {'t_ref': pen.get('t'), 't': now,
+                                       'bx': float(mmp[0]), 'by': float(mmp[1]),
+                                       'axis': pen.get('axis'), 'dir': int(pen.get('dir') or 1)}
+            return
+        _ax = tr.get('axis')
+        _dr = int(tr.get('dir') or 1)
+        _prog = ((mmp[0] - tr['bx']) * _dr) if _ax == 'x' else ((mmp[1] - tr['by']) * _dr)
+        if _prog >= MOVE_MIN_MAP_DX:
+            tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))   # 真动了:滑基准重计时
+            return
+        if now - tr['t'] < STALL_TP_MS:
+            return
+        tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))   # 滑基准防重复触发
+        _dn = ('右' if _dr > 0 else '左') if _ax == 'x' else ('下' if _dr > 0 else '上')
+        if STALL_SENTINEL_OBSERVE:
+            self._wd_log('stall_tp',
+                         "[哨兵·观察] 瞬移卡住:发出%.0fms光点没朝%s动[观察模式不动键]" % (STALL_TP_MS, _dn))
+            return
+        self._combat_tp_pending = None   # 清pending:这次瞬移校验作废,纠偏后主线节流重发
+        _vk = (VK_RIGHT if _dr > 0 else VK_LEFT) if _ax == 'x' else (VK_DOWN if _dr > 0 else VK_UP)
+        self._stall_enter_recover('瞬移', _ax, _dr, _vk, mmp, now)
+
+    def _stall_enter_recover(self, kind, axis, dirn, vk, mmp, now):
+        """哨兵进恢复(用户2026-09-28流程):第一时间关锁怪(_set_b_lock_enabled当场清已锁)+关主线
+        (_stall_hold_main并入_aux_busy),建恢复状态机交给_wd_stall_tick逐拍推进。"""
+        _jk = self._get_fight_config().get('jump_key', '')
+        self._stall_state = {'kind': kind, 'axis': axis, 'dir': dirn, 'vk': vk,
+                             # 爬梯纠偏不跳(梯上跳=松梯),只重按爬键;走路/瞬移加跳一下试脱困
+                             'jump_key': (_jk if kind != '爬梯' else ''),
+                             'phase': 'start', 'tries': 0, 't': now,
+                             'bx': float(mmp[0]), 'by': float(mmp[1])}
+        self._set_b_lock_enabled(False, why='全局卡住哨兵:%s卡住' % kind)
+        self._stall_hold_main = True
+        self._rlog("[哨兵] %s卡住,关锁关主线纠偏" % kind, LOG_RED, log='exception')
+        _debug_log("[哨兵] %s卡住触发纠偏:axis=%s dir=%d 基点(%.1f,%.1f)" % (kind, axis, dirn, mmp[0], mmp[1]))
+
+    def _wd_stall_tick(self, now):
+        """哨兵恢复状态机(监管线程独占,用户2026-09-28:关锁关主线→纠偏→脱困/放弃→清锁重锁开主线)。
+        start=松全部方向键+重按意图方向(走路/瞬移加跳一下;爬梯只重按爬键)→watch=观察窗内光点朝意图
+        方向恢复=脱困;没动再试;连试STALL_RECOVER_TRIES次仍不动=放弃本段(爬梯_reset_climb+冷却、瞬移清
+        pending、走路交主线重选)并记L2时间戳;STALL_L2_WINDOW_MS内L2达STALL_L2_MAX次=上层反复撞墙,
+        L3全量复位(松全部键+清意图+红字报警)。全程try自保护,异常即取消恢复防卡死。"""
+        st = self._stall_state
+        if st is None:
+            return
+        try:
+            if not getattr(self, '_random_running', False):
+                self._stall_cancel(why='停运行')
+                return
+            mmp = getattr(self, '_player_map_pos', None)
+            if st['phase'] == 'start':
+                # 松全部方向键(战斗/巡路两套账都松,防主线残留按住与新指令互搏)
+                for _vk in (VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT):
+                    self._release_combat_key(_vk)
+                    if _vk in self._random_move_keys:
+                        self._key_up(_vk)
+                self._key_down(st['vk'])   # 强制重发意图方向keydown(绕过"方向没变不重发"缓存)
+                if st.get('jump_key'):
+                    self._press_game_key(st['jump_key'], duration=120)   # 跳一下试脱困(规则:≥120ms)
+                st['phase'] = 'watch'
+                st['t'] = now
+                st['bx'] = float(mmp[0]) if mmp is not None else st['bx']
+                st['by'] = float(mmp[1]) if mmp is not None else st['by']
+                st['tries'] += 1
+                _debug_log("[哨兵] 纠偏第%d/%d次(%s):重按方向%s%s,观察%dms" % (
+                    st['tries'], STALL_RECOVER_TRIES, st['kind'],
+                    '上' if st['vk'] == VK_UP else ('下' if st['vk'] == VK_DOWN else ('左' if st['vk'] == VK_LEFT else '右')),
+                    '+跳' if st.get('jump_key') else '', STALL_RECOVER_WATCH_MS))
+                return
+            # watch阶段:方向键保持物理按住(主线已暂停无人松它),满观察窗判这一试有没有恢复
+            if now - st['t'] < STALL_RECOVER_WATCH_MS:
+                return
+            if mmp is not None:
+                _prog = ((mmp[0] - st['bx']) * st['dir']) if st['axis'] == 'x' \
+                    else ((mmp[1] - st['by']) * st['dir'])
+                if _prog >= MOVE_MIN_MAP_DX:
+                    _debug_log("[哨兵] 纠偏生效:光点朝意图恢复移动(%.1f)=脱困" % _prog)
+                    self._rlog("哨兵纠偏脱困,清锁重锁开主线", LOG_OK, log='behavior')
+                    self._stall_cancel(why='脱困')
+                    return
+            # 这一试没动
+            self._key_up(st['vk'])
+            if st['tries'] < STALL_RECOVER_TRIES:
+                st['phase'] = 'start'   # 再试一次
+                return
+            # 连试失败=放弃本段(L2)
+            _debug_log("[哨兵] 连试%d次仍不动=放弃,%s回主线重选" % (st['tries'], st['kind']))
+            self._rlog("哨兵纠偏%d次仍卡,放弃本段回主线" % st['tries'], LOG_RED, log='exception')
+            if st['kind'] == '爬梯':
+                self._reset_climb()
+                self._climb_fail_pause_until = now + LADDER_FAIL_REENTER_MS   # 爬梯冷却,主线先打边怪
+            elif st['kind'] == '瞬移':
+                self._combat_tp_pending = None
+            self._stall_l2_hist.append(now)
+            self._stall_l2_hist = [_t for _t in self._stall_l2_hist if now - _t <= STALL_L2_WINDOW_MS]
+            self._stall_cancel(why='L2放弃')
+            # L3兜底:统计窗内L2连发=上层逻辑在反复撞墙,全量复位报警
+            if len(self._stall_l2_hist) >= STALL_L2_MAX:
+                self._stall_l2_hist = []
+                for _vk in (VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT):
+                    self._release_combat_key(_vk)
+                    if _vk in self._random_move_keys:
+                        self._key_up(_vk)
+                self._wd_clear_intent(None)
+                self._rlog("[哨兵] %.0fs内连%d次纠偏失败=上层反复撞墙,已全量复位(松键清意图),请人工观察" % (
+                    STALL_L2_WINDOW_MS / 1000.0, STALL_L2_MAX), LOG_RED, log='exception')
+        except Exception as e:
+            try:
+                _debug_log("[哨兵] 恢复异常:%s(取消恢复防卡死)" % e)
+            except Exception:
+                pass
+            self._stall_cancel(why='异常')
+
+    def _stall_cancel(self, why='', reopen=True):
+        """取消哨兵恢复:松纠偏键、撤关主线令、恢复锁怪(重锁由B线用一直热着的怪表下一帧立即完成)。"""
+        st = self._stall_state
+        if st is not None:
+            try:
+                self._key_up(st['vk'])
+            except Exception:
+                pass
+        self._stall_state = None
+        self._stall_hold_main = False
+        if reopen and not getattr(self, '_b_lock_enabled', True):
+            self._set_b_lock_enabled(True, why='哨兵恢复:%s' % why)
 
     def _move_watchdog_loop(self):
         """监管线独立线程：只在自动运行时每WD_POLL_MS巡检一次，全程try自保护，绝不发键、绝不崩主线。"""
@@ -18946,7 +19171,8 @@ class MinimapRouteRecorder:
                 _bound_pulling = False
             else:
                 _bound_pulling = self._bound_pull_tick(time.time() * 1000)
-            _aux_busy = _platform_retreating or _fall_returning or _unblocking or _bound_pulling
+            _aux_busy = _platform_retreating or _fall_returning or _unblocking or _bound_pulling \
+                or getattr(self, '_stall_hold_main', False)   # 哨兵关主线令(用户2026-09-28):纠偏期间暂停主线不抢键
             self._seg_loop['3misc'] = self._seg_loop.get('3misc', 0) + time.time() - self._lk.get('before_scale', time.time())
             self._lk['before_route'] = time.time()
             if not _aux_busy:
