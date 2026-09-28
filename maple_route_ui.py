@@ -15870,7 +15870,9 @@ class MinimapRouteRecorder:
 
     def _stall_line_ladder(self, now, intents, mmp):
         """行1·卡梯(独立判定,与卡梯横跳的后脑判定互补):climbing中Y意图按住≥MOVE_KEY_MIN_MS且
-        光点Y没动超STALL_CLIMB_MS。专属解法=重按爬键两试(梯上不跳不横跳——横跳归现有卡梯后脑行管);仍卡=清爬梯状态冷却回主线。"""
+        光点Y没动超STALL_CLIMB_MS。解法【按原来的·用户2026-09-28】:触发后直接执行与
+        _wd_check_ladder_stuck完全同款的横跳序列(松方向键→右键100ms→跳80ms→松),不另建状态机、
+        不关锁不关主线;跳完置避让窗+复位原检测器计时(防两条判定连跳两次),并计入行失败统计(10分钟3次弹窗)。"""
         ln = self._stall_lines['ladder']
         if getattr(self, '_climb_state', 'none') != 'climbing' \
                 or now - getattr(self, '_ladder_jump_last_t', 0) < STALL_LADDER_JUMP_EVADE_MS:
@@ -15881,10 +15883,42 @@ class MinimapRouteRecorder:
             ln['track'] = None
             return
         _dirn = int(_it_y.get('dir') or -1)   # Y轴小地图上为负:向上爬dir=-1
-        self._stall_slide_or_fire('ladder', mmp, now, STALL_CLIMB_MS,
-                                  '按住爬键光点Y %.0fms没动' % STALL_CLIMB_MS,
-                                  dict(kind='卡梯', axis='y', dir=_dirn, vk=VK_UP if _dirn < 0 else VK_DOWN,
-                                       jump_key='', steps=('retry', 'retry')))
+        tr = ln['track']
+        if tr is None or tr.get('dir') != _dirn:
+            ln['track'] = {'t': now, 'bx': float(mmp[0]), 'by': float(mmp[1]), 'dir': _dirn}
+            return
+        _prog = (float(mmp[1]) - tr['by']) * _dirn   # 朝爬行方向(Y按dir取符号)的净位移
+        if _prog >= MOVE_MIN_MAP_DX:
+            tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))   # 真在爬:滑基准重计时
+            return
+        if now - tr['t'] < STALL_CLIMB_MS:
+            return
+        tr.update(t=now, bx=float(mmp[0]), by=float(mmp[1]))   # 滑基准防同一基点重复触发
+        if STALL_SENTINEL_OBSERVE:
+            _debug_log("[哨兵·观察][ladder] 按住爬键光点Y %.0fms没动[观察模式不动键]" % STALL_CLIMB_MS)
+            return
+        # 按原来的:与_wd_check_ladder_stuck完全同款横跳时序(松键→右键100ms→跳80ms→松)
+        _debug_log("[哨兵][ladder] 爬梯卡住(Y意图%.0fms光点Y不动),执行原横跳序列" % STALL_CLIMB_MS)
+        self._rlog("爬梯卡住(Y判定),横跳解卡", LOG_RED, log='exception')
+        for _vk in (VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT):
+            if _vk in self._random_move_keys:
+                self._key_up(_vk)
+        self._key_down(VK_RIGHT)
+        time.sleep(0.1)
+        _jk = self._get_fight_config().get('jump_key', '')
+        _jvk = self._key_to_vk(_jk) if _jk else None
+        if _jvk is not None:
+            self._key_down(_jvk)
+        time.sleep(0.08)
+        self._key_up(VK_RIGHT)
+        if _jvk is not None:
+            self._key_up(_jvk)
+        self._ladder_jump_last_t = now   # 横跳时刻:本行避让窗起点
+        # 复位原后脑检测器计时(与原横跳后动作一致,防两判定背靠背连跳)
+        self._ladder_stuck_first_back_t = 0
+        self._ladder_stuck_first_back_y = None
+        self._ladder_stuck_last_y = None
+        self._stall_fail('ladder', now, '爬梯卡住')   # 计入行失败统计(10分钟3次弹窗)
 
     def _stall_line_walk(self, now, intents, mmp):
         """行2·走路(独立判定):X意图按住且光点没朝意图方向动超STALL_WALK_MS。
