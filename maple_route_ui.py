@@ -854,28 +854,22 @@ LADDER_STUCK_MAX_FAILS = 3      # 连续解卡几次仍卡=放弃这把梯回打
 JUMP_DOWN_LAND_STABLE_MS = 180   # 下跳落地判定(2026-09-10收紧250→180,治到底后↓多按扑倒)：开始下落后光点Y连续180ms不再增大(≤3px抖动)=落到台子,立刻松↓
 JUMP_DOWN_LAND_TIMEOUT_MS = 1500 # 下跳总兜底：补跳后最多1500ms强制按落地收尾,防大落差一直观测不到稳定而干等
 JUMP_DOWN_HOLD_BEFORE_JUMP_MS = 150 # 下跳时序(用户2026-09-09最新)：松攻击/左右→按住↓150ms采到"向下"→按跳→跳后立刻松↓(自由落体不长按,真人化)
-# === 下行 descend 状态机(用户2026-09-10最终定稿:只留两种下跳方式;不找口子/不走边缘,原地直接跳,动作先做完整、事后一次判Y)===
-# 方式一 first_jump:压↓100ms→第一跳(下穿台)→松↓→随机左/右按100ms→第二跳(左右跳、跳前记人物特征基准Y)→松左右
-#   →check_drop固定DESC_DROP_CHECK_MS后一次性比"人物特征Y比左右跳前增大≥DESC_DROP_DY=10"(屏幕特征Y或小地图世界Y任一)=真下去→fall自由落体(背景静止/Y稳定=落地);
-#   没增大=这位置直接跳不下去→转方式二找梯子(不在动作执行中途判失败,避免小光点闪断误判"跳不了")。
-# 方式二(直接跳不了才用)·两段对位:to_ladder小地图走到梯X对齐光点中心|差|≤5(同拍进30Hz高帧)→lad_scr切主窗口用人物特征对齐"红框白框二合一白框",
-#   >50按住趋近、10~50碎步三拍递减(150→×0.75,最多3拍、流利不停)、≤10且双框合并连续2帧=对齐→lad_grab按住↓观察500ms,Y变大=抓住
-#   →lad_slide继续按↓1秒→lad_leap松↓随机侧100+跳离梯→lad_fall_wait固定1秒回主线;lad_grab满500 Y没变=抓不住回主线,不补跳不死磕。
-DESC_LAD_ALIGN_TOL = 5         # 方式二·段1:小地图梯X对齐人物光点中心,|差|≤5即切主窗口精对位+同拍进30Hz高帧(和上行≤7同款;2→5放宽求稳,小地图px)
-DESC_GOTO_STALL_MS = 600       # 段1朝梯走但连续600ms没靠近=被边挡住,直接切主窗口段(用特征兜底对位)
-DESC_DROP_CHECK_MS = 500       # 方式一:第二跳后500ms判Y增大(用户2026-09-16定稿)
-DESC_DROP_WAIT_MAX_MS = 1200   # 方式一:观察窗上限
-DESC_DROP_DY = 50              # 方式一·主窗口:Y增大≥50=确实跳下(用户2026-09-16定稿)
-DESC_DROP_DY_MAP = 16          # 方式一·小地图:世界Y增大≥16≈屏幕80px
-DESC_DIRECT_DOWN_HOLD_MS = 150 # 方式一:第一跳前压↓150ms
-DESC_FIRST_JUMP_WAIT_MS = 500  # 方式一:第一跳后等500ms再按侧键+第二跳
-DESC_DIRECT_SIDE_MS = 150      # 方式一:侧键按150ms(怪在哪边选哪边)
-DESC_LAD_GRAB_MS = 500         # 方式二:梯位按↓500ms
-DESC_LAD_SLIDE_MS = 1000       # 方式二:滑梯1秒
-DESC_LAD_LEAP_SIDE_MS = 150    # 方式二:侧跳150ms
-DESC_LAD_FALL_WAIT_MS = 500    # 方式二:侧跳后500ms检测Y
-DESC_Y_MOVE_TOL = 5            # 方式二lad_grab:光点Y比基准增大>5=抓住梯子向下动了
-DESC_AVOID_LADDER_MM = 18     # 下跳横跳错开梯子:小地图光点X这一半径内、梯身竖向覆盖光点Y的梯=该侧有梯,横跳优先选无梯侧(用户2026-09-22);实心台两侧都跳不下仍由check_drop两次失败转方式二走梯
+# === 下行 descend 状态机(用户2026-09-28影子法定稿·整体重写:见_descend_step) ===
+# ①直接下跳:压↓100ms→跳→松↓→300ms影子判down(两跳都没down=实心台转梯子)→影子still=落地重锁开打;
+# ②梯子:小地图对齐→压↓200ms影子判down=抓住→立即横跳(怪侧100ms+跳)→200ms查后脑(无=离梯等still落地/有=再横跳);
+#   压↓没down=梯位没找准再对齐。全程光点影子判,不用特征Y不用固定sleep。旧方式一/二(first_jump/lad_grab/lad_slide
+#   /lad_leap/lad_fall_wait/check_drop)整段已物理删除,回看去git历史。
+DESC_GOTO_STALL_MS = 600       # 走向梯X连续600ms没靠近=被边挡住,放弃回主线
+DESC_AVOID_LADDER_MM = 18     # 下跳避梯选位(用户2026-09-28影子法):小地图光点X这一半径内、梯身竖向覆盖光点Y的梯=该侧有梯,下跳/横跳选无梯侧
+# === 影子法下行时序(用户2026-09-28定稿:全程光点影子判向下/静止,不用特征Y不用固定sleep) ===
+DESC_DOT_DOWN_HOLD_MS = 100   # 直接下跳:按住↓100ms后按跳,再松开↓(用户定时序)
+DESC_DOT_CHECK_MS = 300       # 直接下跳:起跳后300ms检测影子是否向下(用户定)
+DESC_DOT_MAX_TRY = 2          # 直接下跳:两次都没下去=实心台,转梯子(用户定)
+DESC_DOT_FALL_TIMEOUT_MS = 3000  # 落地观察兜底:影子迟迟不still(光点丢/异常)按超时落地收尾
+DESC_DOT_GRAB_HOLD_MS = 200   # 梯位:对齐按住↓200ms后影子判是否向下(用户定时序)
+DESC_DOT_REALIGN_MAX = 2      # 梯位没抓住(影子没down)再对齐次数上限,超过放弃回主线
+DESC_DOT_LEAP_SIDE_MS = 100   # 横跳:压左/右方向100ms后按跳(用户定时序;方向=怪在哪按哪边)
+DESC_DOT_BACK_CHECK_MS = 200  # 横跳后200ms检测后脑勺(用户定时序):无后脑=跳下去了,有后脑=还挂梯再横跳
 DESC_LAD_LEAP_MAX = 2          # 方式二侧跳离梯后,lad_fall_wait仍见后脑=没甩开梯子,最多补几次侧跳横跳(用户2026-09-22),补满仍挂梯不死磕、回主线重锁
 LADDER_DEL_X_TOL = 6          # 梯删除点选命中：点击点与梯子X差≤6(小地图原始分辨率)且Y落在线段内=删这条
 LADDER_DEL_Y_TOL = 4
@@ -1818,28 +1812,13 @@ class MinimapRouteRecorder:
         self._desc_phase_t = 0        # 当前阶段开始时刻ms
         self._desc_ref_px = None      # 水平走向目标时上一拍人物X(判卡住/到平台边)
         self._desc_stall_t = 0        # 水平"没靠近"的起始时刻
-        self._desc_jumped = False     # 本阶段是否已补按过跳跃键
-        self._desc_j2 = False         # 方式一第二跳(随机侧向)是否已按
-        self._desc_j2_pre = False     # 方式一:第一跳后等500ms→按侧键标记
-        self._desc_leap_dir = 1       # 方式一/二侧跳离梯的随机方向(-1左/1右)
-        self._desc_side_leap_n = 0   # 方式二侧跳离梯补跳次数(lad_fall_wait仍见后脑=没甩开,回lad_leap再横跳,上限DESC_LAD_LEAP_MAX;每次进方式二清零,用户2026-09-22)
-        self._desc_j2 = False         # 方式一:第二跳(随机侧向)是否已按
-        self._desc_leap_dir = 1       # 方式一/二侧跳离梯的随机方向(1右/-1左)
-        self._desc_pre_leap_sy = None  # 方式一:左右跳前人物特征屏幕Y基准
-        self._desc_pre_leap_my = 0     # 方式一:左右跳前小地图世界Y基准
-        self._desc_scr_key_vk = None  # 方式二段2主窗口碎步当前按键/时刻/时长/拍数复位
-        self._desc_scr_key_t = 0
-        self._desc_scr_key_hold = 0
-        self._desc_scr_nudge_t = 0
-        self._desc_scr_nudge_t = 0
-        self._desc_scr_nudge_n = 0
-        self._desc_scr_nudge_step = 0
-        self._desc_scr_nudge_from_x = None
-        self._desc_scr_nudge_gap = 100
-        self._desc_scr_ok_frames = 0
-        self._desc_scr_last_x = None
-        self._desc_scr_last_t = 0
-        self._desc_scr_enter_t = 0
+        self._desc_jumped = False     # 本阶段是否已按过跳跃键
+        self._desc_leap_dir = 1       # 横跳离梯方向(-1左/1右)
+        self._desc_jump_t = 0         # 影子法:本次下跳起跳时刻(0=还没跳)
+        self._desc_drop_try = 1       # 影子法:直接下跳第几次(2次没下去转梯子)
+        self._desc_grab_realign = 0   # 影子法:梯位再对齐次数
+        self._desc_side_leap_n = 0    # 影子法:横跳离梯次数(上限DESC_LAD_LEAP_MAX)
+        self._desc_mm_no_pick_t = 0   # 影子法:mm_to_lad连续选不到梯计时
         self._climb_fail_pause_until = 0
 
         # 自动刷新状态：默认开启，手动框选后关闭，点刷新重新开启
@@ -5247,31 +5226,19 @@ class MinimapRouteRecorder:
         self._climb_direction = 0
         self._climb_start_y = 0
         self._climb_action_time = 0
-        # 下行descend子状态复位(用户2026-09-09)
+        # 下行descend子状态复位(影子法·用户2026-09-28)
         self._desc_phase = None
         self._desc_base_y = 0
         self._desc_phase_t = 0
         self._desc_ref_px = None
         self._desc_stall_t = 0
         self._desc_jumped = False
-        self._desc_j2 = False
         self._desc_leap_dir = 1
-        self._desc_pre_leap_sy = None    # 方式一:左右跳前人物特征屏幕Y基准复位
-        self._desc_pre_leap_my = 0
-        # 方式二段2主窗口白框精对位状态复位(用户2026-09-10)
-        self._desc_scr_key_vk = None
-        self._desc_scr_key_t = 0
-        self._desc_scr_key_hold = 0
-        self._desc_scr_nudge_t = 0
-        self._desc_scr_nudge_t = 0
-        self._desc_scr_nudge_n = 0
-        self._desc_scr_nudge_step = 0
-        self._desc_scr_nudge_from_x = None
-        self._desc_scr_nudge_gap = 100
-        self._desc_scr_ok_frames = 0
-        self._desc_scr_last_x = None
-        self._desc_scr_last_t = 0
-        self._desc_scr_enter_t = 0
+        self._desc_jump_t = 0
+        self._desc_drop_try = 1
+        self._desc_grab_realign = 0
+        self._desc_side_leap_n = 0
+        self._desc_mm_no_pick_t = 0
         self._ladder_run_jumped = False
         self._ladder_no_more_runjump = False  # 重置:新一把梯允许跑跳  # 25点位是否已跑跳过（防止重复跳）
         self._ladder_no_more_runjump = False  # 跑跳失败后禁止再跑跳,直接直跳(用户2026-09-27)
@@ -6093,18 +6060,18 @@ class MinimapRouteRecorder:
         # 用户2026-09-11:跳前点基线已解决下跳腾空误判高低,删掉旧3秒冻结;防重复下跳靠descend状态机自身(进descend后不再走入口)
         # 用户2026-09-10:跳过旧goto_x(小碎步走到怪正头上才跳),进descend原地直接按住↓下跳;
         # first_jump满窗口Y没变(跳不了)会自动转to_ladder走梯子,不需要先水平对齐怪
-        self._desc_phase = 'pre_wait'   # 用户2026-09-16:下跳前置——停主线松键等150ms再跳
+        self._desc_phase = 'pre_wait'   # 影子法(用户2026-09-28):下跳前置——停主线松键等150ms站稳
         self._desc_phase_t = now_ms
         self._desc_base_y = py
         self._desc_ref_px = px
         self._desc_stall_t = 0
         self._desc_jumped = False
-        self._desc_j2 = False
         self._desc_leap_dir = 1
-        self._desc_j2_pre = False
-        # 基准在"决定下跳、人还站定"时就记(用户2026-09-10:原在第二跳空中记会取到无效屏幕Y=0/动作抖动,导致Δ=0误判没下去→每次都转梯子对齐)
-        self._desc_pre_leap_sy = self._player_screen_pos[1] if self._player_screen_pos else None  # 站定人物特征屏幕Y
-        self._desc_pre_leap_my = py     # 站定小地图世界Y基准(不受镜头滚动影响,主判据)
+        self._desc_jump_t = 0            # 影子法:本次下跳起跳时刻(0=还没跳)
+        self._desc_drop_try = 1          # 影子法:直接下跳第几次(2次没下去转梯子)
+        self._desc_grab_realign = 0      # 影子法:梯位再对齐次数
+        self._desc_side_leap_n = 0       # 影子法:横跳离梯次数(补跳上限)
+        self._desc_mm_no_pick_t = 0
         self._climb_still_since = 0
         self._climb_top_hold = False
         if VK_DOWN not in self._random_move_keys:
@@ -6140,28 +6107,83 @@ class MinimapRouteRecorder:
         return False
 
 
+# -*- coding: utf-8 -*-
+# 影子法下行状态机(由拼接脚本合入主文件,拼完即删)
+    def _dot_moving_state(self):
+        """影子光点运动状态(用户2026-09-28影子法定稿):返回'down'/'up'/'left'/'right'/'still'/'unknown'。
+        以光点最近一拍(DOT_SHADOW_LAG_MS净位移)为准——向下跳成功时光点Y增大=down;落地静止=still。
+        光点或影子无效='unknown'(挂起不判)。"""
+        _sh = getattr(self, '_dot_shadow_pos', None)
+        _dot = getattr(self, '_player_map_pos', None)
+        if _sh is None or _dot is None:
+            return 'unknown'
+        _dx = float(_dot[0]) - float(_sh[0])
+        _dy = float(_dot[1]) - float(_sh[1])
+        _dead = DOT_SHADOW_DEAD_PX
+        if abs(_dx) < _dead and abs(_dy) < _dead:
+            return 'still'
+        if abs(_dy) >= abs(_dx):
+            return 'down' if _dy > 0 else 'up'
+        return 'right' if _dx > 0 else 'left'
+
+    def _desc_ladder_side_blocked(self, px, py, side):
+        """下行避梯选位(用户2026-09-28):side侧(1=右/-1=左)距光点X在DESC_AVOID_LADDER_MM内、
+        且梯身竖向覆盖光点Y附近(梯顶<=py+6<=梯底或接近)=该侧有梯,横跳/下跳落位会巴梯。
+        返回True=该侧有梯要避开。"""
+        for _ld in (getattr(self, 'ladders', None) or []):
+            try:
+                _lx = float(_ld.get('x', 0))
+                _t = float(_ld.get('y_top', 0))
+                _b = float(_ld.get('y_bottom', 0))
+            except (TypeError, ValueError):
+                continue
+            if _lx == 0 and _t == 0 and _b == 0:
+                continue
+            _dxl = (_lx - float(px)) * side   # 正=该侧方向上的距离
+            if 0 < _dxl <= DESC_AVOID_LADDER_MM and (_t - 8) <= py <= (_b + 8):
+                return True   # 该侧半径内有梯且梯身覆盖人物高度
+        return False
+
+    def _pick_desc_side(self, px=None, py=None):
+        """下行横跳方向(用户2026-09-28影子法定稿重写):避开有梯子的一侧——右有梯选左,左有梯选右,
+        两侧都有梯或都没有=随机(两侧都有时横跳本身会解挂,由后续后脑检测兜底)。"""
+        _r = self._desc_ladder_side_blocked(px, py, 1)
+        _l = self._desc_ladder_side_blocked(px, py, -1)
+        if _r and not _l:
+            _d = -1
+        elif _l and not _r:
+            _d = 1
+        else:
+            _d = random.choice([-1, 1])
+        _debug_log('[下行] 横跳侧选择:右梯=%s 左梯=%s → 向%s' % (
+            '有' if _r else '无', '有' if _l else '无', '右' if _d > 0 else '左'))
+        return _d
+
+# -*- coding: utf-8 -*-
+# 影子法下行(替换段2:mm对位+新状态机主体;由拼接脚本合入)
     def _enter_desc_mm_ladder(self, px, py, now_ms):
-        """方式二入口(实心台方式一跳不下):改用小地图光点+录制梯选一把【向下】的梯,进mm_to_lad对位(用户2026-09-21,删白框lad_scr)。"""
+        """方式二入口(实心台直接跳不下,用户2026-09-28影子法):用小地图光点+录制梯选下行梯,
+        mm_to_lad对位(复用_desc_horiz_walk),对齐后进dot_grab压↓200ms影子判抓住。"""
         self._release_move_conflicts()
-        self._key_up(VK_LEFT); self._key_up(VK_RIGHT); self._key_up(VK_DOWN)
+        self._desc_grab_realign = 0
+        self._desc_side_leap_n = 0
         self._desc_phase = 'mm_to_lad'
         self._desc_phase_t = now_ms
         self._desc_mm_no_pick_t = 0
-        self._desc_side_leap_n = 0   # 每次进方式二清零侧跳补跳计数(用户2026-09-22)
-        self._ladder_precise_mode = True   # 方式二期间停锁怪(识怪照开),出段_reset_climb/落地重开
-        _debug_log("[下行·方式二] 转小地图找下行梯(光点%.0f,%.0f)" % (px, py))
+        _debug_log("[下行·影子法] 转梯子:小地图选下行梯对位")
 
     def _desc_mm_ladder_tick(self, px, py, now_ms):
         """方式二小地图选梯+对位:选下行梯(梯顶Y差<=LADDER_MM_END_TOL、梯身下通)钉x;对齐<=LADDER_MM_DESC_ALIGN_TOL
-        直接lad_grab按↓;没到按住朝梯走(_desc_horiz_walk带stall);连续选不到/走不到=放弃回主线打怪,不死等不发呆。"""
+        进dot_grab压↓影子判;没到按住朝梯走(_desc_horiz_walk带stall);连续选不到/走不到=放弃回主线。"""
         ld = self._pick_ladder_minimap(getattr(self, 'ladders', None), px, py, -1, None)
         if ld is None:
             self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
             if getattr(self, '_desc_mm_no_pick_t', 0) == 0:
                 self._desc_mm_no_pick_t = now_ms
             elif now_ms - self._desc_mm_no_pick_t >= LADDER_MM_NOPICK_TIMEOUT_MS:
-                _debug_log("[下行·方式二] 连续%.0fms小地图无下行合格梯,放弃回主线" % LADDER_MM_NOPICK_TIMEOUT_MS)
+                _debug_log("[下行·影子法] 连续%.0fms小地图无下行合格梯,放弃回主线" % LADDER_MM_NOPICK_TIMEOUT_MS)
                 self._rlog("小地图找不到下行梯,回主线打怪", LOG_RED, log='exception')
+                self._desc_grab_realign = 0; self._desc_side_leap_n = 0; self._desc_drop_try = 1
                 self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS
                 self._reset_climb(); self._decide_climb_fail_action()
             return False
@@ -6172,287 +6194,192 @@ class MinimapRouteRecorder:
         dx = float(ld['x']) - float(px)
         if abs(dx) <= LADDER_MM_DESC_ALIGN_TOL:
             self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
-            _debug_log("[下行·方式二] 光点对齐梯X(差%.1f<=%d),直接按↓抓梯" % (dx, LADDER_MM_DESC_ALIGN_TOL))
-            self._enter_desc_lad_grab(py, now_ms)
+            _debug_log("[下行·影子法] 光点对齐梯X(差%.1f<=%d),压↓%dms影子判抓梯" % (
+                dx, LADDER_MM_DESC_ALIGN_TOL, DESC_DOT_GRAB_HOLD_MS))
+            self._desc_phase = 'dot_grab'   # 影子法:压↓200ms后判down
+            self._desc_phase_t = now_ms
+            self._desc_base_y = py
+            if VK_DOWN not in self._random_move_keys:
+                self._key_down(VK_DOWN)
             return False
 
         def _on_stall():
-            _debug_log("[下行·方式二] 小地图走不到梯X,放弃回主线")
+            _debug_log("[下行·影子法] 小地图走不到梯X,放弃回主线")
             self._rlog("下行走不到梯子,回主线打怪", LOG_RED, log='exception')
+            self._desc_grab_realign = 0; self._desc_side_leap_n = 0; self._desc_drop_try = 1
             self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS
             self._reset_climb(); self._decide_climb_fail_action()
-        self._desc_horiz_walk(float(ld['x']), px, now_ms, _on_stall, "[下行·方式二] 小地图朝下行梯移动,走不到放弃")
+
+        self._desc_horiz_walk(float(ld['x']), px, now_ms, _on_stall,
+                              "[下行·影子法] 走向梯X连续%dms没靠近,放弃" % DESC_GOTO_STALL_MS)
         return False
 
-    def _enter_desc_lad_grab(self, py, now_ms):
-        """方式二步骤2:梯子正上方按住↓,观察DESC_LAD_GRAB_MS看Y有没有变大(抓住梯子下滑)。"""
-        self._desc_phase = 'lad_grab'
-        self._desc_phase_t = now_ms
-        self._desc_base_y = py
-        self._desc_jumped = False
-        if VK_DOWN not in self._random_move_keys:
-            self._key_down(VK_DOWN)
-
-    def _enter_desc_lad_slide(self, py, now_ms):
-        """方式二步骤3:已抓住梯子(Y变大),继续按住↓下滑DESC_LAD_SLIDE_MS再侧跳离梯(不沿梯到底)。"""
-        self._desc_phase = 'lad_slide'
-        self._desc_phase_t = now_ms
-        if VK_DOWN not in self._random_move_keys:
-            self._key_down(VK_DOWN)
-
-    def _pick_desc_side(self, px=None, py=None):
-        """下行横跳/离梯侧跳方向(用户2026-09-23定稿):纯随机。
-        旧"错开梯子"系误判——人都在梯子上了不可能跳回另一把梯;侧跳只为带初速度离台,方向随机即可,
-        抓不住/没甩开由check_drop/lad_fall_wait的后脑观察兜底,不在选向上纠结。px/py保留签名兼容调用。"""
-        _d = random.choice([-1, 1])
-        _debug_log('[下行] 侧跳方向随机=%s' % ('右' if _d > 0 else '左'))
-        return _d
-
-    def _enter_desc_fall(self, py, now_ms):
-        """阶段fall：直接下跳已确认Y变大后的自由落体——不按任何键(用户2026-09-09:跳后即松↓不长按),
-        只等三背景点连续静止=落地站稳。"""
-        self._desc_phase = 'fall'
-        self._desc_base_y = py
-        self._climb_still_since = 0
-        self._climb_top_hold = False
-        self._desc_land_y = py       # Y稳定落地判据基准(2026-09-10:与三背景点静止取或,落地更快接下一动作)
-        self._desc_land_t = now_ms
-        self._key_up(VK_DOWN)   # 进自由落体即确保↓已松(直立下落,key_up幂等)
-
-
     def _descend_step(self, px, py, now_ms):
-        """下行状态机(用户2026-09-10最终定稿,只两种方式,第三种两小层/沿梯到底已删)。px/py=人物小地图坐标。
-        方式一 first_jump:压200第一跳→松随机侧键100→第二跳→Y变大转fall自由落体(背景静止/Y稳定落地)。
-        方式二(直接跳不了):to_ladder走到梯正上方<=10→lad_grab按500确认Y变大→lad_slide再按1秒
-          →lad_leap随机侧100+跳离梯→lad_fall_wait固定1秒回主线;lad_grab满500没Y变大=抓不住回主线,不补跳。"""
+        """下行状态机(用户2026-09-28影子法定稿·整体重写):全程用光点影子判"向下/静止",不用特征Y不用固定sleep。
+        ①direct_drop:压↓100ms→跳→松↓→300ms后影子判:down→dot_fall(still=落地重锁开打);
+          没down→再跳一次;两跳都没下去=实心台→转梯子。②mm_to_lad:对齐梯→压↓200ms→影子判down=抓住梯
+          →立即横跳(压怪侧100ms+跳)→200ms后查后脑:无后脑=离梯,等影子still落地重锁;有后脑=还挂梯再横跳;
+          压↓后没down=梯位没找准→再对齐。px/py=人物小地图坐标。"""
         _jk = self._get_fight_config().get("jump_key", "")
         ph = self._desc_phase
 
-        # ①first_jump【方式一】前置:停主线→松攻击和左右键→等150ms→再开始跳(用户2026-09-16)
+        # ①pre_wait 前置(纪律:进_descend已关锁清锁关主线松键;这里等150ms站稳)
         if ph == 'pre_wait':
-            self._key_up(VK_LEFT)
-            self._key_up(VK_RIGHT)
-            self._key_up(VK_DOWN)
+            self._key_up(VK_LEFT); self._key_up(VK_RIGHT); self._key_up(VK_DOWN)
             if now_ms - self._desc_phase_t >= 150:
-                self._desc_phase = 'first_jump'
+                self._desc_phase = 'direct_drop'
                 self._desc_phase_t = now_ms
+                self._desc_jump_t = 0
+                self._desc_drop_try = 1
+                _debug_log("[下行·影子法] 站稳,开始直接下跳(第1次)")
             return False
 
-        # ②first_jump:压↓150ms→按跳→等500ms→松↓→侧键150ms→第二跳
-        if ph == 'first_jump':
-            if not self._desc_jumped:
-                # 子步1:压↓150ms→按跳(同时压↓)
+        # ②direct_drop 直接下跳(不横跳)
+        if ph == 'direct_drop':
+            self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
+            if self._desc_jump_t == 0:
+                # 子步1:压↓满100ms→按跳→松↓(用户时序)
                 if VK_DOWN not in self._random_move_keys:
                     self._key_down(VK_DOWN)
-                if now_ms - self._desc_phase_t >= DESC_DIRECT_DOWN_HOLD_MS:
+                if now_ms - self._desc_phase_t >= DESC_DOT_DOWN_HOLD_MS:
                     if _jk:
-                        self._press_game_key(_jk, duration=150)   # 第一跳:向下穿台(用户2026-09-16:80太短没反应,改150)
-                    self._desc_jumped = True
-                    self._desc_jump_t = now_ms
-                    _debug_log("[下行·方式一] ↓压%.0fms按跳,等%dms松↓" % (
-                        DESC_DIRECT_DOWN_HOLD_MS, DESC_FIRST_JUMP_WAIT_MS))
-            elif not getattr(self, '_desc_j2_pre', False):
-                # 子步2:跳后等500ms→松↓→按侧键(怪在哪边选哪边)
-                if now_ms - self._desc_jump_t >= DESC_FIRST_JUMP_WAIT_MS:
-                    self._desc_j2_pre = True
-                    self._desc_side_t = now_ms
+                        self._press_game_key(_jk, duration=120)
                     if VK_DOWN in self._random_move_keys:
-                        self._key_up(VK_DOWN)  # 松↓
-                    self._desc_leap_dir = self._pick_desc_side(px, py)
-                    _svk = VK_RIGHT if self._desc_leap_dir > 0 else VK_LEFT
-                    _ovk = VK_LEFT if _svk == VK_RIGHT else VK_RIGHT
-                    if _ovk in self._random_move_keys:
-                        self._key_up(_ovk)
-                    if _svk not in self._random_move_keys:
-                        self._key_down(_svk)
-                    _debug_log("[下行·方式一] 跳后等%dms松↓→按向%s键%dms" % (
-                        DESC_FIRST_JUMP_WAIT_MS, "右" if self._desc_leap_dir > 0 else "左", DESC_DIRECT_SIDE_MS))
-            elif not getattr(self, '_desc_j2', False):
-                # 子步3:侧键150ms→第二跳→松方向键
-                if now_ms - self._desc_side_t >= DESC_DIRECT_SIDE_MS:
-                    if _jk:
-                        self._press_game_key(_jk, duration=150)   # 第二跳(横跳,用户2026-09-16:改150)
-                    self._desc_j2 = True
-                    self._desc_phase = 'check_drop'
+                        self._key_up(VK_DOWN)
+                    self._desc_jump_t = now_ms
+                    _debug_log("[下行·影子法] ↓压%dms+跳+松↓,等%dms看影子" % (
+                        DESC_DOT_DOWN_HOLD_MS, DESC_DOT_CHECK_MS))
+            elif now_ms - self._desc_jump_t >= DESC_DOT_CHECK_MS:
+                # 子步2:跳后300ms影子判
+                _mv = self._dot_moving_state()
+                if _mv == 'down':
+                    _debug_log("[下行·影子法] 跳后影子=down,下落中,转落地观察")
+                    self._desc_phase = 'dot_fall'
                     self._desc_phase_t = now_ms
-                    self._key_up(VK_LEFT)
-                    self._key_up(VK_RIGHT)
-                    _debug_log("[下行·方式一] 侧键%dms→第二跳+松键,等%dms判Y增大%dpx" % (
-                        DESC_DIRECT_SIDE_MS, DESC_DROP_CHECK_MS, DESC_DROP_DY))
+                elif _mv == 'unknown':
+                    pass   # 光点丢失:挂起等下一拍
+                else:
+                    _n = getattr(self, '_desc_drop_try', 1)
+                    if _n < DESC_DOT_MAX_TRY:
+                        self._desc_drop_try = _n + 1
+                        self._desc_phase_t = now_ms
+                        self._desc_jump_t = 0
+                        _debug_log("[下行·影子法] 跳后影子=%s(没下去),第%d次再下跳" % (_mv, _n + 1))
+                    else:
+                        _debug_log("[下行·影子法] 两跳都没下去(影子%s)=实心台,转梯子" % _mv)
+                        self._rlog("下跳两次没下去=实心台,转梯子", LOG_RED, log='exception')
+                        self._desc_drop_try = 1
+                        self._enter_desc_mm_ladder(px, py, now_ms)
             return False
 
-        # ①.5 check_drop【方式一·观察窗判定(用户2026-09-10晚:任意位置先直接跳、别动不动对齐梯子)】基准用_enter_descend站定值。
-        #   两跳后300ms起逐帧比"人物Y比站定基准增大"(屏幕特征Y或小地图世界Y任一,世界Y不受镜头影响更可靠):
-        #   一旦增大=确实跳下→fall自由落体;直到900ms观察窗满仍纹丝不动=实心台真跳不下去→才转方式二找梯子。窗内不按任何键。
-        if ph == 'check_drop':
-            self._key_up(VK_DOWN)
-            self._key_up(VK_LEFT)
-            self._key_up(VK_RIGHT)
-            _el = now_ms - self._desc_phase_t
-            _cur_sy = self._player_screen_pos[1] if self._player_screen_pos else None
-            # 屏幕Y判据要求站定基准有效(非None/非0,排除进入时就没特征);世界Y(站定py→当前py)为主判据,不受镜头影响
-            _dsy = (_cur_sy - self._desc_pre_leap_sy) if (
-                _cur_sy is not None and self._desc_pre_leap_sy) else None
-            _dmy = py - self._desc_pre_leap_my
-            # 用户2026-09-16:删除小地图世界Y判定(_dmy>=DESC_DROP_DY_DY_MAP),只看主窗口人物特征Y
-            _moved = (_dsy is not None and _dsy >= DESC_DROP_DY)
-            _cbv, _cbs = self._back_head_visible()   # 方式一横跳后查后脑(用户2026-09-22:横跳本就解挂梯,仍见后脑=人还巴梯;只记日志不改时序)
-            if _el >= DESC_DROP_CHECK_MS and _moved:
-                # 观察窗内一旦Y往下增大=确实跳下,立刻自由落体等落地(直接跳成功,绝不去对齐梯子)
-                _debug_log("[下行·方式一] 直接下跳Y增大(屏幕Δ%s/世界Δ%.0f,起%.0fms,后脑%.2f/%s)=穿到下一层,自由落体" % (
-                    ("%.0f" % _dsy) if _dsy is not None else "NA", _dmy, _el, _cbs, ('在' if _cbv else '无')))
-                self._enter_desc_fall(py, now_ms)
-            elif _el >= DESC_DROP_WAIT_MAX_MS:
-                # 实心台横跳不下去:用户2026-09-16——方式一失败后再重复一次,第二次还失败才转方式二找梯子
-                if not getattr(self, '_desc_first_jump_retried', False):
-                    self._desc_first_jump_retried = True
-                    self._desc_jumped = False
-                    self._desc_j2 = False
-                    self._desc_j2_pre = False
-                    self._desc_phase = 'pre_wait'
-                    self._desc_phase_t = now_ms
-                    self._desc_pre_leap_sy = self._player_screen_pos[1] if self._player_screen_pos else None
-                    self._desc_pre_leap_my = py
-                    _debug_log("[下行·方式一] 第一次没下去,重复一次方式一")
-                    return False
-                # 第二次还失败,转方式二找梯子
-                _debug_log("[下行·方式一] 观察%.0fms Y始终没增大(屏幕Δ%s/世界Δ%.0f,后脑%.2f/%s)=实心台/仍挂梯,直接主窗口找梯(不走小地图)" % (
-                    _el, ("%.0f" % _dsy) if _dsy is not None else "NA", _dmy, _cbs, ('在=挂梯' if _cbv else '无')))
-                self._rlog("下台阶横跳%.0fms没下去,转主窗口找梯子" % _el, LOG_RED, log='exception')
-                self._enter_desc_mm_ladder(px, py, now_ms)
-            # 其余(未到最早判定/还在腾空下落途中):不按任何键继续观察
+        # ③dot_fall 落地观察(影子still=到底层):不按任何键
+        if ph == 'dot_fall':
+            self._key_up(VK_DOWN); self._key_up(VK_LEFT); self._key_up(VK_RIGHT)
+            _mv = self._dot_moving_state()
+            if _mv == 'still':
+                _debug_log("[下行·影子法] 影子转still=到底层,清锁重锁开打")
+                self._rlog("影子法:下跳落地,重锁开打", log='behavior')
+                self._desc_drop_try = 1
+                self._desc_grab_realign = 0; self._desc_side_leap_n = 0
+                self._reset_climb()
+                self._reset_lock_after_arrival('影子法下跳落地')
+            elif now_ms - self._desc_phase_t > DESC_DOT_FALL_TIMEOUT_MS:
+                _debug_log("[下行·影子法] 落地观察%.0fms兜底(影子=%s),按落地收尾" % (DESC_DOT_FALL_TIMEOUT_MS, _mv))
+                self._rlog("下跳落地超时兜底,回主线", LOG_RED, log='exception')
+                self._desc_drop_try = 1
+                self._desc_grab_realign = 0; self._desc_side_leap_n = 0
+                self._reset_climb()
+                self._reset_lock_after_arrival('影子法下跳超时')
             return False
 
-        # ②mm_to_lad【方式二·小地图选梯+对位(用户2026-09-21定稿,删白框lad_scr精对位)】实心台直接跳不下:
-        #   每帧最新光点选下行合格梯(梯顶与光点Y差<=LADDER_MM_END_TOL且梯身下通)钉x;对齐|x差|<=LADDER_MM_DESC_ALIGN_TOL
-        #   松键直接lad_grab按↓;没到按住走;走不到(stall)/连续选不到=放弃回主线,不发呆不死等。
+        # ④mm_to_lad 走到梯位对齐
         if ph == 'mm_to_lad':
             return self._desc_mm_ladder_tick(px, py, now_ms)
 
-        # ③lad_grab【方式二·步骤2】梯正上方按住↓,500ms内Y变大=抓住梯子下滑→lad_slide;满500没变=抓不住,回主线(不补跳/删除两小层)
-        if ph == 'lad_grab':
+        # ⑤dot_grab 梯位压↓200ms→影子判down
+        if ph == 'dot_grab':
             if VK_DOWN not in self._random_move_keys:
                 self._key_down(VK_DOWN)
-            if py > self._desc_base_y + DESC_Y_MOVE_TOL:
-                _debug_log("[下行·方式二] 梯位按↓Y变大(%.0f→%.0f)=抓住梯子,继续按↓下滑%dms" % (
-                    self._desc_base_y, py, DESC_LAD_SLIDE_MS))
-                self._enter_desc_lad_slide(py, now_ms)
+            if now_ms - self._desc_phase_t < DESC_DOT_GRAB_HOLD_MS:
                 return False
-            if now_ms - self._desc_phase_t >= DESC_LAD_GRAB_MS:
-                _debug_log("[下行·方式二] 梯位按↓%dms Y仍没变=抓不住,松↓回主线(不补跳/不死磕)" % DESC_LAD_GRAB_MS)
-                self._rlog("梯子位下不去,回主线重选", LOG_RED, log='behavior')
-                if VK_DOWN in self._random_move_keys:
-                    self._key_up(VK_DOWN)
-                self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS
-                self._reset_climb()
-                self._decide_climb_fail_action()
-            return False
-
-        # ④lad_slide【方式二·步骤3】抓住后继续按住↓下滑1秒,到点松↓随机选左/右进lad_leap侧跳离梯
-        if ph == 'lad_slide':
-            if VK_DOWN not in self._random_move_keys:
-                self._key_down(VK_DOWN)
-            if now_ms - self._desc_phase_t >= DESC_LAD_SLIDE_MS:
-                if VK_DOWN in self._random_move_keys:
-                    self._key_up(VK_DOWN)
-                self._desc_leap_dir = self._pick_desc_side(px, py)   # 用户2026-09-22:离梯侧跳也错开梯子,别又跳回另一把梯
-                _svk = VK_RIGHT if self._desc_leap_dir > 0 else VK_LEFT
+            _mv = self._dot_moving_state()
+            if _mv == 'down':
+                # 抓住梯子在滑=立即横跳(用户:压左/右100ms后按跳,方向=怪在哪按哪边)
+                _t = getattr(self, '_combat_locked_target', None) or getattr(self, '_combat_last_target_pos', None)
+                if _t is not None and abs(float(_t[0]) - float(px)) > 1.0:
+                    _d = 1 if float(_t[0]) > float(px) else -1
+                else:
+                    _d = self._pick_desc_side(px, py)   # 无目标参照:避梯选侧
+                self._desc_leap_dir = _d
+                _svk = VK_RIGHT if _d > 0 else VK_LEFT
+                self._key_up(VK_DOWN)
                 if _svk not in self._random_move_keys:
                     self._key_down(_svk)
-                self._desc_phase = 'lad_leap'
+                self._desc_phase = 'dot_leap'
                 self._desc_phase_t = now_ms
                 self._desc_jumped = False
-                _debug_log("[下行·方式二] 下滑%dms够,随机向%s侧跳离梯" % (
-                    DESC_LAD_SLIDE_MS, "右" if self._desc_leap_dir > 0 else "左"))
-            return False
-
-        # ⑤lad_leap【方式二·步骤4】随机侧键按满100ms时按跳(带侧向速度离梯),随即松左右、进lad_fall_wait
-        if ph == 'lad_leap':
-            _svk = VK_RIGHT if getattr(self, '_desc_leap_dir', 1) > 0 else VK_LEFT
-            _ovk = VK_LEFT if _svk == VK_RIGHT else VK_RIGHT
-            if _ovk in self._random_move_keys:
-                self._key_up(_ovk)
-            if _svk not in self._random_move_keys:
-                self._key_down(_svk)
-            if not self._desc_jumped and now_ms - self._desc_phase_t >= DESC_LAD_LEAP_SIDE_MS:
-                if _jk:
-                    self._press_game_key(_jk, duration=120)
-                self._desc_jumped = True
-                self._key_up(VK_LEFT)
-                self._key_up(VK_RIGHT)   # 侧按100ms给个初速度即可,跳后松侧键避免落地还在横走
-                self._desc_phase = 'lad_fall_wait'
-                self._desc_phase_t = now_ms
-                _debug_log("[下行·方式二] 侧向%dms+跳离梯,固定%dms后回主线" % (DESC_LAD_LEAP_SIDE_MS, DESC_LAD_FALL_WAIT_MS))
-            return False
-
-        # ⑥lad_fall_wait【方式二·步骤5】侧跳离梯后自由落体,固定等1000ms直接回主线打怪(用户定稿:数1000ms开主线,不判背景、不沿梯到底)
-        if ph == 'lad_fall_wait':
-            self._key_up(VK_DOWN)
-            self._key_up(VK_LEFT)
-            self._key_up(VK_RIGHT)
-            if now_ms - self._desc_phase_t >= DESC_LAD_FALL_WAIT_MS:
-                # 用户2026-09-22:横跳(侧跳)本身就是解挂梯动作,侧跳后查后脑勺——还在=没甩开梯子,回lad_leap再横跳,
-                # 最多补DESC_LAD_LEAP_MAX次;不在=已离梯,直接回主线重锁。补满仍挂梯不死磕回主线(怪在下方会自然再触发下行)
-                _bv2, _bsc2 = self._back_head_visible()
-                _n2 = getattr(self, '_desc_side_leap_n', 0)
-                if _bv2 and _n2 < DESC_LAD_LEAP_MAX:
-                    self._desc_side_leap_n = _n2 + 1
-                    self._desc_leap_dir = self._pick_desc_side(px, py)
-                    _svk2 = VK_RIGHT if self._desc_leap_dir > 0 else VK_LEFT
-                    self._key_up(VK_LEFT); self._key_up(VK_RIGHT); self._key_up(VK_DOWN)
-                    if _svk2 not in self._random_move_keys:
-                        self._key_down(_svk2)
-                    self._desc_phase = 'lad_leap'
+                self._desc_side_leap_n = getattr(self, '_desc_side_leap_n', 0) + 1
+                _debug_log("[下行·影子法] 梯上影子=down,横跳离梯(朝%s,第%d次)" % (
+                    '怪侧' if _t is not None else '避梯侧', self._desc_side_leap_n))
+            elif _mv == 'unknown':
+                pass
+            else:
+                # 没down=梯位没找准,再对齐一次(上限后放弃)
+                _n = getattr(self, '_desc_grab_realign', 0)
+                if _n < DESC_DOT_REALIGN_MAX:
+                    self._desc_grab_realign = _n + 1
+                    self._key_up(VK_DOWN)
+                    _debug_log("[下行·影子法] 梯位压↓影子=%s(没抓住),第%d次再对齐" % (_mv, _n + 1))
+                    self._desc_phase = 'mm_to_lad'
                     self._desc_phase_t = now_ms
-                    self._desc_jumped = False
-                    _debug_log("[下行·方式二] 侧跳后%dms仍见后脑(%.2f)=没甩开梯子,补第%d次横跳" % (
-                        DESC_LAD_FALL_WAIT_MS, _bsc2, self._desc_side_leap_n))
-                    self._rlog("下梯侧跳没甩开,补横跳第%d次" % self._desc_side_leap_n, log='behavior')
-                    return False
-                if _bv2:
-                    _debug_log("[下行·方式二] 补%d次横跳仍见后脑挂梯,不死磕回主线重锁" % DESC_LAD_LEAP_MAX)
-                    self._rlog("下梯侧跳%d次仍挂梯,回主线重锁" % DESC_LAD_LEAP_MAX, LOG_RED, log='exception')
                 else:
-                    _debug_log("[下行·方式二] 侧跳离梯满%dms后脑已消失=离梯,回主线打怪" % DESC_LAD_FALL_WAIT_MS)
-                    self._rlog("借梯侧跳落下,回主线打怪", log='behavior')
-                self._reset_climb()
-                self._reset_lock_after_arrival('借梯侧跳落下')
+                    _debug_log("[下行·影子法] 对齐%d次抓不住梯,放弃回主线" % DESC_DOT_REALIGN_MAX)
+                    self._rlog("梯位抓不住(%d次),回主线重选" % DESC_DOT_REALIGN_MAX, LOG_RED, log='exception')
+                    self._desc_grab_realign = 0; self._desc_side_leap_n = 0; self._desc_drop_try = 1
+                    if VK_DOWN in self._random_move_keys:
+                        self._key_up(VK_DOWN)
+                    self._climb_fail_pause_until = now_ms + LADDER_FAIL_REENTER_MS
+                    self._reset_climb()
+                    self._decide_climb_fail_action()
             return False
 
-        # ⑦fall【方式一自由落体】两跳离台后不按任何键;三背景点连续静止 或 光点Y停止下降(取或,先到先落地)→清锁回主线
-        # (方式一first_jump已确认Y变大=确实下落;旧"沿梯一直按↓到底hold"已按用户2026-09-10删除,方式二改为侧跳离梯)
-        if ph == 'fall':
-            _arrived = False
-            _why = ""
-            if self._raw_frame is not None and self._player_screen_pos:
-                _fh, _fw = self._raw_frame.shape[:2]
-                _centers = self._pick_climb_boxes(self._player_screen_pos, _fh, _fw)
-                _n_still, _n_valid = self._climb_boxes_still(self._raw_frame, _centers)
-                if _n_still >= 1:
-                    if self._climb_still_since == 0:
-                        self._climb_still_since = now_ms
-                    elif now_ms - self._climb_still_since >= CLIMB_STILL_MS:
-                        _arrived = True
-                        _why = "自由落体三背景点静止%.0fms落地" % CLIMB_STILL_MS
-                elif _n_valid >= 1:
-                    self._climb_still_since = 0   # 还在下落(背景在动),清零
-                # n_valid==0空帧:保持计时不打断
-            # 用户2026-09-23:落地判据只留①三背景点连续静止;②下行总超时3s兜底(删旧"光点Y180ms不下降"判据)。
-            _cdur_d = getattr(self, '_climb_ladder_duration', None)  # 下行不爬录制梯,正常None→回退3s;有值按+2s
-            _climb_to_d = int((float(_cdur_d) + 2.0) * 1000) if isinstance(_cdur_d, (int, float)) and float(_cdur_d) >= 1.0 else 3000
-            if not _arrived and self._climb_action_time and now_ms - self._climb_action_time > _climb_to_d:
-                _arrived = True
-                _why = "下行总超时%dms兜底" % _climb_to_d
-            if _arrived:
-                self._key_up(VK_DOWN)
-                _debug_log("[下行] %s(Y=%.0f),落地接下一动作" % (_why, py))
-                if "超时" in str(_why):
-                    self._rlog("下台保命超时兜底:%s(强制松键接下一动作)" % _why, LOG_RED, log='exception')
+        # ⑥dot_leap 横跳:压方向满100ms→按跳→松方向→200ms后查后脑
+        if ph == 'dot_leap':
+            _svk = VK_RIGHT if getattr(self, '_desc_leap_dir', 1) > 0 else VK_LEFT
+            if not self._desc_jumped:
+                if _svk not in self._random_move_keys:
+                    self._key_down(_svk)
+                if now_ms - self._desc_phase_t >= DESC_DOT_LEAP_SIDE_MS:
+                    if _jk:
+                        self._press_game_key(_jk, duration=120)
+                    self._desc_jumped = True
+                    self._desc_phase_t = now_ms
+                    self._key_up(VK_LEFT); self._key_up(VK_RIGHT); self._key_up(VK_DOWN)
+                    _debug_log("[下行·影子法] 方向%dms+跳离梯,等%dms查后脑" % (
+                        DESC_DOT_LEAP_SIDE_MS, DESC_DOT_BACK_CHECK_MS))
+            elif now_ms - self._desc_phase_t >= DESC_DOT_BACK_CHECK_MS:
+                _bv, _bs = self._back_head_visible()
+                if not _bv:
+                    _debug_log("[下行·影子法] 横跳后无后脑=离梯下落,等影子still落地")
+                    self._desc_phase = 'dot_fall'
+                    self._desc_phase_t = now_ms
+                elif getattr(self, '_desc_side_leap_n', 0) >= DESC_LAD_LEAP_MAX:
+                    _debug_log("[下行·影子法] 横跳%d次仍见后脑(%.2f)=挂梯,放弃回主线" % (
+                        self._desc_side_leap_n, _bs))
+                    self._rlog("横跳%d次仍挂梯,回主线重锁" % self._desc_side_leap_n, LOG_RED, log='exception')
+                    self._desc_grab_realign = 0; self._desc_side_leap_n = 0; self._desc_drop_try = 1
+                    self._key_up(VK_LEFT); self._key_up(VK_RIGHT); self._key_up(VK_DOWN)
+                    self._reset_climb()
+                    self._reset_lock_after_arrival('横跳挂梯放弃')
                 else:
-                    self._rlog("%s,落地接下一动作" % _why, log='behavior')
-                self._reset_climb()
-                self._reset_lock_after_arrival('下行自由落')
+                    _debug_log("[下行·影子法] 横跳后仍见后脑(%.2f)=挂梯,回压↓再横跳" % _bs)
+                    self._desc_phase = 'dot_grab'   # 再横跳:回压↓等影子down
+                    self._desc_phase_t = now_ms
             return False
+
+        # ⑦兜底:未知相位复位(防旧字段/异常相位卡死)
+        _debug_log("[下行·影子法] 未知相位%s,复位回主线" % ph)
+        self._reset_climb()
         return False
 
     def _climb_state_machine(self, px, py, now_ms):
